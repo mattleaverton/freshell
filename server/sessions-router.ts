@@ -6,6 +6,7 @@ import { CodingCliProviderSchema } from '../shared/ws-protocol.js'
 import { startPerfTimer } from './perf-logger.js'
 import { logger } from './logger.js'
 import { cascadeSessionRenameToTerminal } from './rename-cascade.js'
+import { paginateProjects } from './session-pagination.js'
 import type { TerminalMeta } from './terminal-metadata-service.js'
 import type { SessionMetadataStore } from './session-metadata-store.js'
 
@@ -93,8 +94,59 @@ export function createSessionsRouter(deps: SessionsRouterDeps): Router {
     }
   })
 
-  router.get('/sessions', async (_req, res) => {
-    res.json(codingCliIndexer.getProjects())
+  router.get('/sessions', async (req, res) => {
+    const projects = codingCliIndexer.getProjects()
+    // Reject arrays (e.g. ?limit=1&limit=2) — only single string values accepted
+    if (typeof req.query.limit !== 'string' && req.query.limit !== undefined) {
+      return res.status(400).json({ error: 'Invalid limit parameter' })
+    }
+    if (typeof req.query.before !== 'string' && req.query.before !== undefined) {
+      return res.status(400).json({ error: 'Invalid before parameter' })
+    }
+    if (typeof req.query.beforeId !== 'string' && req.query.beforeId !== undefined) {
+      return res.status(400).json({ error: 'Invalid beforeId parameter' })
+    }
+    const limitStr = req.query.limit as string | undefined
+    const beforeStr = req.query.before as string | undefined
+    const beforeIdRaw = req.query.beforeId as string | undefined
+    const beforeId = beforeIdRaw != null && beforeIdRaw !== '' ? beforeIdRaw : undefined
+
+    // Parse numeric params (undefined if key absent)
+    const limitRaw = limitStr != null && limitStr !== '' ? Number(limitStr) : undefined
+    const beforeRaw = beforeStr != null && beforeStr !== '' ? Number(beforeStr) : undefined
+
+    // Reject empty string params that were present in the query
+    if (limitStr !== undefined && limitRaw === undefined) {
+      return res.status(400).json({ error: 'Invalid limit parameter' })
+    }
+    if (beforeStr !== undefined && beforeRaw === undefined) {
+      return res.status(400).json({ error: 'Invalid before parameter' })
+    }
+    if (beforeIdRaw !== undefined && beforeId === undefined) {
+      return res.status(400).json({ error: 'Invalid beforeId parameter' })
+    }
+
+    // Validate numeric params
+    if (limitRaw !== undefined && (!Number.isFinite(limitRaw) || limitRaw < 1 || !Number.isInteger(limitRaw))) {
+      return res.status(400).json({ error: 'Invalid limit parameter' })
+    }
+    if (beforeRaw !== undefined && (!Number.isFinite(beforeRaw) || beforeRaw < 0)) {
+      return res.status(400).json({ error: 'Invalid before parameter' })
+    }
+
+    // If limit or before is provided, return a PaginatedResult
+    // (beforeId alone is a no-op — it's only a tie-breaker for before)
+    if (limitRaw !== undefined || beforeRaw !== undefined) {
+      const result = paginateProjects(projects, {
+        limit: limitRaw,
+        before: beforeRaw,
+        beforeId,
+      })
+      res.json(result)
+    } else {
+      // Backward compat: return raw array
+      res.json(projects)
+    }
   })
 
   router.patch('/sessions/:sessionId', async (req, res) => {

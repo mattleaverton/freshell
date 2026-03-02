@@ -113,8 +113,9 @@ export function createSessionsRouter(deps: SessionsRouterDeps) {
       return res.status(400).json({ error: 'Invalid before parameter' })
     }
 
-    // If any pagination param is provided, return a PaginatedResult
-    if (limitRaw !== undefined || beforeRaw !== undefined || beforeId !== undefined) {
+    // If limit or before is provided, return a PaginatedResult
+    // (beforeId alone is a no-op — it's only a tie-breaker for before)
+    if (limitRaw !== undefined || beforeRaw !== undefined) {
       const result = paginateProjects(projects, {
         limit: limitRaw,
         before: beforeRaw,

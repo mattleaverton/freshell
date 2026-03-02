@@ -34,6 +34,10 @@ vi.mock('../../../server/perf-logger', () => ({
   startPerfTimer: () => () => {},
 }))
 
+vi.mock('../../../server/rename-cascade', () => ({
+  cascadeSessionRenameToTerminal: vi.fn(),
+}))
+
 import type { ProjectGroup, CodingCliSession } from '../../../server/coding-cli/types.js'
 
 function makeSession(id: string, updatedAt: number, projectPath: string): CodingCliSession {
@@ -60,9 +64,17 @@ const allProjects: ProjectGroup[] = [
   )),
 ]
 
-const mockIndexer = {
-  getProjects: () => allProjects,
-  refresh: vi.fn(),
+const mockDeps = {
+  configStore: {
+    patchSessionOverride: vi.fn(),
+    deleteSession: vi.fn(),
+  },
+  codingCliIndexer: {
+    getProjects: () => allProjects,
+    refresh: vi.fn(),
+  },
+  codingCliProviders: [],
+  perfConfig: { slowSessionRefreshMs: 1000 },
 }
 
 describe('GET /sessions with pagination', () => {
@@ -70,13 +82,10 @@ describe('GET /sessions with pagination', () => {
 
   // Lazy import to ensure mocks are in place
   async function setupApp() {
-    const { createSessionsRouter } = await import('../../../server/routes/sessions.js')
+    const { createSessionsRouter } = await import('../../../server/sessions-router.js')
     app = express()
     app.use(express.json())
-    app.use(createSessionsRouter({
-      codingCliIndexer: mockIndexer as any,
-      codingCliProviders: [],
-    }))
+    app.use(createSessionsRouter(mockDeps as any))
   }
 
   it('returns full list when no pagination params given (backward compat)', async () => {
@@ -177,12 +186,11 @@ describe('GET /sessions with pagination', () => {
     expect(res.body.error).toMatch(/Invalid beforeId/)
   })
 
-  it('returns paginated result when only beforeId is specified', async () => {
+  it('returns full array when only beforeId is specified (no-op without before)', async () => {
     await setupApp()
     const res = await request(app).get('/sessions?beforeId=a50')
     expect(res.status).toBe(200)
-    expect(res.body.totalSessions).toBe(130)
-    expect(typeof res.body.hasMore).toBe('boolean')
+    expect(Array.isArray(res.body)).toBe(true)
   })
 
   it('returns paginated result when before is specified without limit', async () => {
