@@ -19,6 +19,7 @@ import type { SdkServerMessage } from '../shared/ws-protocol.js'
 import type { ExtensionManager } from './extension-manager.js'
 import { TerminalStreamBroker } from './terminal-stream/broker.js'
 import { chunkProjects } from './ws-chunking.js'
+import { paginateProjects } from './session-pagination.js'
 import { loadSessionHistory, type ChatMessage } from './session-history-loader.js'
 import { TabRegistryRecordBaseSchema, TabRegistryRecordSchema } from './tabs-registry/types.js'
 import type { TabsRegistryStore } from './tabs-registry/store.js'
@@ -53,6 +54,7 @@ import {
   SdkSetModelSchema,
   SdkSetPermissionModeSchema,
   UiScreenshotResultSchema,
+  SessionsFetchSchema,
   WS_PROTOCOL_VERSION,
 } from '../shared/ws-protocol.js'
 import { UiLayoutSyncSchema } from './agent-api/layout-schema.js'
@@ -158,6 +160,7 @@ const ClientMessageSchema = z.discriminatedUnion('type', [
   SdkSetPermissionModeSchema,
   UiLayoutSyncSchema,
   UiScreenshotResultSchema,
+  SessionsFetchSchema,
 ])
 
 type ClientState = {
@@ -251,6 +254,12 @@ export class WsHandler {
       server,
       path: '/ws',
       maxPayload: WS_MAX_PAYLOAD_BYTES,
+      perMessageDeflate: {
+        zlibDeflateOptions: { level: 1 },
+        threshold: 1024,
+        serverNoContextTakeover: true,
+        clientNoContextTakeover: true,
+      },
     })
 
     const originalClose = server.close.bind(server)
@@ -732,6 +741,10 @@ export class WsHandler {
     const isSuperseded = () => ws.sessionUpdateGeneration !== generation
     const chunks = chunkProjects(projects, MAX_CHUNK_BYTES)
 
+    // Instrumentation: measure session payload size
+    const totalSessions = projects.reduce((sum, p) => sum + (p.sessions?.length ?? 0), 0)
+    let totalPayloadBytes = 0
+
     for (let i = 0; i < chunks.length; i++) {
       // Bail out if connection closed or a newer update has started
       if (ws.readyState !== WebSocket.OPEN) return false
@@ -751,6 +764,7 @@ export class WsHandler {
         msg = { type: 'sessions.updated', projects: chunks[i], append: true }
       }
 
+      totalPayloadBytes += Buffer.byteLength(JSON.stringify(msg))
       this.safeSend(ws, msg)
 
       // Wait for buffer to drain before sending next chunk
@@ -764,7 +778,17 @@ export class WsHandler {
       }
     }
     // Verify connection survived the final send (safeSend can trigger backpressure close)
-    return ws.readyState === WebSocket.OPEN && !isSuperseded()
+    const allSent = ws.readyState === WebSocket.OPEN && !isSuperseded()
+    if (allSent) {
+      logger.info({
+        event: 'sessions_snapshot_sent',
+        connectionId: ws.connectionId,
+        sessionCount: totalSessions,
+        chunkCount: chunks.length,
+        uncompressedBytes: totalPayloadBytes,
+      }, `Sessions snapshot: ${totalSessions} sessions, ${chunks.length} chunks, ${(totalPayloadBytes / 1024).toFixed(1)} KB uncompressed`)
+    }
+    return allSent
   }
   private async onMessage(ws: LiveWebSocket, state: ClientState, data: WebSocket.RawData) {
     const endMessageTimer = startPerfTimer(
@@ -1639,6 +1663,37 @@ export class WsHandler {
               } as SdkServerMessage)
             }
           }
+        }
+        return
+      }
+
+      case 'sessions.fetch': {
+        const parsed = SessionsFetchSchema.safeParse(msg)
+        if (!parsed.success) {
+          this.sendError(ws, { code: 'INVALID_MESSAGE', message: 'Invalid sessions.fetch', requestId: (msg as any).requestId })
+          return
+        }
+        const { requestId, before, beforeId, limit } = parsed.data
+        if (!this.handshakeSnapshotProvider) {
+          this.sendError(ws, { code: 'INTERNAL_ERROR', message: 'Session provider not available', requestId })
+          return
+        }
+        try {
+          const snapshot = await this.handshakeSnapshotProvider()
+          const allProjects = snapshot.projects ?? []
+          const result = paginateProjects(allProjects, { before, beforeId, limit })
+          this.safeSend(ws, {
+            type: 'sessions.page',
+            requestId,
+            projects: result.projects,
+            totalSessions: result.totalSessions,
+            oldestIncludedTimestamp: result.oldestIncludedTimestamp,
+            oldestIncludedSessionId: result.oldestIncludedSessionId,
+            hasMore: result.hasMore,
+          })
+        } catch (err) {
+          logger.warn({ err, requestId }, 'Failed to fetch sessions page')
+          this.sendError(ws, { code: 'INTERNAL_ERROR', message: 'Failed to fetch sessions', requestId })
         }
         return
       }

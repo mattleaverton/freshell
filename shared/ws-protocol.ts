@@ -337,6 +337,15 @@ export const BrowserSdkMessageSchema = z.discriminatedUnion('type', [
 
 export type BrowserSdkMessage = z.infer<typeof BrowserSdkMessageSchema>
 
+// Sessions pagination (client → server)
+export const SessionsFetchSchema = z.object({
+  type: z.literal('sessions.fetch'),
+  requestId: z.string().min(1),
+  before: z.number().nonnegative().optional(),
+  beforeId: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(500).optional(),
+})
+
 // ── Client message discriminated union ──
 
 export const ClientMessageSchema = z.discriminatedUnion('type', [
@@ -352,6 +361,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   TerminalMetaListSchema,
   UiLayoutSyncSchema,
   UiScreenshotResultSchema,
+  SessionsFetchSchema,
   CodingCliCreateSchema,
   CodingCliInputSchema,
   CodingCliKillSchema,
@@ -488,6 +498,20 @@ export type SessionsUpdatedMessage = {
   projects: unknown[]
   clear?: true
   append?: true
+  totalSessions?: number
+  oldestIncludedTimestamp?: number
+  oldestIncludedSessionId?: string
+  hasMore?: boolean
+}
+
+export type SessionsPageMessage = {
+  type: 'sessions.page'
+  requestId: string
+  projects: unknown[]
+  totalSessions: number
+  oldestIncludedTimestamp: number
+  oldestIncludedSessionId: string
+  hasMore: boolean
 }
 
 export type SessionsPatchMessage = {
@@ -678,6 +702,7 @@ export type ServerMessage =
   | TerminalMetaListResponseMessage
   | TerminalMetaUpdatedMessage
   | SessionsUpdatedMessage
+  | SessionsPageMessage
   | SessionsPatchMessage
   | SettingsUpdatedMessage
   | UiCommandMessage
