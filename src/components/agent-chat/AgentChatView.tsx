@@ -20,6 +20,18 @@ import { api, setSessionMetadata } from '@/lib/api'
 import { updateSettingsLocal } from '@/store/settingsSlice'
 import { getAgentChatProviderConfig } from '@/lib/agent-chat-utils'
 
+/** Early lifecycle states that should not be re-entered once the session has advanced. */
+const EARLY_STATES = new Set(['creating', 'starting'])
+
+/**
+ * Returns true if transitioning from `current` to `next` would be a regression.
+ * Only blocks regression back to early states (creating/starting) — normal cycles
+ * like running→idle are allowed since they happen after every turn.
+ */
+function isStatusRegression(current: string, next: string): boolean {
+  return !EARLY_STATES.has(current) && EARLY_STATES.has(next)
+}
+
 interface AgentChatViewProps {
   tabId: string
   paneId: string
@@ -124,12 +136,19 @@ export default function AgentChatView({ tabId, paneId, paneContent, hidden }: Ag
   // Update pane status from session state.
   // Uses mergePaneContent (not updatePaneContent) to avoid stale-ref overwrites when
   // multiple effects dispatch in the same render batch (e.g. sessionStatus + cliSessionId).
+  // Only syncs forward — never regresses from a more advanced status (e.g. connected→starting)
+  // because cross-tab sync or sdk.attach responses can report stale server-side status.
   const sessionStatus = session?.status
   useEffect(() => {
     if (!sessionStatus || sessionStatus === paneContent.status) return
     // Don't sync status from a lost session — the recovery effect will clear the
     // sessionId and start fresh. Syncing here would overwrite the recovery with stale data.
     if (session?.lost) return
+    // Don't regress to a less advanced status. The server may report 'starting' on
+    // sdk.attach even though the client already received the preliminary sdk.session.init
+    // and optimistically advanced to 'connected'. This prevents the status bar from
+    // flipping back to "Starting Claude Code..." after splits or cross-tab sync.
+    if (isStatusRegression(paneContent.status, sessionStatus)) return
     dispatch(mergePaneContent({
       tabId,
       paneId,

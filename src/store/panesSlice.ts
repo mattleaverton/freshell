@@ -232,7 +232,7 @@ function mergeTerminalState(incoming: PaneNode, local: PaneNode): PaneNode {
   // Guard: bail to incoming if either node is malformed (corrupted localStorage)
   if (!incoming || !local || !incoming.type || !local.type) return incoming
 
-  // If both leaves with terminal content, apply smart merge
+  // If both leaves, apply smart merge for terminal and agent-chat content
   if (incoming.type === 'leaf' && local.type === 'leaf') {
     if (incoming.content?.kind === 'terminal' && local.content?.kind === 'terminal') {
       if (incoming.content.createRequestId === local.content.createRequestId) {
@@ -261,6 +261,29 @@ function mergeTerminalState(incoming: PaneNode, local: PaneNode): PaneNode {
         return local
       }
     }
+
+    // Agent-chat panes: prefer local sessionId and status when the local state
+    // is more advanced. The persist debounce means incoming (from localStorage)
+    // can be stale — e.g. status 'starting' when local has already reached 'connected'.
+    if (incoming.content?.kind === 'agent-chat' && local.content?.kind === 'agent-chat') {
+      if (incoming.content.createRequestId === local.content.createRequestId) {
+        // Preserve local sessionId if incoming doesn't have it yet
+        if (local.content.sessionId && !incoming.content.sessionId) {
+          return { ...incoming, content: local.content }
+        }
+        // Don't regress back to early states (creating/starting) once past them.
+        // Normal cycles like running→idle are fine and must not be blocked.
+        if (local.content.sessionId && incoming.content.sessionId === local.content.sessionId) {
+          const EARLY_STATES = new Set(['creating', 'starting'])
+          const localStatus = local.content.status ?? ''
+          const incomingStatus = incoming.content.status ?? ''
+          if (!EARLY_STATES.has(localStatus) && EARLY_STATES.has(incomingStatus)) {
+            return { ...incoming, content: { ...incoming.content, status: local.content.status } }
+          }
+        }
+      }
+    }
+
     return incoming
   }
 
