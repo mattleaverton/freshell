@@ -789,7 +789,9 @@ export default function App() {
     }
     return (
       <div className="h-full min-h-0 overflow-hidden flex flex-col">
-        {(!isLandscapeTerminalView || landscapeTabBarRevealed) && <TabBar />}
+        {(!isLandscapeTerminalView || landscapeTabBarRevealed) && (
+          <TabBar sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebarCollapse} />
+        )}
         <div
           className="flex-1 min-h-0 relative bg-background"
           data-testid="terminal-work-area"
@@ -850,17 +852,8 @@ export default function App() {
         {...(isMobile ? bindSidebarSwipe() : {})}
         style={isMobile ? { touchAction: 'pan-y' } : undefined}
       >
-        {sidebarCollapsed && (
-          <button
-            onClick={toggleSidebarCollapse}
-            className="absolute left-2 top-2 z-30 p-1.5 rounded-md hover:bg-muted transition-colors min-h-11 min-w-11 md:min-h-0 md:min-w-0 flex items-center justify-center bg-card/90 border border-border/40"
-            title="Show sidebar"
-            aria-label="Show sidebar"
-            data-testid="show-sidebar-button"
-          >
-            <PanelLeft className="h-3.5 w-3.5 text-muted-foreground" />
-          </button>
-        )}
+        {/* Show-sidebar toggle is integrated into TabBar for terminal view,
+            and rendered inline below for non-terminal views */}
         {/* Mobile overlay when sidebar is open */}
         {isMobile && !sidebarCollapsed && (
           <div
@@ -910,6 +903,19 @@ export default function App() {
           {...(isMobile ? bindTabSwipe() : {})}
           style={isMobile ? { touchAction: 'pan-y' } : undefined}
         >
+          {sidebarCollapsed && (view !== 'terminal' || (isLandscapeTerminalView && !landscapeTabBarRevealed) || tabs.length === 0) && (
+            <div className="shrink-0 flex items-center px-2 h-10 border-b border-border/30">
+              <button
+                onClick={toggleSidebarCollapse}
+                className="p-1.5 rounded-md hover:bg-muted transition-colors min-h-11 min-w-11 md:min-h-0 md:min-w-0 flex items-center justify-center"
+                title="Show sidebar"
+                aria-label="Show sidebar"
+                data-testid="show-sidebar-button"
+              >
+                <PanelLeft className="h-3.5 w-3.5 text-muted-foreground" />
+              </button>
+            </div>
+          )}
           {content}
         </div>
       </div>
