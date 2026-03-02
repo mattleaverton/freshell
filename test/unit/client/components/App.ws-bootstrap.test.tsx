@@ -120,7 +120,7 @@ describe('App WS bootstrap recovery', () => {
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (url.startsWith('/api/sessions')) return Promise.resolve([])
       return Promise.resolve({})
     })
   })
@@ -273,7 +273,7 @@ describe('App WS bootstrap recovery', () => {
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
-      if (url === '/api/sessions') {
+      if (url.startsWith('/api/sessions')) {
         return Promise.resolve([
           {
             projectPath: '/p1',
@@ -322,7 +322,7 @@ describe('App WS bootstrap recovery', () => {
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
-      if (url === '/api/sessions') {
+      if (url.startsWith('/api/sessions')) {
         sessionsCalls += 1
         if (sessionsCalls === 1) {
           return Promise.reject(new Error('initial sessions load failed'))

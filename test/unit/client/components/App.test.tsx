@@ -225,7 +225,7 @@ describe('App Component - Share Button', () => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
       if (url === '/api/version') return Promise.resolve(makeVersionInfo())
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (typeof url === 'string' && url.startsWith('/api/sessions')) return Promise.resolve([])
       if (url === '/api/network/status') {
         return Promise.resolve(makeNetworkStatus())
       }
@@ -289,7 +289,7 @@ describe('App Component - Share Button', () => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
       if (url === '/api/version') return Promise.resolve(makeVersionInfo())
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (typeof url === 'string' && url.startsWith('/api/sessions')) return Promise.resolve([])
       if (url === '/api/network/status') return Promise.resolve(localhostStatus)
       return Promise.resolve({})
     })
@@ -362,7 +362,7 @@ describe('App Component - Share Button', () => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
       if (url === '/api/version') return Promise.resolve(makeVersionInfo())
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (typeof url === 'string' && url.startsWith('/api/sessions')) return Promise.resolve([])
       if (url === '/api/network/status') return Promise.resolve(legacyStatus)
       return Promise.resolve({})
     })
@@ -455,7 +455,7 @@ describe('App Component - Version Status', () => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
       if (url === '/api/version') return Promise.resolve(makeVersionInfo())
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (typeof url === 'string' && url.startsWith('/api/sessions')) return Promise.resolve([])
       return Promise.resolve({})
     })
   })
@@ -480,7 +480,7 @@ describe('App Component - Version Status', () => {
           releaseUrl: 'https://github.com/danshapiro/freshell/releases/tag/v0.5.0',
         }))
       }
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (typeof url === 'string' && url.startsWith('/api/sessions')) return Promise.resolve([])
       return Promise.resolve({})
     })
 
@@ -516,7 +516,7 @@ describe('App Component - WS Notifications', () => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
       if (url === '/api/version') return Promise.resolve(makeVersionInfo())
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (typeof url === 'string' && url.startsWith('/api/sessions')) return Promise.resolve([])
       return Promise.resolve({})
     })
   })
@@ -560,7 +560,7 @@ describe('App Component - Mobile Sidebar', () => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
       if (url === '/api/version') return Promise.resolve(makeVersionInfo())
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (typeof url === 'string' && url.startsWith('/api/sessions')) return Promise.resolve([])
       return Promise.resolve({})
     })
   })
@@ -618,7 +618,7 @@ describe('App Bootstrap', () => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
       if (url === '/api/version') return Promise.resolve(makeVersionInfo())
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (typeof url === 'string' && url.startsWith('/api/sessions')) return Promise.resolve([])
       return Promise.resolve({})
     })
   })
@@ -645,7 +645,7 @@ describe('App Bootstrap', () => {
     })
 
     await waitFor(() => {
-      const sessionsCalls = mockApiGet.mock.calls.filter(([url]) => url === '/api/sessions')
+      const sessionsCalls = mockApiGet.mock.calls.filter(([url]) => typeof url === 'string' && url.startsWith('/api/sessions'))
       const settingsCalls = mockApiGet.mock.calls.filter(([url]) => url === '/api/settings')
       expect(sessionsCalls.length).toBe(1)
       expect(settingsCalls.length).toBe(1)
@@ -655,7 +655,7 @@ describe('App Bootstrap', () => {
     await Promise.resolve()
     await Promise.resolve()
 
-    const sessionsCalls = mockApiGet.mock.calls.filter(([url]) => url === '/api/sessions')
+    const sessionsCalls = mockApiGet.mock.calls.filter(([url]) => typeof url === 'string' && url.startsWith('/api/sessions'))
     const settingsCalls = mockApiGet.mock.calls.filter(([url]) => url === '/api/settings')
     expect(sessionsCalls.length).toBe(1)
     expect(settingsCalls.length).toBe(1)
@@ -669,7 +669,7 @@ describe('App WS message handling', () => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
       if (url === '/api/version') return Promise.resolve(makeVersionInfo())
-      if (url === '/api/sessions') return Promise.resolve([])
+      if (typeof url === 'string' && url.startsWith('/api/sessions')) return Promise.resolve([])
       return Promise.resolve({})
     })
   })
