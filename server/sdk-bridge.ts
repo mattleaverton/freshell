@@ -22,11 +22,10 @@ import type {
   QuestionDefinition,
 } from './sdk-bridge-types.js'
 
-/** Default plugins resolved from cwd. Only includes paths that exist on disk. */
+/** Default plugin candidates resolved from cwd. Checked at session creation time. */
 const DEFAULT_PLUGIN_CANDIDATES = [
   path.join(process.cwd(), '.claude', 'plugins', 'freshell-orchestration'),
 ]
-const DEFAULT_PLUGINS = DEFAULT_PLUGIN_CANDIDATES.filter(p => fs.existsSync(p))
 
 const log = logger.child({ component: 'sdk-bridge' })
 
@@ -113,11 +112,17 @@ export class SdkBridge extends EventEmitter {
         settingSources: ['user', 'project', 'local'],
         // Explicit plugins override defaults; omit entirely when no defaults exist
         // to avoid suppressing SDK's own plugin discovery with an empty array.
-        ...(options.plugins !== undefined
-          ? { plugins: options.plugins.map(p => ({ type: 'local' as const, path: p })) }
-          : DEFAULT_PLUGINS.length > 0
-            ? { plugins: DEFAULT_PLUGINS.map(p => ({ type: 'local' as const, path: p })) }
-            : {}),
+        // Resolve defaults at session creation time (not module load) so new/removed
+        // plugins are picked up without a server restart.
+        ...((() => {
+          if (options.plugins !== undefined) {
+            return { plugins: options.plugins.map(p => ({ type: 'local' as const, path: p })) }
+          }
+          const defaults = DEFAULT_PLUGIN_CANDIDATES.filter(p => fs.existsSync(p))
+          return defaults.length > 0
+            ? { plugins: defaults.map(p => ({ type: 'local' as const, path: p })) }
+            : {}
+        })()),
       },
     })
 
