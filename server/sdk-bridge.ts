@@ -78,10 +78,11 @@ export class SdkBridge extends EventEmitter {
     const abortController = new AbortController()
     const { iterable: inputIterable, handle: inputStream } = this.createInputStream()
 
-    // Strip env vars that prevent nested Claude Code subprocess startup.
-    // CLAUDECODE is set by parent Claude Code sessions and causes the child
-    // to refuse startup with "cannot be launched inside another session".
-    const { CLAUDECODE: _, ...cleanEnv } = process.env
+    // Strip env vars that interfere with child Claude Code subprocess behaviour:
+    // - CLAUDECODE: causes child to refuse startup ("nested session" error)
+    // - ANTHROPIC_API_KEY: inherited keys override subscription/OAuth auth,
+    //   causing "Invalid API key" errors when the key is stale or invalid
+    const { CLAUDECODE: _, ANTHROPIC_API_KEY: __, ...cleanEnv } = process.env
 
     const sdkQuery = query({
       prompt: inputIterable as AsyncIterable<any>,
