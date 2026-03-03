@@ -101,6 +101,46 @@ export const sessionsSlice = createSlice({
       const valid = new Set(state.projects.map((p) => p.projectPath))
       state.expandedProjects = new Set(Array.from(state.expandedProjects).filter((k) => valid.has(k)))
     },
+    /**
+     * Merge a paginated snapshot into existing state. Unlike setProjects (which
+     * replaces everything), this preserves sessions the user already loaded via
+     * scroll pagination that fall outside the server's pagination window.
+     *
+     * For each project in the incoming snapshot, its sessions are authoritative
+     * (freshest data from the server). Any existing sessions for that project
+     * that are NOT present in the incoming data are appended (they're the older
+     * ones beyond the pagination window). Projects not in the snapshot at all
+     * are kept as-is.
+     */
+    mergeSnapshotProjects: (state, action: PayloadAction<ProjectGroup[]>) => {
+      const incoming = normalizeProjects(action.payload)
+      const existingMap = new Map(state.projects.map((p) => [p.projectPath, p]))
+
+      for (const incomingProject of incoming) {
+        const existing = existingMap.get(incomingProject.projectPath)
+        if (!existing) {
+          existingMap.set(incomingProject.projectPath, incomingProject)
+          continue
+        }
+        // Build a set of session keys present in the incoming snapshot
+        const incomingKeys = new Set(
+          incomingProject.sessions.map((s: any) => `${s.provider || 'claude'}:${s.sessionId}`)
+        )
+        // Keep existing sessions that aren't in the incoming snapshot
+        const retained = existing.sessions.filter(
+          (s: any) => !incomingKeys.has(`${s.provider || 'claude'}:${s.sessionId}`)
+        )
+        existingMap.set(incomingProject.projectPath, {
+          ...incomingProject,
+          sessions: [...incomingProject.sessions, ...retained],
+        })
+      }
+
+      state.projects = sortProjectsByRecency(Array.from(existingMap.values()))
+      state.lastLoadedAt = Date.now()
+      const valid = new Set(state.projects.map((p) => p.projectPath))
+      state.expandedProjects = new Set(Array.from(state.expandedProjects).filter((k) => valid.has(k)))
+    },
     applySessionsPatch: (
       state,
       action: PayloadAction<{ upsertProjects: ProjectGroup[]; removeProjectPaths: string[] }>
@@ -211,6 +251,7 @@ export const {
   setProjects,
   clearProjects,
   mergeProjects,
+  mergeSnapshotProjects,
   applySessionsPatch,
   clearPaginationMeta,
   setPaginationMeta,

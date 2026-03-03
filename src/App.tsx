@@ -5,6 +5,7 @@ import { setSettings } from '@/store/settingsSlice'
 import {
   setProjects,
   mergeProjects,
+  mergeSnapshotProjects,
   applySessionsPatch,
   markWsSnapshotReceived,
   resetWsSnapshotReceived,
@@ -369,7 +370,14 @@ export default function App() {
     function flushChunkedBuffer() {
       if (chunkedFlushTimer) { clearTimeout(chunkedFlushTimer); chunkedFlushTimer = null }
       if (chunkedBuffer) {
-        dispatch(setProjects(chunkedBuffer))
+        // When the snapshot is paginated (hasMore), merge with existing state
+        // to preserve older sessions the user already loaded via scroll pagination.
+        // Full snapshots (no hasMore) replace entirely for correctness.
+        if (pendingPaginationMeta?.hasMore) {
+          dispatch(mergeSnapshotProjects(chunkedBuffer))
+        } else {
+          dispatch(setProjects(chunkedBuffer))
+        }
         dispatch(markWsSnapshotReceived())
         // Reset any stale load-more guard — the snapshot invalidated it
         dispatch(setLoadingMore(false))
@@ -492,7 +500,12 @@ export default function App() {
             // Single-chunk update (no clear/append flags): apply immediately
             snapshotGeneration++
             if (chunkedBuffer) flushChunkedBuffer()
-            dispatch(setProjects(projects))
+            // When paginated, merge to preserve older sessions loaded via scroll.
+            if (paginationMeta?.hasMore) {
+              dispatch(mergeSnapshotProjects(projects))
+            } else {
+              dispatch(setProjects(projects))
+            }
             dispatch(markWsSnapshotReceived())
             // Reset any stale load-more guard — the snapshot invalidated it
             dispatch(setLoadingMore(false))

@@ -17,6 +17,7 @@ import { makeSelectKnownSessionKeys, makeSelectSortedSessionItems, type SidebarS
 import { ContextIds } from '@/components/context-menu/context-menu-constants'
 import { getActiveSessionRefForTab } from '@/lib/session-utils'
 import { createLogger } from '@/lib/client-logger'
+import { useStableArray } from '@/hooks/useStableArray'
 
 
 const log = createLogger('Sidebar')
@@ -90,6 +91,33 @@ function formatRelativeTime(timestamp: number): string {
 function getProjectName(projectPath: string): string {
   const parts = projectPath.replace(/\\/g, '/').split('/')
   return parts[parts.length - 1] || projectPath
+}
+
+/** Structural equality for a single session item — returns true when all
+ *  fields that affect rendering, sorting, or filtering are identical. Used by
+ *  useStableArray to prevent react-window from rebuilding all row elements
+ *  when the selector produces new object references for unchanged sessions. */
+function isSessionItemEqual(a: SessionItem, b: SessionItem): boolean {
+  return (
+    a.sessionId === b.sessionId &&
+    a.provider === b.provider &&
+    a.sessionType === b.sessionType &&
+    a.title === b.title &&
+    a.subtitle === b.subtitle &&
+    a.timestamp === b.timestamp &&
+    a.hasTab === b.hasTab &&
+    a.isRunning === b.isRunning &&
+    a.runningTerminalId === b.runningTerminalId &&
+    a.archived === b.archived &&
+    a.projectColor === b.projectColor &&
+    a.cwd === b.cwd &&
+    a.projectPath === b.projectPath &&
+    a.ratchetedActivity === b.ratchetedActivity &&
+    a.hasTitle === b.hasTitle &&
+    a.isSubagent === b.isSubagent &&
+    a.isNonInteractive === b.isNonInteractive &&
+    a.firstUserMessage === b.firstUserMessage
+  )
 }
 
 interface SidebarRowProps {
@@ -371,12 +399,13 @@ export default function Sidebar({
     return localFilteredItems
   }, [itemsByKey, knownSessionKeys, localFilteredItems, searchResults])
 
-  // Pass computedItems directly to the list.  SidebarItem's React.memo
-  // comparator already prevents DOM updates for unchanged rows, so
-  // stabilizing the array reference here is unnecessary and was blocking
-  // timestamp updates from reaching the UI.  The chunked buffer in App.tsx
-  // prevents the sidebar from collapsing during full session reloads.
-  const sortedItems = computedItems
+  // Stabilize the array reference so react-window doesn't rebuild all row
+  // elements when the selector produces new objects with identical field
+  // values (e.g. an active session's updatedAt changed but no visible fields
+  // differ). Individual SidebarItem updates still go through when a field
+  // value actually changes — the custom memo comparator on SidebarItem
+  // handles that independently.
+  const sortedItems = useStableArray(computedItems, isSessionItemEqual)
 
   useEffect(() => {
     const container = listContainerRef.current

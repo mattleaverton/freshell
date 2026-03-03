@@ -5,6 +5,7 @@ import sessionsReducer, {
   setProjects,
   clearProjects,
   mergeProjects,
+  mergeSnapshotProjects,
   applySessionsPatch,
   toggleProjectExpanded,
   setProjectExpanded,
@@ -533,6 +534,121 @@ describe('sessionsSlice', () => {
       const state = sessionsReducer(initialState, setProjects(bad))
       expect(state.projects).toHaveLength(1)
       expect(state.projects[0].sessions).toHaveLength(1)
+    })
+  })
+
+  describe('mergeSnapshotProjects', () => {
+    it('adds new projects from snapshot', () => {
+      const existing: ProjectGroup[] = [
+        { projectPath: '/project/a', sessions: [
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 1000, provider: 'claude' },
+        ] },
+      ]
+      const snapshot: ProjectGroup[] = [
+        { projectPath: '/project/b', sessions: [
+          { sessionId: 's2', projectPath: '/project/b', updatedAt: 2000, provider: 'claude' },
+        ] },
+      ]
+      let state = sessionsReducer(initialState, setProjects(existing))
+      state = sessionsReducer(state, mergeSnapshotProjects(snapshot))
+
+      const paths = state.projects.map(p => p.projectPath)
+      expect(paths).toContain('/project/a')
+      expect(paths).toContain('/project/b')
+    })
+
+    it('updates sessions from snapshot while preserving older sessions', () => {
+      const existing: ProjectGroup[] = [
+        { projectPath: '/project/a', sessions: [
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 3000, provider: 'claude', title: 'Recent' },
+          { sessionId: 's2', projectPath: '/project/a', updatedAt: 1000, provider: 'claude', title: 'Old paginated' },
+        ] },
+      ]
+      // Snapshot only includes the recent session (paginated window)
+      const snapshot: ProjectGroup[] = [
+        { projectPath: '/project/a', sessions: [
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 4000, provider: 'claude', title: 'Recent updated' },
+        ] },
+      ]
+      let state = sessionsReducer(initialState, setProjects(existing))
+      state = sessionsReducer(state, mergeSnapshotProjects(snapshot))
+
+      const project = state.projects.find(p => p.projectPath === '/project/a')!
+      expect(project.sessions).toHaveLength(2)
+
+      const s1 = project.sessions.find((s: any) => s.sessionId === 's1') as any
+      expect(s1.title).toBe('Recent updated')
+      expect(s1.updatedAt).toBe(4000)
+
+      const s2 = project.sessions.find((s: any) => s.sessionId === 's2') as any
+      expect(s2.title).toBe('Old paginated')
+    })
+
+    it('does not duplicate sessions that appear in both snapshot and existing', () => {
+      const existing: ProjectGroup[] = [
+        { projectPath: '/project/a', sessions: [
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 1000, provider: 'claude' },
+          { sessionId: 's2', projectPath: '/project/a', updatedAt: 500, provider: 'claude' },
+        ] },
+      ]
+      const snapshot: ProjectGroup[] = [
+        { projectPath: '/project/a', sessions: [
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 2000, provider: 'claude' },
+          { sessionId: 's2', projectPath: '/project/a', updatedAt: 1500, provider: 'claude' },
+        ] },
+      ]
+      let state = sessionsReducer(initialState, setProjects(existing))
+      state = sessionsReducer(state, mergeSnapshotProjects(snapshot))
+
+      const project = state.projects.find(p => p.projectPath === '/project/a')!
+      expect(project.sessions).toHaveLength(2)
+    })
+
+    it('preserves projects not in the snapshot', () => {
+      const existing: ProjectGroup[] = [
+        { projectPath: '/project/a', sessions: [
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 1000, provider: 'claude' },
+        ] },
+        { projectPath: '/project/old', sessions: [
+          { sessionId: 's-old', projectPath: '/project/old', updatedAt: 100, provider: 'claude' },
+        ] },
+      ]
+      // Snapshot only has project/a (paginated, doesn't include old projects)
+      const snapshot: ProjectGroup[] = [
+        { projectPath: '/project/a', sessions: [
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 2000, provider: 'claude' },
+        ] },
+      ]
+      let state = sessionsReducer(initialState, setProjects(existing))
+      state = sessionsReducer(state, mergeSnapshotProjects(snapshot))
+
+      const paths = state.projects.map(p => p.projectPath)
+      expect(paths).toContain('/project/a')
+      expect(paths).toContain('/project/old')
+    })
+
+    it('handles different providers for the same sessionId', () => {
+      const existing: ProjectGroup[] = [
+        { projectPath: '/project/a', sessions: [
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 1000, provider: 'claude' },
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 500, provider: 'codex' },
+        ] },
+      ]
+      const snapshot: ProjectGroup[] = [
+        { projectPath: '/project/a', sessions: [
+          { sessionId: 's1', projectPath: '/project/a', updatedAt: 2000, provider: 'claude' },
+        ] },
+      ]
+      let state = sessionsReducer(initialState, setProjects(existing))
+      state = sessionsReducer(state, mergeSnapshotProjects(snapshot))
+
+      const project = state.projects.find(p => p.projectPath === '/project/a')!
+      // Should have both: updated claude session + preserved codex session
+      expect(project.sessions).toHaveLength(2)
+      const claudeSession = project.sessions.find((s: any) => s.provider === 'claude') as any
+      expect(claudeSession.updatedAt).toBe(2000)
+      const codexSession = project.sessions.find((s: any) => s.provider === 'codex') as any
+      expect(codexSession.updatedAt).toBe(500)
     })
   })
 })
