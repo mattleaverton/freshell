@@ -162,6 +162,15 @@ done
   - If iframe content is not capturable (for example cross-origin/security), screenshots intentionally render a placeholder message with source URL context instead of a silent blank region.
   - For assertions, allow either explicit page content or the explicit non-capturable placeholder text depending on origin/security context.
 
+## REST API patterns
+
+- Auth header: `x-auth-token: <TOKEN>` (not Bearer).
+- `POST /api/tabs` with `{ name, mode: "shell", shell: "wsl", cwd }` creates a tab with a terminal, bypassing the picker.
+- `POST /api/panes/:id/split` with `{ direction: "horizontal"|"vertical", browser?, editor?, mode?, cwd? }` — always defaults to 50/50.
+- `POST /api/panes/:id/resize` with `{ sizes: [left, right] }` (percentages summing to 100) — call immediately after split to fix proportions.
+- Editor panes show "Loading..." until visited. When screenshotting multiple tabs, visit each tab once first to trigger editor loading, then loop back for screenshots.
+- `DELETE /api/terminals/:id` removes orphaned terminals. Freshell has a 50 PTY limit; orphans from scripted runs accumulate silently.
+
 ## Gotchas
 
 - Use `send-keys -l` for natural-language prompts.

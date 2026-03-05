@@ -11,8 +11,6 @@ Freshell is a self-hosted, browser-accessible terminal multiplexer and session o
 - We fix the system over the symptom.
 
 ## Repo Rules
-- Always check for and use applicable skills
-- This project uses the [superpowers](https://github.com/obra/superpowers) plugin (configured in `.claude/settings.json`). Skills like `superpowers:executing-plans` are referenced throughout plan docs in `docs/plans/`.
 - Always work in a worktree (in \.worktrees\)
 - Many agents may be working in the worktree at the same time. If you see activity from other agents (for example test runs or file changes), respect it.
 - Specific user instructions override ALL other instructions, including the above, and including superpowers or skills
@@ -23,7 +21,7 @@ Freshell is a self-hosted, browser-accessible terminal multiplexer and session o
 
 ## Merging to Main (CRITICAL - Read This)
 
-**You are running inside Freshell right now. This session, the terminal you're typing in, is served by the main branch. If you break main, you kill yourself mid-operation and the user has to clean up your mess with a separate agent.**
+**You are running inside Freshell right now. This session, the terminal the user is typing in, is served by the main branch. If you break main, you kill yourself mid-operation and the user has to clean up your mess with a separate agent.**
 
 - Never run `git merge` directly on main - merge conflicts write `<<<<<<< HEAD` markers into source files, which crashes the server instantly
 - Always merge main INTO the feature branch in the worktree first, resolve any conflicts there
