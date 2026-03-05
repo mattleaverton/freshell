@@ -41,7 +41,10 @@
 - Capability state is updated only on `ready`.
 - Per-pane create mode is latched per `createRequestId` at send time (`legacy` or `split`) so reconnect/downgrade/upgrade does not mutate in-flight semantics.
 - In Phase B, each sent create must register `pendingCreateLifecycle[requestId]`. On `terminal.created`, client must either send exactly one viewport attach immediately, or transition to deferred `waiting_for_geometry` with guaranteed attach on visibility.
-- On reconnect in Phase B, `pendingCreateLifecycle` is replayed deterministically: if `terminalId` is known and attach generation is incomplete, send exactly one new `terminal.attach` with viewport after `ready`; if `terminalId` is unknown, await `terminal.created` and then attach.
+- On reconnect in Phase B, `pendingCreateLifecycle` is replayed deterministically:
+  - If `terminalId` is known and attach generation is incomplete, send exactly one new `terminal.attach` with viewport after `ready`.
+  - If `terminalId` is unknown, resend `terminal.create` with the same `requestId` exactly once per reconnect epoch after `ready`, then attach on resulting `terminal.created`.
+  - If `terminal.created` arrives before resend timer fires, cancel resend and proceed directly to attach lifecycle.
 
 ### Anti-regression invariants
 
@@ -57,14 +60,12 @@ Chunk 6 cannot start until all of the following pass:
 1. Telemetry gate is implemented and tested:
    - Server records rolling protocol counters:
      - `legacyAutoAttachCreates14d`
-     - `legacyClientIds14d`
      - `splitCreates14d`
    - Server exposes `GET /api/admin/protocol-migration-status` returning those fields plus `windowDays`.
 2. Gate checker command exists and is green against production snapshot:
    - `npm run protocol:migration:gate`
    - Command exits non-zero unless:
      - `legacyAutoAttachCreates14d === 0`
-     - `legacyClientIds14d === 0`
      - `splitCreates14d >= 100` (minimum sample floor to avoid false-zero interpretation)
 3. Two-window stability requirement:
    - Gate checker passes in two consecutive daily snapshots (24h apart), each covering the same 14-day rolling window policy.
@@ -737,6 +738,26 @@ it('capabilities reset to unknown/false on close and refresh on next ready', asy
   expect(c.supportsCreateAttachSplitV1()).toBe(false)
   expect(c.supportsAttachViewportV1()).toBe(false)
 })
+
+it('explicit-only reconnect with unknown terminalId resends in-flight create once after ready', async () => {
+  const c = new WsClient('ws://example/ws')
+  c.setLifecycleMode('explicit-only')
+  c.send({ type: 'terminal.create', requestId: 'reconnect-unknown-1', mode: 'shell' } as any)
+
+  const p1 = c.connect()
+  MockWebSocket.instances[0]._open()
+  MockWebSocket.instances[0]._message({ type: 'ready', capabilities: { createAttachSplitV1: true, attachViewportV1: true } })
+  await p1
+  MockWebSocket.instances[0]._close(1006, 'drop-after-create')
+
+  const p2 = c.connect()
+  MockWebSocket.instances[1]._open()
+  MockWebSocket.instances[1]._message({ type: 'ready', capabilities: { createAttachSplitV1: true, attachViewportV1: true } })
+  await p2
+
+  const sent = MockWebSocket.instances[1].sent.map((x) => JSON.parse(x))
+  expect(sent.filter((m) => m.type === 'terminal.create' && m.requestId === 'reconnect-unknown-1')).toHaveLength(1)
+})
 ```
 
 - [ ] **Step 2: Add failing TerminalView lifecycle tests**
@@ -910,6 +931,10 @@ if (ws.onclose) {
 // keep hello capability payload unchanged:
 // { sessionsPatchV1, sessionsPaginationV1, uiScreenshotV1 }
 // do not send createAttachSplitV1 / attachViewportV1 in hello
+
+// explicit-only lifecycle safety:
+// track in-flight creates by requestId; when reconnecting with unknown terminalId,
+// resend each in-flight create exactly once after ready for that reconnect epoch.
 ```
 
 - [ ] **Step 6: Replace boolean hydration flags with explicit deferred-attach state**
@@ -1174,13 +1199,12 @@ git commit -m "test(terminal): lock ordering for split create/attach and skew fa
 ```ts
 it('tracks legacy and split create counters for 14d rolling gate', async () => {
   const gate = createProtocolMigrationGate({ now: () => new Date('2026-03-05T12:00:00Z') })
-  gate.recordCreate({ clientId: 'legacy-a', mode: 'legacy_auto_attach' })
-  gate.recordCreate({ clientId: 'split-a', mode: 'split_explicit_attach' })
+  gate.recordCreate({ mode: 'legacy_auto_attach' })
+  gate.recordCreate({ mode: 'split_explicit_attach' })
 
   const snapshot = gate.snapshot()
   expect(snapshot.windowDays).toBe(14)
   expect(snapshot.legacyAutoAttachCreates14d).toBe(1)
-  expect(snapshot.legacyClientIds14d).toBe(1)
   expect(snapshot.splitCreates14d).toBe(1)
 })
 
@@ -1188,7 +1212,6 @@ it('migration checker fails while any legacy clients remain', async () => {
   const status = {
     windowDays: 14,
     legacyAutoAttachCreates14d: 3,
-    legacyClientIds14d: 2,
     splitCreates14d: 600,
   }
   await expect(runGateCheck(status)).rejects.toThrow(/legacy.*non-zero/i)
@@ -1198,7 +1221,6 @@ it('migration checker passes only at strict zero-legacy threshold', async () => 
   const status = {
     windowDays: 14,
     legacyAutoAttachCreates14d: 0,
-    legacyClientIds14d: 0,
     splitCreates14d: 600,
   }
   await expect(runGateCheck(status)).resolves.toBeUndefined()
@@ -1218,7 +1240,6 @@ Expected: FAIL on missing tracker/checker implementation.
 ```ts
 // on terminal.create handling in Phase A
 this.protocolMigrationGate.recordCreate({
-  clientId: state.clientInstanceId ?? 'unknown',
   mode: m.attachOnCreate === false ? 'split_explicit_attach' : 'legacy_auto_attach',
 })
 ```
@@ -1226,16 +1247,28 @@ this.protocolMigrationGate.recordCreate({
 **`server/index.ts`**
 
 ```ts
-app.get('/api/admin/protocol-migration-status', requireAdmin, (_req, res) => {
-  res.json(this.wsHandler.getProtocolMigrationSnapshot())
+// app.use('/api', authMiddleware(...)) already guards this route
+app.get('/api/admin/protocol-migration-status', (_req, res) => {
+  res.json(wsHandler.getProtocolMigrationSnapshot())
 })
 ```
 
 **`scripts/check-option-c-migration-gate.mjs`**
 
 ```js
+const args = parseArgs(process.argv.slice(2))
+const port = Number(process.env.PORT ?? 3001)
+const url = args.url ?? `http://127.0.0.1:${port}/api/admin/protocol-migration-status`
+const token = args.token ?? process.env.FRESHELL_TOKEN
+if (!token) fail('FRESHELL_TOKEN (or --token) is required')
+
+const res = await fetch(url, {
+  headers: { Authorization: `Bearer ${token}` },
+})
+if (!res.ok) fail(`gate endpoint failed: ${res.status}`)
+const snapshot = await res.json()
+
 if (snapshot.legacyAutoAttachCreates14d !== 0) fail('legacyAutoAttachCreates14d must be 0')
-if (snapshot.legacyClientIds14d !== 0) fail('legacyClientIds14d must be 0')
 if (snapshot.splitCreates14d < Number(args.minSplitCreates ?? 100)) fail('splitCreates14d below minimum floor')
 ```
 
@@ -1244,7 +1277,7 @@ if (snapshot.splitCreates14d < Number(args.minSplitCreates ?? 100)) fail('splitC
 ```json
 {
   "scripts": {
-    "protocol:migration:gate": "node scripts/check-option-c-migration-gate.mjs --url http://127.0.0.1:5174/api/admin/protocol-migration-status --min-split-creates 100"
+    "protocol:migration:gate": "node scripts/check-option-c-migration-gate.mjs --min-split-creates 100"
   }
 }
 ```
@@ -1260,7 +1293,7 @@ Expected: PASS.
 Run:
 `npm run protocol:migration:gate`
 Expected:
-- PASS only when `legacyAutoAttachCreates14d=0` and `legacyClientIds14d=0`.
+- PASS only when `legacyAutoAttachCreates14d=0` (with `splitCreates14d` above the floor).
 - FAIL otherwise (this is the enforced barrier to entering Chunk 6).
 
 - [ ] **Step 6: Verify Phase A matrix and full suite**
@@ -1389,6 +1422,20 @@ it('final explicit-only reconnect window: created-before-ready still yields exac
   h.emitReady()
   expect(h.sent('terminal.attach', 'term-final-reconnect')).toHaveLength(1)
 })
+
+it('final explicit-only reconnect window: unknown terminalId triggers one create resend then attach', async () => {
+  const h = createClientHarness({ lifecycleMode: 'explicit-only' })
+  h.sendCreate('final-reconnect-unknown')
+  h.simulateReconnectOpenWithoutReady()
+  // created was lost on prior socket; no terminalId known yet
+  expect(h.pendingLifecycle('final-reconnect-unknown')?.terminalId).toBeUndefined()
+
+  h.emitReady()
+  expect(h.sent('terminal.create').filter((m) => m.requestId === 'final-reconnect-unknown')).toHaveLength(1)
+
+  h.emitCreated('final-reconnect-unknown', 'term-final-reconnect-unknown')
+  expect(h.sent('terminal.attach', 'term-final-reconnect-unknown')).toHaveLength(1)
+})
 ```
 
 - [ ] **Step 2: Add objective gate checks in plan execution notes**
@@ -1436,6 +1483,7 @@ this.send(ws, createdMsg)
 // src/lib/ws-client.ts
 if (msg.type === 'terminal.create' && this.lifecycleMode === 'explicit-only' && !this.readyReceived) {
   this.preReadyCreateQueue.set(msg.requestId, msg)
+  this.pendingCreates.set(msg.requestId, { msg, terminalId: null })
   return
 }
 
@@ -1443,6 +1491,14 @@ if (incoming.type === 'ready' && this.lifecycleMode === 'explicit-only') {
   this.readyReceived = true
   for (const createMsg of this.preReadyCreateQueue.values()) this.sendNow(createMsg)
   this.preReadyCreateQueue.clear()
+
+  // reconnect safety: re-send unknown in-flight creates once per reconnect epoch
+  for (const [requestId, entry] of this.pendingCreates) {
+    if (entry.terminalId) continue
+    if (entry.lastResendEpoch === this.reconnectEpoch) continue
+    this.sendNow(entry.msg)
+    entry.lastResendEpoch = this.reconnectEpoch
+  }
 }
 
 // src/components/TerminalView.tsx
@@ -1452,6 +1508,12 @@ onTerminalCreated((created) => {
   const lifecycle = pendingCreateLifecycleRef.current.get(created.requestId)
   if (!lifecycle) return
   queueOrSendAttachForCurrentVisibility(created.terminalId) // always viewport attach; hidden => deferred waiting_for_geometry
+})
+
+onReconnectReady(() => {
+  // if create is still awaiting created and terminalId is unknown, trigger one resend of create
+  // for this reconnect epoch (idempotent via requestId on server).
+  replayPendingCreatesForReconnectEpoch()
 })
 ```
 
@@ -1537,7 +1599,7 @@ git commit -m "feat(protocol): finalize explicit create->attach lifecycle with s
 - [ ] Final state: `terminal.create` never auto-attaches or replays in any branch (fresh, idempotent, reused).
 - [ ] `terminal.attach` is the only replay entrypoint and enforces resize-before-replay ordering for each attach generation.
 - [ ] Dual-mode compatibility is preserved during Phase A, then removed in Chunk 6 with passing final-contract tests.
-- [ ] Chunk 6 is blocked by an enforceable migration barrier: `npm run protocol:migration:gate` must pass with `legacyAutoAttachCreates14d=0` and `legacyClientIds14d=0`; if not, plan remains incomplete.
+- [ ] Chunk 6 is blocked by an enforceable migration barrier: `npm run protocol:migration:gate` must pass with `legacyAutoAttachCreates14d=0` and `splitCreates14d` above floor; if not, plan remains incomplete.
 - [ ] New/old skew safety in Phase A: missing `ready` split capabilities yields legacy create behavior (no explicit attach-after-created).
 - [ ] Negotiation is coherent and one-way: split flags are advertised only in `ready.capabilities`; hello does not carry split flags.
 - [ ] Split attach without viewport in Phase A remains compatibility-safe by applying terminal current geometry and still preserving `resize -> ready -> output` order.
