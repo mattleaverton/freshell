@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript, React 18, xterm.js, Node/Express, WebSocket (`ws`), Zod protocol validation, Vitest (`vitest.config.ts` for client/jsdom; `vitest.server.config.ts` for server/node).
 
+**Process Note:** The execution handoff section is intentionally omitted in this document to match the orchestrator rule for this planning thread; reviewers should treat this omission as deliberate.
+
 ---
 
 ## Phase A Compatibility Matrix (Required Behavior)
@@ -27,16 +29,19 @@
 ### Negotiation Model (Authoritative)
 
 - Server -> client negotiation only: `ready.capabilities`.
-- Client -> server selection: `terminal.create.attachOnCreate`.
+- Phase A client -> server selection: `terminal.create.attachOnCreate`.
+- Phase B: selection is removed; server is explicit-only and treats `attachOnCreate` as compatibility-noop.
 - Server does **not** infer split support from hello capabilities.
 - Client hello payload must remain unchanged for split flags (no `createAttachSplitV1`/`attachViewportV1` in hello), preventing contradictory two-way gating.
 
-### Capability Decision Rules (Reconnect-Safe)
+### Capability Decision Rules (Phase-Specific, Reconnect-Safe)
 
-- When `ready` has not arrived yet, capability state is `unknown`; client MUST default to legacy create (`attachOnCreate` omitted).
+- Phase A (`compat`): when `ready` has not arrived yet, capability state is `unknown`; client defaults to legacy create (`attachOnCreate` omitted).
+- Phase B (`explicit-only`): when `ready` has not arrived yet, client MUST NOT emit `terminal.create`; it queues create intents in `preReadyCreateQueue` and flushes only after `ready`.
 - Capability state is updated only on `ready`.
 - Per-pane create mode is latched per `createRequestId` at send time (`legacy` or `split`) so reconnect/downgrade/upgrade does not mutate in-flight semantics.
-- On reconnect, existing split terminals still attach with viewport payload; new creates use latest `ready` capability state.
+- In Phase B, each sent create must register `pendingCreateLifecycle[requestId]`. On `terminal.created`, client must either send exactly one viewport attach immediately, or transition to deferred `waiting_for_geometry` with guaranteed attach on visibility.
+- On reconnect in Phase B, `pendingCreateLifecycle` is replayed deterministically: if `terminalId` is known and attach generation is incomplete, send exactly one new `terminal.attach` with viewport after `ready`; if `terminalId` is unknown, await `terminal.created` and then attach.
 
 ### Anti-regression invariants
 
@@ -45,15 +50,41 @@
 - Hidden-pane create/restore cannot replay before concrete geometry is applied server-side.
 - In split mode, replay must not start until server performs a resize call for that attach generation.
 
+### Chunk 6 Migration Barrier (Operationally Enforceable)
+
+Chunk 6 cannot start until all of the following pass:
+
+1. Telemetry gate is implemented and tested:
+   - Server records rolling protocol counters:
+     - `legacyAutoAttachCreates14d`
+     - `legacyClientIds14d`
+     - `splitCreates14d`
+   - Server exposes `GET /api/admin/protocol-migration-status` returning those fields plus `windowDays`.
+2. Gate checker command exists and is green against production snapshot:
+   - `npm run protocol:migration:gate`
+   - Command exits non-zero unless:
+     - `legacyAutoAttachCreates14d === 0`
+     - `legacyClientIds14d === 0`
+     - `splitCreates14d >= 100` (minimum sample floor to avoid false-zero interpretation)
+3. Two-window stability requirement:
+   - Gate checker passes in two consecutive daily snapshots (24h apart), each covering the same 14-day rolling window policy.
+4. Merge barrier:
+   - Any PR/commit containing Chunk 6 code removal must include successful output from `npm run protocol:migration:gate`.
+   - If this artifact is absent or failing, plan status remains incomplete by definition.
+
 ---
 
 ## File Structure Map
 
 - Modify: `shared/ws-protocol.ts`
 - Modify: `server/ws-handler.ts`
+- Create: `server/protocol-migration-gate.ts`
 - Modify: `server/terminal-stream/broker.ts`
+- Modify: `server/index.ts`
 - Modify: `src/lib/ws-client.ts`
 - Modify: `src/components/TerminalView.tsx`
+- Modify: `package.json`
+- Create: `scripts/check-option-c-migration-gate.mjs`
 - Modify: `test/unit/client/lib/ws-client.test.ts`
 - Modify: `test/unit/client/components/TerminalView.lifecycle.test.tsx`
 - Modify: `test/e2e/terminal-settings-remount-scrollback.test.tsx`
@@ -61,6 +92,7 @@
 - Create: `test/e2e/terminal-create-attach-ordering.test.tsx`
 - Modify: `test/server/ws-protocol.test.ts`
 - Modify: `test/server/ws-edge-cases.test.ts`
+- Create: `test/server/protocol-migration-gate.test.ts`
 - Modify: `test/server/ws-terminal-stream-v2-replay.test.ts`
 - Modify: `test/server/ws-terminal-create-reuse-running-claude.test.ts`
 - Modify: `test/server/ws-terminal-create-reuse-running-codex.test.ts`
@@ -468,6 +500,15 @@ class FakeRegistry extends EventEmitter {
   }
 }
 ```
+
+Add explicit branch-targeted split tests (not table-driven only) so reviewers can map each behavior to one branch:
+
+- `test/server/ws-terminal-create-reuse-running-codex.test.ts`
+  - `existingId branch + attachOnCreate:false => created only, zero auto attach.ready, explicit attach required`
+  - `canonical reuse branch + attachOnCreate:false => created only, explicit attach emits one attach.ready`
+- `test/server/ws-terminal-create-reuse-running-claude.test.ts`
+  - `existingAfterConfig branch + attachOnCreate:false => created only, zero auto attach.ready`
+  - `duplicate requestId in split mode => one created, no duplicate replay churn`
 
 - [ ] **Step 2: Run server suites and verify RED**
 
@@ -1116,15 +1157,113 @@ git commit -m "test(terminal): lock ordering for split create/attach and skew fa
 
 ---
 
-## Chunk 5: Final Verification + Cleanup
+## Chunk 5: Enforceable Migration Barrier + Phase A Verification
 
-### Task 5: Verify matrix end-to-end and complete full regression run
+### Task 5: Add operational gate so Chunk 6 cannot proceed while legacy clients still depend on auto-attach
 
 **Files:**
-- Modify: `server/terminal-stream/broker.ts` (only if minor helper cleanup is still needed)
-- Modify: any touched tests for final clarity
+- Create: `server/protocol-migration-gate.ts`
+- Modify: `server/ws-handler.ts`
+- Modify: `server/index.ts`
+- Create: `scripts/check-option-c-migration-gate.mjs`
+- Modify: `package.json`
+- Create: `test/server/protocol-migration-gate.test.ts`
 
-- [ ] **Step 1: Matrix verification tests (server + client)**
+- [ ] **Step 1: Add failing migration-gate tests first**
+
+```ts
+it('tracks legacy and split create counters for 14d rolling gate', async () => {
+  const gate = createProtocolMigrationGate({ now: () => new Date('2026-03-05T12:00:00Z') })
+  gate.recordCreate({ clientId: 'legacy-a', mode: 'legacy_auto_attach' })
+  gate.recordCreate({ clientId: 'split-a', mode: 'split_explicit_attach' })
+
+  const snapshot = gate.snapshot()
+  expect(snapshot.windowDays).toBe(14)
+  expect(snapshot.legacyAutoAttachCreates14d).toBe(1)
+  expect(snapshot.legacyClientIds14d).toBe(1)
+  expect(snapshot.splitCreates14d).toBe(1)
+})
+
+it('migration checker fails while any legacy clients remain', async () => {
+  const status = {
+    windowDays: 14,
+    legacyAutoAttachCreates14d: 3,
+    legacyClientIds14d: 2,
+    splitCreates14d: 600,
+  }
+  await expect(runGateCheck(status)).rejects.toThrow(/legacy.*non-zero/i)
+})
+
+it('migration checker passes only at strict zero-legacy threshold', async () => {
+  const status = {
+    windowDays: 14,
+    legacyAutoAttachCreates14d: 0,
+    legacyClientIds14d: 0,
+    splitCreates14d: 600,
+  }
+  await expect(runGateCheck(status)).resolves.toBeUndefined()
+})
+```
+
+- [ ] **Step 2: Run migration-gate tests and verify RED**
+
+Run:
+`npx vitest run test/server/protocol-migration-gate.test.ts --config vitest.server.config.ts`
+Expected: FAIL on missing tracker/checker implementation.
+
+- [ ] **Step 3: Implement telemetry + endpoint + checker command**
+
+**`server/ws-handler.ts`**
+
+```ts
+// on terminal.create handling in Phase A
+this.protocolMigrationGate.recordCreate({
+  clientId: state.clientInstanceId ?? 'unknown',
+  mode: m.attachOnCreate === false ? 'split_explicit_attach' : 'legacy_auto_attach',
+})
+```
+
+**`server/index.ts`**
+
+```ts
+app.get('/api/admin/protocol-migration-status', requireAdmin, (_req, res) => {
+  res.json(this.wsHandler.getProtocolMigrationSnapshot())
+})
+```
+
+**`scripts/check-option-c-migration-gate.mjs`**
+
+```js
+if (snapshot.legacyAutoAttachCreates14d !== 0) fail('legacyAutoAttachCreates14d must be 0')
+if (snapshot.legacyClientIds14d !== 0) fail('legacyClientIds14d must be 0')
+if (snapshot.splitCreates14d < Number(args.minSplitCreates ?? 100)) fail('splitCreates14d below minimum floor')
+```
+
+**`package.json`**
+
+```json
+{
+  "scripts": {
+    "protocol:migration:gate": "node scripts/check-option-c-migration-gate.mjs --url http://127.0.0.1:5174/api/admin/protocol-migration-status --min-split-creates 100"
+  }
+}
+```
+
+- [ ] **Step 4: Re-run migration-gate tests (GREEN)**
+
+Run:
+`npx vitest run test/server/protocol-migration-gate.test.ts --config vitest.server.config.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Run gate command in strict mode**
+
+Run:
+`npm run protocol:migration:gate`
+Expected:
+- PASS only when `legacyAutoAttachCreates14d=0` and `legacyClientIds14d=0`.
+- FAIL otherwise (this is the enforced barrier to entering Chunk 6).
+
+- [ ] **Step 6: Verify Phase A matrix and full suite**
 
 Run:
 `npx vitest run test/server/ws-protocol.test.ts test/server/ws-edge-cases.test.ts test/server/ws-terminal-stream-v2-replay.test.ts test/server/ws-terminal-create-reuse-running-claude.test.ts test/server/ws-terminal-create-reuse-running-codex.test.ts --config vitest.server.config.ts`
@@ -1132,18 +1271,17 @@ Run:
 Run:
 `npx vitest run test/unit/client/lib/ws-client.test.ts test/unit/client/components/TerminalView.lifecycle.test.tsx test/e2e/terminal-settings-remount-scrollback.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx test/e2e/terminal-create-attach-ordering.test.tsx --config vitest.config.ts`
 
+Run:
+`npm test`
+
 Expected: PASS.
 
-- [ ] **Step 2: Full suite gate**
-
-Run: `npm test`
-Expected: PASS.
-
-- [ ] **Step 3: Final commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add server src test shared
-git commit -m "refactor(terminal): finalize skew-safe option-c create/attach viewport rollout"
+git add server/protocol-migration-gate.ts server/ws-handler.ts server/index.ts \
+  scripts/check-option-c-migration-gate.mjs package.json test/server/protocol-migration-gate.test.ts
+git commit -m "feat(migration-gate): enforce zero-legacy barrier before option-c cleanup"
 ```
 
 ---
@@ -1153,15 +1291,29 @@ git commit -m "refactor(terminal): finalize skew-safe option-c create/attach vie
 ### Task 6: Remove legacy create auto-attach/replay and close the migration
 
 **Files:**
+- Modify: `shared/ws-protocol.ts`
 - Modify: `server/ws-handler.ts`
 - Modify: `server/terminal-stream/broker.ts`
+- Modify: `src/lib/ws-client.ts`
+- Modify: `src/components/TerminalView.tsx`
+- Modify: `test/unit/client/lib/ws-client.test.ts`
+- Modify: `test/unit/client/components/TerminalView.lifecycle.test.tsx`
+- Modify: `test/e2e/terminal-create-attach-ordering.test.tsx`
 - Modify: `test/server/ws-edge-cases.test.ts`
 - Modify: `test/server/ws-protocol.test.ts`
 - Modify: `test/server/ws-terminal-create-reuse-running-claude.test.ts`
 - Modify: `test/server/ws-terminal-create-reuse-running-codex.test.ts`
 - Modify: `test/server/ws-terminal-stream-v2-replay.test.ts`
 
-- [ ] **Step 1: Add failing end-state tests first**
+- [ ] **Step 0: Re-validate migration barrier (hard precondition)**
+
+Run: `npm run protocol:migration:gate`
+
+Expected:
+- PASS required to proceed.
+- If FAIL, stop Chunk 6 and keep legacy path; plan is incomplete by definition.
+
+- [ ] **Step 1: Add failing end-state tests first (server + client)**
 
 ```ts
 it('final contract: terminal.create never emits terminal.attach.ready', async () => {
@@ -1199,6 +1351,44 @@ it('final contract applies to reuse/idempotency branches too', async () => {
   expect(ready.terminalId).toBe(createdReuse.terminalId)
   await close()
 })
+
+it('final contract: terminal.attach without viewport is rejected and never replays', async () => {
+  const { ws, close } = await createAuthenticatedConnection()
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'final-vp-required', mode: 'shell' }))
+  const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'final-vp-required')
+
+  registry.simulateOutput(created.terminalId, 'must-not-replay')
+  ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: created.terminalId, sinceSeq: 0 }))
+  const err = await waitForMessage(ws, (m) => m.type === 'error')
+  expect(err.code).toBe('INVALID_MESSAGE')
+
+  const msgs = await collectMessages(ws, 200)
+  expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
+  expect(msgs.some((m) => m.type === 'terminal.output' && String(m.data).includes('must-not-replay'))).toBe(false)
+  await close()
+})
+
+it('final explicit-only client: queued create before ready flushes once, then guaranteed attach path executes', async () => {
+  const { wsClient, ws } = createClientHarness({ lifecycleMode: 'explicit-only' })
+  wsClient.createTerminal({ requestId: 'final-queued-1', mode: 'shell' })
+  expect(sentMessages(ws).some((m) => m.type === 'terminal.create')).toBe(false)
+
+  emitServer(ws, { type: 'ready', capabilities: { createAttachSplitV1: true, attachViewportV1: true } })
+  expect(sentMessages(ws).filter((m) => m.type === 'terminal.create' && m.requestId === 'final-queued-1')).toHaveLength(1)
+
+  emitServer(ws, { type: 'terminal.created', requestId: 'final-queued-1', terminalId: 'term-final-queued', createdAt: Date.now() })
+  expect(sentMessages(ws).filter((m) => m.type === 'terminal.attach' && m.terminalId === 'term-final-queued')).toHaveLength(1)
+})
+
+it('final explicit-only reconnect window: created-before-ready still yields exactly one attach after ready', async () => {
+  const h = createClientHarness({ lifecycleMode: 'explicit-only' })
+  h.sendCreate('final-reconnect-queued')
+  h.simulateReconnectOpenWithoutReady()
+  h.emitCreated('final-reconnect-queued', 'term-final-reconnect')
+  expect(h.sent('terminal.attach', 'term-final-reconnect')).toHaveLength(0)
+  h.emitReady()
+  expect(h.sent('terminal.attach', 'term-final-reconnect')).toHaveLength(1)
+})
 ```
 
 - [ ] **Step 2: Add objective gate checks in plan execution notes**
@@ -1207,12 +1397,25 @@ it('final contract applies to reuse/idempotency branches too', async () => {
 Gate A (code): no call sites of terminalStreamBroker.sendCreatedAndAttach remain.
 Gate B (tests): all create/reuse/idempotency tests assert explicit attach requirement.
 Gate C (behavior): npm test passes with final-contract assertions enabled.
-Gate D (deployment): finalize only after a coordinated rollout where all supported clients use explicit attach; no legacy create-only client remains in service.
+Gate D (operations): latest `npm run protocol:migration:gate` output is attached and passing in the same change set.
+Gate E (protocol): attach without viewport is rejected before any replay can start.
+Gate F (lifecycle): queued/reconnect create flows prove no `created-without-attach` dead-end.
 ```
 
 - [ ] **Step 3: Implement final cleanup**
 
 ```ts
+// shared/ws-protocol.ts
+// Final-state contract: viewport is required on terminal.attach
+export const TerminalAttachSchema = z.object({
+  type: z.literal('terminal.attach'),
+  terminalId: z.string().min(1),
+  sinceSeq: z.number().int().nonnegative().optional(),
+  attachRequestId: z.string().min(1).optional(),
+  cols: z.number().int().min(2).max(1000),
+  rows: z.number().int().min(2).max(500),
+})
+
 // server/ws-handler.ts
 const createdMsg = {
   type: 'terminal.created',
@@ -1224,9 +1427,32 @@ const createdMsg = {
 this.send(ws, createdMsg)
 // apply this for fresh create, duplicate requestId, existingAfterConfig, and canonical reuse.
 // ignore attachOnCreate in final state (accepted for wire compatibility only).
+// reject attach without viewport (schema + defensive guard), and always call resize before broker.attach.
+// every created response path calls the same create-result helper so the client lifecycle guarantee is uniform.
 
 // server/terminal-stream/broker.ts
 // delete sendCreatedAndAttach() and its exports/usages.
+
+// src/lib/ws-client.ts
+if (msg.type === 'terminal.create' && this.lifecycleMode === 'explicit-only' && !this.readyReceived) {
+  this.preReadyCreateQueue.set(msg.requestId, msg)
+  return
+}
+
+if (incoming.type === 'ready' && this.lifecycleMode === 'explicit-only') {
+  this.readyReceived = true
+  for (const createMsg of this.preReadyCreateQueue.values()) this.sendNow(createMsg)
+  this.preReadyCreateQueue.clear()
+}
+
+// src/components/TerminalView.tsx
+// remove legacy-mode branch; every create is explicit attach lifecycle
+pendingCreateLifecycleRef.current.set(requestId, { phase: 'await_created', attachGeneration: 0 })
+onTerminalCreated((created) => {
+  const lifecycle = pendingCreateLifecycleRef.current.get(created.requestId)
+  if (!lifecycle) return
+  queueOrSendAttachForCurrentVisibility(created.terminalId) // always viewport attach; hidden => deferred waiting_for_geometry
+})
 ```
 
 - [ ] **Step 4: Update all create-path tests to explicit attach**
@@ -1245,12 +1471,52 @@ async function attachWithViewport(ws: WebSocket, terminalId: string, attachReque
   const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === attachRequestId)
   expect(ready.terminalId).toBe(terminalId)
 }
+
+it('final existingId branch returns created only and requires explicit attach', async () => {
+  const { ws, close } = await createAuthenticatedConnection()
+  const existing = await seedRunningCodexTerminal(ws, CODEX_SESSION_ID)
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'final-existing-id', mode: 'codex', resumeSessionId: CODEX_SESSION_ID }))
+  const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'final-existing-id')
+  expect(created.terminalId).toBe(existing.terminalId)
+  const msgs = await collectMessages(ws, 150)
+  expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === existing.terminalId)).toBe(false)
+  await attachWithViewport(ws, existing.terminalId, 'final-existing-id-attach-1')
+  await close()
+})
+
+it('final existingAfterConfig branch returns created only and requires explicit attach', async () => {
+  const { ws, close } = await createAuthenticatedConnection()
+  const existing = await seedRunningClaudeTerminalAfterConfig(ws, CLAUDE_SESSION_ID)
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'final-existing-after-config', mode: 'claude', resumeSessionId: CLAUDE_SESSION_ID }))
+  const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'final-existing-after-config')
+  expect(created.terminalId).toBe(existing.terminalId)
+  const msgs = await collectMessages(ws, 150)
+  expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === existing.terminalId)).toBe(false)
+  await attachWithViewport(ws, existing.terminalId, 'final-existing-after-config-attach-1')
+  await close()
+})
+
+it('final duplicate requestId branch is idempotent and never auto-attaches', async () => {
+  const { ws, close } = await createAuthenticatedConnection()
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'final-dup-branch', mode: 'shell' }))
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'final-dup-branch', mode: 'shell' }))
+  const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'final-dup-branch')
+  const msgs = await collectMessages(ws, 200)
+  const createdCount = msgs.filter((m) => m.type === 'terminal.created' && m.requestId === 'final-dup-branch').length + 1
+  expect(createdCount).toBe(1)
+  expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
+  await attachWithViewport(ws, created.terminalId, 'final-dup-attach-1')
+  await close()
+})
 ```
 
 - [ ] **Step 5: Run end-state suites**
 
 Run:
-`npx vitest run test/server/ws-protocol.test.ts test/server/ws-edge-cases.test.ts test/server/ws-terminal-stream-v2-replay.test.ts test/server/ws-terminal-create-reuse-running-claude.test.ts test/server/ws-terminal-create-reuse-running-codex.test.ts --config vitest.server.config.ts`
+`npx vitest run test/server/ws-protocol.test.ts test/server/ws-edge-cases.test.ts test/server/protocol-migration-gate.test.ts test/server/ws-terminal-stream-v2-replay.test.ts test/server/ws-terminal-create-reuse-running-claude.test.ts test/server/ws-terminal-create-reuse-running-codex.test.ts --config vitest.server.config.ts`
+
+Run:
+`npx vitest run test/unit/client/lib/ws-client.test.ts test/unit/client/components/TerminalView.lifecycle.test.tsx test/e2e/terminal-create-attach-ordering.test.tsx --config vitest.config.ts`
 
 Run:
 `npm test`
@@ -1260,8 +1526,8 @@ Expected: PASS, with no create auto-attach behavior remaining.
 - [ ] **Step 6: Commit final convergence**
 
 ```bash
-git add server test
-git commit -m "feat(protocol): remove create auto-attach contract and finalize option-c lifecycle"
+git add shared server src test
+git commit -m "feat(protocol): finalize explicit create->attach lifecycle with strict viewport enforcement"
 ```
 
 ---
@@ -1271,12 +1537,15 @@ git commit -m "feat(protocol): remove create auto-attach contract and finalize o
 - [ ] Final state: `terminal.create` never auto-attaches or replays in any branch (fresh, idempotent, reused).
 - [ ] `terminal.attach` is the only replay entrypoint and enforces resize-before-replay ordering for each attach generation.
 - [ ] Dual-mode compatibility is preserved during Phase A, then removed in Chunk 6 with passing final-contract tests.
+- [ ] Chunk 6 is blocked by an enforceable migration barrier: `npm run protocol:migration:gate` must pass with `legacyAutoAttachCreates14d=0` and `legacyClientIds14d=0`; if not, plan remains incomplete.
 - [ ] New/old skew safety in Phase A: missing `ready` split capabilities yields legacy create behavior (no explicit attach-after-created).
 - [ ] Negotiation is coherent and one-way: split flags are advertised only in `ready.capabilities`; hello does not carry split flags.
 - [ ] Split attach without viewport in Phase A remains compatibility-safe by applying terminal current geometry and still preserving `resize -> ready -> output` order.
+- [ ] Final state enforces viewport on every `terminal.attach`; missing `cols/rows` is rejected and no replay bytes are emitted.
 - [ ] Restore ordering test proves `resize -> attach.ready -> replay output`.
 - [ ] Transport reconnect ordering test proves `resize -> attach.ready -> replay output` for reconnect attach generation.
-- [ ] Duplicate requestId and reuse helpers (all former `sendCreatedAndAttach` paths) are covered with split-mode tests proving no duplicate replay churn.
+- [ ] Duplicate requestId and reuse helpers (existingId, existingAfterConfig, canonical reuse, duplicate requestId) are covered in both Phase A and final state with no duplicate replay churn.
 - [ ] Capability state tests cover connect-failure flush and reconnect downgrade/upgrade windows.
+- [ ] Final explicit-only client tests prove queued/pre-ready create and reconnect windows cannot end in `created-without-attach` dead-end.
 - [ ] Hidden-pane create/restore: zero attach while hidden; exactly one attach with concrete viewport on visibility; deferred hydration state not cleared early.
 - [ ] Commands use correct Vitest configs: server tests under `vitest.server.config.ts`, client/e2e/jsdom tests under `vitest.config.ts`.
