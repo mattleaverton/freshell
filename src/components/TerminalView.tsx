@@ -1243,7 +1243,12 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
 
     const supportsSplitAttachMode = () => {
       try {
-        return Boolean((ws as any).supportsCreateAttachSplitV1?.() && (ws as any).supportsAttachViewportV1?.())
+        return Boolean(
+          typeof ws.supportsCreateAttachSplitV1 === 'function'
+          && typeof ws.supportsAttachViewportV1 === 'function'
+          && ws.supportsCreateAttachSplitV1()
+          && ws.supportsAttachViewportV1()
+        )
       } catch {
         return false
       }

@@ -236,7 +236,9 @@ export class WsClient {
             }
           }
 
-          if (isReconnect && this.lifecycleMode === 'explicit-only') {
+          const shouldResendInFlightCreates = this.lifecycleMode === 'explicit-only'
+            || this.serverCapabilities.createAttachSplitV1
+          if (isReconnect && shouldResendInFlightCreates) {
             for (const [requestId, entry] of this.inFlightCreates.entries()) {
               if (entry.terminalId) continue
               if (entry.lastResendEpoch === this.reconnectEpoch) continue
@@ -427,6 +429,7 @@ export class WsClient {
     this.ws = null
     this._state = 'disconnected'
     this.pendingMessages = []
+    this.inFlightCreates.clear()
     this._serverInstanceId = undefined
     this.serverCapabilities = {
       createAttachSplitV1: false,
