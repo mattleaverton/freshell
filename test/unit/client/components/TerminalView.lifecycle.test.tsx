@@ -1855,6 +1855,50 @@ describe('TerminalView lifecycle updates', () => {
       })
     })
 
+    it('handles same requestId terminal.created when terminalId changes', async () => {
+      wsMocks.supportsCreateAttachSplitV1.mockReturnValue(true)
+      wsMocks.supportsAttachViewportV1.mockReturnValue(true)
+
+      const { requestId } = await renderTerminalHarness({
+        status: 'creating',
+        hidden: false,
+        requestId: 'req-v2-replaced-created',
+      })
+
+      wsMocks.send.mockClear()
+      messageHandler!({
+        type: 'terminal.created',
+        requestId,
+        terminalId: 'term-v2-first-created',
+        createdAt: Date.now(),
+      })
+
+      await waitFor(() => {
+        const firstAttachCalls = wsMocks.send.mock.calls
+          .map(([msg]) => msg)
+          .filter((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-v2-first-created')
+        expect(firstAttachCalls).toHaveLength(1)
+      })
+
+      messageHandler!({
+        type: 'terminal.created',
+        requestId,
+        terminalId: 'term-v2-replaced-created',
+        createdAt: Date.now(),
+      })
+
+      await waitFor(() => {
+        const firstAttachCalls = wsMocks.send.mock.calls
+          .map(([msg]) => msg)
+          .filter((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-v2-first-created')
+        const replacedAttachCalls = wsMocks.send.mock.calls
+          .map(([msg]) => msg)
+          .filter((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-v2-replaced-created')
+        expect(firstAttachCalls).toHaveLength(1)
+        expect(replacedAttachCalls).toHaveLength(1)
+      })
+    })
+
     it('reconnect downgrade/upgrade changes apply only to future creates, not latched in-flight mode', async () => {
       wsMocks.supportsCreateAttachSplitV1.mockReturnValue(true)
       wsMocks.supportsAttachViewportV1.mockReturnValue(true)

@@ -237,7 +237,11 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
     sinceSeq: number
   } | null>(null)
   const createModeByRequestIdRef = useRef<Map<string, CreateAttachMode>>(new Map())
-  const handledCreatedRequestIdRef = useRef<string | null>(null)
+  const handledCreatedMessageRef = useRef<{
+    requestId: string
+    terminalId: string
+    mode: CreateAttachMode
+  } | null>(null)
   const deferredHiddenAttachIntentRef = useRef<AttachIntent | null>(null)
   const needsViewportHydrationRef = useRef(true)
   const pendingDeferredHydrationRef = useRef(false)
@@ -1269,8 +1273,8 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
       const restore = getRestoreFlag(requestId)
       const resumeId = getResumeSessionIdFromRef(contentRef)
       const createAttachMode = resolveCreateAttachMode(requestId)
-      if (handledCreatedRequestIdRef.current === requestId) {
-        handledCreatedRequestIdRef.current = null
+      if (handledCreatedMessageRef.current?.requestId === requestId) {
+        handledCreatedMessageRef.current = null
       }
       if (debugRef.current) log.debug('[TRACE resumeSessionId] sendCreate', {
         paneId: paneIdRef.current,
@@ -1446,7 +1450,8 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
         if (msg.type === 'terminal.created' && msg.requestId === reqId) {
           clearRateLimitRetry()
           const newId = msg.terminalId as string
-          if (handledCreatedRequestIdRef.current === reqId) {
+          const handled = handledCreatedMessageRef.current
+          if (handled?.requestId === reqId && handled.terminalId === newId) {
             if (debugRef.current) {
               log.debug('Ignoring duplicate terminal.created for handled request', {
                 paneId: paneIdRef.current,
@@ -1456,12 +1461,17 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
             }
             return
           }
-          handledCreatedRequestIdRef.current = reqId
           const latchedCreateAttachMode = createModeByRequestIdRef.current.get(reqId)
           if (latchedCreateAttachMode) {
             createModeByRequestIdRef.current.delete(reqId)
           }
-          const createAttachMode = latchedCreateAttachMode ?? 'legacy_auto_attach'
+          const createAttachMode = latchedCreateAttachMode
+            ?? (handled?.requestId === reqId ? handled.mode : 'legacy_auto_attach')
+          handledCreatedMessageRef.current = {
+            requestId: reqId,
+            terminalId: newId,
+            mode: createAttachMode,
+          }
           currentAttachRef.current = null
           if (debugRef.current) log.debug('[TRACE resumeSessionId] terminal.created received', {
             paneId: paneIdRef.current,
