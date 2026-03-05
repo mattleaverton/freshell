@@ -1629,7 +1629,10 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
         })
         if (!tid) return
         if (hiddenRef.current && supportsSplitAttachMode()) {
-          deferredHiddenAttachIntentRef.current = 'transport_reconnect'
+          // Preserve full viewport hydration if it is already pending for first reveal.
+          if (deferredHiddenAttachIntentRef.current !== 'viewport_hydrate') {
+            deferredHiddenAttachIntentRef.current = 'transport_reconnect'
+          }
           return
         }
         attachTerminal(tid, 'transport_reconnect')

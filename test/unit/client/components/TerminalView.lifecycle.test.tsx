@@ -1767,6 +1767,48 @@ describe('TerminalView lifecycle updates', () => {
       })
     })
 
+    it('hidden split create keeps viewport_hydrate intent when reconnect fires before reveal', async () => {
+      wsMocks.supportsCreateAttachSplitV1.mockReturnValue(true)
+      wsMocks.supportsAttachViewportV1.mockReturnValue(true)
+
+      const { requestId, rerender, store, tabId, paneId } = await renderTerminalHarness({
+        status: 'creating',
+        hidden: true,
+        requestId: 'req-v2-hidden-reconnect-intent',
+      })
+
+      wsMocks.send.mockClear()
+      messageHandler!({
+        type: 'terminal.created',
+        requestId,
+        terminalId: 'term-hidden-reconnect-intent',
+        createdAt: Date.now(),
+      })
+
+      // Reconnect while hidden should not downgrade pending viewport hydration to delta attach.
+      reconnectHandler?.()
+
+      rerender(
+        <Provider store={store}>
+          <TerminalViewFromStore tabId={tabId} paneId={paneId} hidden={false} />
+        </Provider>,
+      )
+
+      let attachCalls: Array<Record<string, unknown>> = []
+      await waitFor(() => {
+        attachCalls = wsMocks.send.mock.calls
+          .map(([msg]) => msg)
+          .filter((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-hidden-reconnect-intent')
+        expect(attachCalls.length).toBeGreaterThan(0)
+      })
+
+      expect(attachCalls[0]).toMatchObject({
+        sinceSeq: 0,
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+      })
+    })
+
     it('reconnect downgrade/upgrade changes apply only to future creates, not latched in-flight mode', async () => {
       wsMocks.supportsCreateAttachSplitV1.mockReturnValue(true)
       wsMocks.supportsAttachViewportV1.mockReturnValue(true)
