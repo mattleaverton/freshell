@@ -236,10 +236,15 @@ export class WsClient {
             }
           }
 
-          const shouldResendInFlightCreates = this.lifecycleMode === 'explicit-only'
-            || this.serverCapabilities.createAttachSplitV1
-          if (isReconnect && shouldResendInFlightCreates) {
+          if (isReconnect) {
             for (const [requestId, entry] of this.inFlightCreates.entries()) {
+              const createAttachOnCreate = isTerminalCreateMessage(entry.message)
+                ? (entry.message as { attachOnCreate?: unknown }).attachOnCreate
+                : undefined
+              const shouldResend = this.lifecycleMode === 'explicit-only'
+                || this.serverCapabilities.createAttachSplitV1
+                || createAttachOnCreate === false
+              if (!shouldResend) continue
               if (entry.terminalId) continue
               if (entry.lastResendEpoch === this.reconnectEpoch) continue
               if (createRequestIdsFlushed.has(requestId)) {

@@ -259,6 +259,39 @@ describe('WsClient.connect', () => {
     expect(secondCreates).toEqual(['keep-newer-create'])
   })
 
+  it('resends split create after reconnect even if downgraded ready caps omit split flags', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({
+      type: 'terminal.create',
+      requestId: 'split-downgrade-1',
+      mode: 'shell',
+      attachOnCreate: false,
+    } as any)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({
+      type: 'ready',
+      capabilities: { createAttachSplitV1: true, attachViewportV1: true },
+    })
+    await p1
+    MockWebSocket.instances[0]._close(1006, 'drop-after-split-create')
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({
+      type: 'ready',
+      capabilities: { createAttachSplitV1: false, attachViewportV1: false },
+    })
+    await p2
+
+    const secondCreates = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'terminal.create')
+      .map((m) => m.requestId)
+    expect(secondCreates).toEqual(['split-downgrade-1'])
+  })
+
   it('treats HELLO_TIMEOUT as transient and schedules reconnect', async () => {
     const setTimeoutSpy = vi.spyOn(window, 'setTimeout')
 
