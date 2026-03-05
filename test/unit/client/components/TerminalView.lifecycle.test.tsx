@@ -17,6 +17,8 @@ const wsMocks = vi.hoisted(() => ({
   connect: vi.fn().mockResolvedValue(undefined),
   onMessage: vi.fn(),
   onReconnect: vi.fn().mockReturnValue(() => {}),
+  supportsCreateAttachSplitV1: vi.fn(() => false),
+  supportsAttachViewportV1: vi.fn(() => false),
 }))
 
 const terminalThemeMocks = vi.hoisted(() => ({
@@ -34,6 +36,8 @@ vi.mock('@/lib/ws-client', () => ({
     connect: wsMocks.connect,
     onMessage: wsMocks.onMessage,
     onReconnect: wsMocks.onReconnect,
+    supportsCreateAttachSplitV1: wsMocks.supportsCreateAttachSplitV1,
+    supportsAttachViewportV1: wsMocks.supportsAttachViewportV1,
   }),
 }))
 
@@ -166,6 +170,10 @@ describe('TerminalView lifecycle updates', () => {
     clearLocalStorageForTest()
     __resetTerminalCursorCacheForTests()
     wsMocks.send.mockClear()
+    wsMocks.supportsCreateAttachSplitV1.mockReset()
+    wsMocks.supportsCreateAttachSplitV1.mockReturnValue(false)
+    wsMocks.supportsAttachViewportV1.mockReset()
+    wsMocks.supportsAttachViewportV1.mockReturnValue(false)
     terminalThemeMocks.getTerminalTheme.mockReset()
     terminalThemeMocks.getTerminalTheme.mockReturnValue({})
     restoreMocks.consumeTerminalRestoreRequestId.mockReset()
@@ -1598,10 +1606,11 @@ describe('TerminalView lifecycle updates', () => {
       terminalId?: string
       hidden?: boolean
       clearSends?: boolean
+      requestId?: string
     }) {
       const tabId = 'tab-v2-stream'
       const paneId = 'pane-v2-stream'
-      const requestId = 'req-v2-stream'
+      const requestId = opts?.requestId ?? 'req-v2-stream'
       const initialStatus = opts?.status ?? 'running'
       const terminalId = opts?.terminalId
 
@@ -1674,6 +1683,149 @@ describe('TerminalView lifecycle updates', () => {
         terminalId: terminalId || 'term-v2-stream',
       }
     }
+
+    it('new/new split path: sends terminal.create attachOnCreate:false then explicit attach with viewport', async () => {
+      wsMocks.supportsCreateAttachSplitV1.mockReturnValue(true)
+      wsMocks.supportsAttachViewportV1.mockReturnValue(true)
+
+      const { requestId } = await renderTerminalHarness({
+        status: 'creating',
+        hidden: false,
+        clearSends: false,
+        requestId: 'req-v2-split-create',
+      })
+
+      expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'terminal.create',
+        requestId,
+        attachOnCreate: false,
+      }))
+
+      wsMocks.send.mockClear()
+      messageHandler!({ type: 'terminal.created', requestId, terminalId: 'term-split-1', createdAt: Date.now() })
+      expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'terminal.attach',
+        terminalId: 'term-split-1',
+        sinceSeq: 0,
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+        attachRequestId: expect.any(String),
+      }))
+    })
+
+    it('new/old skew path: without split capability, does not explicit attach after terminal.created', async () => {
+      wsMocks.supportsCreateAttachSplitV1.mockReturnValue(false)
+      wsMocks.supportsAttachViewportV1.mockReturnValue(false)
+
+      const { requestId } = await renderTerminalHarness({
+        status: 'creating',
+        hidden: false,
+        requestId: 'req-v2-legacy-create',
+      })
+
+      wsMocks.send.mockClear()
+      messageHandler!({ type: 'terminal.created', requestId, terminalId: 'term-legacy-1', createdAt: Date.now() })
+
+      const attachCalls = wsMocks.send.mock.calls
+        .map(([msg]) => msg)
+        .filter((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-legacy-1')
+      expect(attachCalls).toHaveLength(0)
+    })
+
+    it('hidden create path defers attach until visible and measured', async () => {
+      wsMocks.supportsCreateAttachSplitV1.mockReturnValue(true)
+      wsMocks.supportsAttachViewportV1.mockReturnValue(true)
+
+      const { requestId, rerender, store, tabId, paneId } = await renderTerminalHarness({
+        status: 'creating',
+        hidden: true,
+        requestId: 'req-v2-hidden-create',
+      })
+
+      wsMocks.send.mockClear()
+      messageHandler!({ type: 'terminal.created', requestId, terminalId: 'term-hidden-create', createdAt: Date.now() })
+
+      let attachCalls = wsMocks.send.mock.calls.map(([msg]) => msg).filter((msg) => msg?.type === 'terminal.attach')
+      expect(attachCalls).toHaveLength(0)
+
+      rerender(
+        <Provider store={store}>
+          <TerminalViewFromStore tabId={tabId} paneId={paneId} hidden={false} />
+        </Provider>,
+      )
+
+      await waitFor(() => {
+        attachCalls = wsMocks.send.mock.calls
+          .map(([msg]) => msg)
+          .filter((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-hidden-create')
+        expect(attachCalls).toHaveLength(1)
+      })
+      expect(attachCalls[0]).toMatchObject({
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+        attachRequestId: expect.any(String),
+      })
+    })
+
+    it('reconnect downgrade/upgrade changes apply only to future creates, not latched in-flight mode', async () => {
+      wsMocks.supportsCreateAttachSplitV1.mockReturnValue(true)
+      wsMocks.supportsAttachViewportV1.mockReturnValue(true)
+
+      const first = await renderTerminalHarness({
+        status: 'creating',
+        hidden: false,
+        clearSends: false,
+        requestId: 'req-v2-latched-first',
+      })
+      expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'terminal.create',
+        requestId: first.requestId,
+        attachOnCreate: false,
+      }))
+
+      wsMocks.send.mockClear()
+      messageHandler!({
+        type: 'terminal.created',
+        requestId: first.requestId,
+        terminalId: 'term-latched-1',
+        createdAt: Date.now(),
+      })
+      expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'terminal.attach',
+        terminalId: 'term-latched-1',
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+      }))
+
+      wsMocks.send.mockClear()
+      wsMocks.supportsCreateAttachSplitV1.mockReturnValue(false)
+      wsMocks.supportsAttachViewportV1.mockReturnValue(false)
+      reconnectHandler?.()
+
+      expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'terminal.attach',
+        terminalId: 'term-latched-1',
+      }))
+
+      first.unmount()
+      wsMocks.send.mockClear()
+
+      const second = await renderTerminalHarness({
+        status: 'creating',
+        hidden: false,
+        clearSends: false,
+        requestId: 'req-v2-latched-second',
+      })
+      expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'terminal.create',
+        requestId: second.requestId,
+      }))
+      const latestCreate = wsMocks.send.mock.calls
+        .map(([msg]) => msg)
+        .filter((msg) => msg?.type === 'terminal.create' && msg?.requestId === second.requestId)
+        .at(-1)
+      expect(latestCreate?.attachOnCreate).toBeUndefined()
+    })
 
     it('sends sinceSeq=0 when attaching without previously rendered output', async () => {
       const { terminalId } = await renderTerminalHarness({ status: 'running', terminalId: 'term-v2-attach' })

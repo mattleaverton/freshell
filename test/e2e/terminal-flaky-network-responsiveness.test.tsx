@@ -19,6 +19,8 @@ const wsHarness = vi.hoisted(() => {
       handlers.add(handler)
       return () => handlers.delete(handler)
     }),
+    supportsCreateAttachSplitV1: vi.fn(() => false),
+    supportsAttachViewportV1: vi.fn(() => false),
     emit(msg: any) {
       for (const handler of handlers) handler(msg)
     },
@@ -34,6 +36,8 @@ vi.mock('@/lib/ws-client', () => ({
     connect: wsHarness.connect,
     onMessage: wsHarness.onMessage,
     onReconnect: wsHarness.onReconnect,
+    supportsCreateAttachSplitV1: wsHarness.supportsCreateAttachSplitV1,
+    supportsAttachViewportV1: wsHarness.supportsAttachViewportV1,
   }),
 }))
 
@@ -150,6 +154,10 @@ describe('terminal flaky-network responsiveness (e2e)', () => {
     wsHarness.reset()
     wsHarness.send.mockClear()
     wsHarness.connect.mockClear()
+    wsHarness.supportsCreateAttachSplitV1.mockReset()
+    wsHarness.supportsCreateAttachSplitV1.mockReturnValue(false)
+    wsHarness.supportsAttachViewportV1.mockReset()
+    wsHarness.supportsAttachViewportV1.mockReturnValue(false)
     terminalInstances.length = 0
     rafCallbacks = []
     rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb: FrameRequestCallback) => {

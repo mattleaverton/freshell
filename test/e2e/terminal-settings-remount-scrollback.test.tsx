@@ -22,6 +22,8 @@ const wsHarness = vi.hoisted(() => {
       handlers.add(handler)
       return () => handlers.delete(handler)
     }),
+    supportsCreateAttachSplitV1: vi.fn(() => false),
+    supportsAttachViewportV1: vi.fn(() => false),
     emit(msg: any) {
       for (const handler of handlers) {
         handler(msg)
@@ -39,6 +41,8 @@ vi.mock('@/lib/ws-client', () => ({
     connect: wsHarness.connect,
     onMessage: wsHarness.onMessage,
     onReconnect: wsHarness.onReconnect,
+    supportsCreateAttachSplitV1: wsHarness.supportsCreateAttachSplitV1,
+    supportsAttachViewportV1: wsHarness.supportsAttachViewportV1,
   }),
 }))
 
@@ -201,6 +205,10 @@ describe('settings remount scrollback hydration (e2e)', () => {
     wsHarness.reset()
     wsHarness.send.mockClear()
     wsHarness.connect.mockClear()
+    wsHarness.supportsCreateAttachSplitV1.mockReset()
+    wsHarness.supportsCreateAttachSplitV1.mockReturnValue(false)
+    wsHarness.supportsAttachViewportV1.mockReset()
+    wsHarness.supportsAttachViewportV1.mockReturnValue(false)
     terminalInstances.length = 0
     localStorage.clear()
     __resetTerminalCursorCacheForTests()
@@ -431,5 +439,63 @@ describe('settings remount scrollback hydration (e2e)', () => {
     expect(allWrites).toContain('hidden-live')
     const allGapLines = terminalInstances.flatMap((instance) => instance.writeln.mock.calls.map(([data]) => String(data)))
     expect(allGapLines.some((line) => line.includes('reconnect window exceeded'))).toBe(false)
+  })
+
+  it('hidden remount restore sends zero attach while hidden and one viewport attach on visibility', async () => {
+    wsHarness.supportsCreateAttachSplitV1.mockReturnValue(true)
+    wsHarness.supportsAttachViewportV1.mockReturnValue(true)
+
+    localStorage.setItem(TERMINAL_CURSOR_STORAGE_KEY, JSON.stringify({
+      'term-active': {
+        seq: 5,
+        updatedAt: Date.now(),
+      },
+      'term-hidden': {
+        seq: 7,
+        updatedAt: Date.now(),
+      },
+    }))
+    __resetTerminalCursorCacheForTests()
+
+    const store = createStore()
+    render(
+      <Provider store={store}>
+        <TerminalWorkspace showSettings={false} />
+      </Provider>,
+    )
+
+    await waitFor(() => {
+      const activeAttach = wsHarness.send.mock.calls
+        .map(([msg]) => msg)
+        .find((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-active')
+      expect(activeAttach).toBeDefined()
+    })
+
+    const hiddenAttachesWhileHidden = wsHarness.send.mock.calls
+      .map(([msg]) => msg)
+      .filter((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-hidden')
+    expect(hiddenAttachesWhileHidden).toHaveLength(0)
+
+    wsHarness.send.mockClear()
+    act(() => {
+      store.dispatch(setActiveTab('tab-2'))
+    })
+
+    await waitFor(() => {
+      const hiddenAttach = wsHarness.send.mock.calls
+        .map(([msg]) => msg)
+        .find((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-hidden')
+      expect(hiddenAttach).toMatchObject({
+        sinceSeq: 7,
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+        attachRequestId: expect.any(String),
+      })
+    })
+
+    const hiddenVisibleAttaches = wsHarness.send.mock.calls
+      .map(([msg]) => msg)
+      .filter((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === 'term-hidden')
+    expect(hiddenVisibleAttaches).toHaveLength(1)
   })
 })
