@@ -2,20 +2,27 @@
 
 > **For Claude:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Fix terminal restore/refresh scroll corruption by ensuring replay cannot start before server-applied geometry, and move terminal lifecycle to explicit `create -> attach` for capable clients without breaking mixed-version deployments.
+**Goal:** Fix terminal restore/refresh scroll corruption by ensuring replay cannot start before server-applied geometry, and converge the protocol to explicit `create -> attach` with no create-time auto-attach/replay contract.
 
-**Architecture:** Implement a dual-mode rollout with one-way negotiation. Server advertises split support in `ready.capabilities`; client opts into split mode only when those capabilities are present, by sending `terminal.create` with `attachOnCreate:false`. Server behavior keys on `attachOnCreate` (not hello-advertised split flags): omitted/true keeps legacy auto-attach, false requires explicit attach. Hidden panes use a geometry-gated deferred attach state so replay never starts until concrete dimensions are known and applied server-side.
+**Architecture:** Use a bounded two-phase rollout. Phase A (compatibility) keeps legacy safety while new clients opt into split mode via `attachOnCreate:false` after reading `ready.capabilities`; phase A preserves old-client behavior and avoids hard breaks for viewport-less attaches by applying a concrete server geometry before replay. Phase B (cleanup, in this same plan) removes create-time auto-attach and `sendCreatedAndAttach` entirely once objective gates are met, making Option C the only contract. Hidden panes use a geometry-gated deferred attach state so replay never starts until concrete dimensions are known and applied server-side.
 
 **Tech Stack:** TypeScript, React 18, xterm.js, Node/Express, WebSocket (`ws`), Zod protocol validation, Vitest (`vitest.config.ts` for client/jsdom; `vitest.server.config.ts` for server/node).
 
 ---
 
-## Compatibility Matrix (Required Behavior)
+## Phase A Compatibility Matrix (Required Behavior)
 
 - `Old client + New server`: Must remain legacy-safe. New server auto-attaches by default when client does not opt into split mode.
 - `New client + Old server`: Must remain legacy-safe. New client must detect missing `ready.capabilities.createAttachSplitV1` and stay in legacy create path (no explicit attach-after-created).
 - `New client + New server`: Must use split mode (`create` sends `attachOnCreate:false`; explicit attach with viewport).
 - `Old client + Old server`: Unchanged.
+
+## Phase B Final State (Option C Contract)
+
+- `terminal.create` only returns `terminal.created`; it never attaches or replays.
+- `terminal.attach` is the only replay ingress.
+- `sendCreatedAndAttach` and all create-time auto-attach branches are removed.
+- Duplicate/reuse/idempotent create paths also return `terminal.created` only.
 
 ### Negotiation Model (Authoritative)
 
@@ -24,11 +31,19 @@
 - Server does **not** infer split support from hello capabilities.
 - Client hello payload must remain unchanged for split flags (no `createAttachSplitV1`/`attachViewportV1` in hello), preventing contradictory two-way gating.
 
+### Capability Decision Rules (Reconnect-Safe)
+
+- When `ready` has not arrived yet, capability state is `unknown`; client MUST default to legacy create (`attachOnCreate` omitted).
+- Capability state is updated only on `ready`.
+- Per-pane create mode is latched per `createRequestId` at send time (`legacy` or `split`) so reconnect/downgrade/upgrade does not mutate in-flight semantics.
+- On reconnect, existing split terminals still attach with viewport payload; new creates use latest `ready` capability state.
+
 ### Anti-regression invariants
 
 - No `created`-without-attach dead-end in any matrix cell.
 - No duplicate replay churn caused by both auto-attach and explicit attach in skew windows.
 - Hidden-pane create/restore cannot replay before concrete geometry is applied server-side.
+- In split mode, replay must not start until server performs a resize call for that attach generation.
 
 ---
 
@@ -271,18 +286,108 @@ it('reused codex/claude create in split mode returns created only until explicit
   await close()
 })
 
-it('split attach without viewport is rejected and does not emit attach.ready', async () => {
+it('split-mode duplicate requestId is idempotent without duplicate attach.ready churn', async () => {
+  const { ws, close } = await createAuthenticatedConnection()
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'dup-split-1', mode: 'shell', attachOnCreate: false }))
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'dup-split-1', mode: 'shell', attachOnCreate: false }))
+
+  const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'dup-split-1')
+  const msgs = await collectMessages(ws, 200)
+  const createdCount = msgs.filter((m) => m.type === 'terminal.created' && m.requestId === 'dup-split-1').length + 1
+  const autoReadyCount = msgs.filter((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId).length
+  expect(createdCount).toBe(1)
+  expect(autoReadyCount).toBe(0)
+
+  ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: created.terminalId, sinceSeq: 0, cols: 120, rows: 40, attachRequestId: 'dup-split-attach' }))
+  const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'dup-split-attach')
+  expect(ready.terminalId).toBe(created.terminalId)
+  await close()
+})
+
+it('reuse helper paths honor split mode in both pre-config and post-config idempotency checks', async () => {
+  const { ws, close } = await createAuthenticatedConnection()
+  const createCases = [
+    { requestId: 'reuse-codex-existingId', mode: 'codex', resumeSessionId: CODEX_SESSION_ID },
+    { requestId: 'reuse-claude-existingAfterConfig', mode: 'claude', resumeSessionId: CLAUDE_SESSION_ID },
+  ] as const
+
+  for (const c of createCases) {
+    ws.send(JSON.stringify({
+      type: 'terminal.create',
+      requestId: c.requestId,
+      mode: c.mode,
+      resumeSessionId: c.resumeSessionId,
+      attachOnCreate: false,
+    }))
+    const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === c.requestId)
+    const preAttachMsgs = await collectMessages(ws, 150)
+    expect(preAttachMsgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
+
+    const attachRequestId = `attach-${c.requestId}`
+    ws.send(JSON.stringify({
+      type: 'terminal.attach',
+      terminalId: created.terminalId,
+      sinceSeq: 0,
+      cols: 120,
+      rows: 40,
+      attachRequestId,
+    }))
+    const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === attachRequestId)
+    expect(ready.terminalId).toBe(created.terminalId)
+    const postAttachMsgs = await collectMessages(ws, 150)
+    expect(postAttachMsgs.filter((m) => m.type === 'terminal.attach.ready' && m.attachRequestId === attachRequestId)).toHaveLength(0)
+  }
+
+  await close()
+})
+
+it('split-mode attach retry with same attachRequestId is idempotent and keeps resize-before-replay order', async () => {
+  const { ws, close } = await createAuthenticatedConnection()
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-attach-retry', mode: 'shell', attachOnCreate: false }))
+  const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'split-attach-retry')
+
+  const ordered: string[] = []
+  registry.onResize = () => ordered.push('resize')
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString())
+    if (msg.type === 'terminal.attach.ready') ordered.push('ready')
+    if (msg.type === 'terminal.output') ordered.push('output')
+  })
+
+  ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: created.terminalId, sinceSeq: 0, cols: 120, rows: 40, attachRequestId: 'retry-1' }))
+  ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: created.terminalId, sinceSeq: 0, cols: 120, rows: 40, attachRequestId: 'retry-1' }))
+
+  const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'retry-1')
+  expect(ready.terminalId).toBe(created.terminalId)
+  registry.simulateOutput(created.terminalId, 'retry-seed')
+  await waitForMessage(ws, (m) => m.type === 'terminal.output' && m.terminalId === created.terminalId)
+  const msgs = await collectMessages(ws, 200)
+  const duplicateReadyCount = msgs.filter((m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'retry-1').length
+  expect(duplicateReadyCount).toBe(0)
+  expect(ordered.indexOf('ready')).toBeGreaterThan(ordered.indexOf('resize'))
+  expect(ordered.indexOf('output')).toBeGreaterThan(ordered.indexOf('ready'))
+  await close()
+})
+
+it('split attach without viewport remains compatibility-safe and still enforces resize-before-replay', async () => {
   const { ws, close } = await createAuthenticatedConnection()
   ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-missing-vp', mode: 'shell', attachOnCreate: false }))
   const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'split-missing-vp')
 
-  ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: created.terminalId, sinceSeq: 0 }))
-  const err = await waitForMessage(ws, (m) => m.type === 'error')
-  expect(err.code).toBe('INVALID_MESSAGE')
-  expect(String(err.message)).toContain('viewport')
+  const ordered: string[] = []
+  registry.onResize = () => ordered.push('resize')
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString())
+    if (msg.type === 'terminal.attach.ready') ordered.push('ready')
+    if (msg.type === 'terminal.output') ordered.push('output')
+  })
 
-  const msgs = await collectMessages(ws, 150)
-  expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
+  registry.simulateOutput(created.terminalId, 'seed-split-missing-vp')
+  ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: created.terminalId, sinceSeq: 0 }))
+  await waitForMessage(ws, (m) => m.type === 'terminal.output' && m.terminalId === created.terminalId)
+  expect(ordered.indexOf('resize')).toBeGreaterThanOrEqual(0)
+  expect(ordered.indexOf('ready')).toBeGreaterThan(ordered.indexOf('resize'))
+  expect(ordered.indexOf('output')).toBeGreaterThan(ordered.indexOf('ready'))
   await close()
 })
 
@@ -395,24 +500,48 @@ private splitAttachTerminalIds = new Set<string>()
 ```ts
 const autoAttach = shouldAutoAttachOnCreate(m)
 
-if (autoAttach) {
-  const attached = await this.terminalStreamBroker.sendCreatedAndAttach(ws, {
-    requestId: m.requestId,
-    terminalId: record.terminalId,
-    createdAt: record.createdAt,
-    effectiveResumeSessionId,
-  })
-  if (attached) state.attachedTerminalIds.add(record.terminalId)
-} else {
-  this.splitAttachTerminalIds.add(record.terminalId)
-  this.send(ws, {
+async function sendCreateResult(opts: {
+  ws: LiveWebSocket
+  requestId: string
+  terminalId: string
+  createdAt: number
+  effectiveResumeSessionId?: string
+  autoAttach: boolean
+}) {
+  if (opts.autoAttach) {
+    const attached = await this.terminalStreamBroker.sendCreatedAndAttach(opts.ws, {
+      requestId: opts.requestId,
+      terminalId: opts.terminalId,
+      createdAt: opts.createdAt,
+      effectiveResumeSessionId: opts.effectiveResumeSessionId,
+    })
+    if (attached) state.attachedTerminalIds.add(opts.terminalId)
+    return
+  }
+
+  this.splitAttachTerminalIds.add(opts.terminalId)
+  this.send(opts.ws, {
     type: 'terminal.created',
-    requestId: m.requestId,
-    terminalId: record.terminalId,
-    createdAt: record.createdAt,
-    ...(effectiveResumeSessionId ? { effectiveResumeSessionId } : {}),
+    requestId: opts.requestId,
+    terminalId: opts.terminalId,
+    createdAt: opts.createdAt,
+    ...(opts.effectiveResumeSessionId ? { effectiveResumeSessionId: opts.effectiveResumeSessionId } : {}),
   })
 }
+
+// Use sendCreateResult() for ALL create return paths:
+// - fresh create
+// - existingId idempotency
+// - existingAfterConfigId idempotency
+// - canonical session reuse (codex/claude)
+await sendCreateResult({
+  ws,
+  requestId: m.requestId,
+  terminalId: record.terminalId,
+  createdAt: record.createdAt,
+  effectiveResumeSessionId,
+  autoAttach,
+})
 ```
 
 - [ ] **Step 5: Implement attach viewport-then-replay ordering**
@@ -423,17 +552,21 @@ if (autoAttach) {
 const splitAttach = this.splitAttachTerminalIds.has(m.terminalId)
 const hasViewport = typeof m.cols === 'number' && typeof m.rows === 'number'
 
-if (splitAttach && !hasViewport) {
-  this.sendError(ws, {
-    code: 'INVALID_MESSAGE',
-    message: 'Split attach requires viewport cols and rows',
-    terminalId: m.terminalId,
-  })
+const record = this.registry.get(m.terminalId)
+if (!record) {
+  this.sendError(ws, { code: 'INVALID_TERMINAL_ID', message: 'Terminal not running', terminalId: m.terminalId })
   return
 }
 
-if (hasViewport) {
-  const resized = this.registry.resize(m.terminalId, m.cols!, m.rows!)
+// Compatibility behavior:
+// - split attach with viewport: use caller viewport
+// - split attach without viewport: fallback to record.cols/rows (legacy-safe skew path)
+// - legacy attach: keep existing behavior
+const resizeCols = hasViewport ? m.cols! : (splitAttach ? record.cols : undefined)
+const resizeRows = hasViewport ? m.rows! : (splitAttach ? record.rows : undefined)
+
+if (typeof resizeCols === 'number' && typeof resizeRows === 'number') {
+  const resized = this.registry.resize(m.terminalId, resizeCols, resizeRows)
   if (!resized) {
     this.sendError(ws, { code: 'INVALID_TERMINAL_ID', message: 'Terminal not running', terminalId: m.terminalId })
     return
@@ -514,6 +647,52 @@ it('defaults capabilities to false when server does not advertise them', async (
   MockWebSocket.instances[0]._open()
   MockWebSocket.instances[0]._message({ type: 'ready' })
   await p
+  expect(c.supportsCreateAttachSplitV1()).toBe(false)
+  expect(c.supportsAttachViewportV1()).toBe(false)
+})
+
+it('connect-time queued create resolves mode after ready (no stale unknown state)', async () => {
+  const c = new WsClient('ws://example/ws')
+  c.send({ type: 'terminal.create', requestId: 'queued-1', mode: 'shell', attachOnCreate: false } as any)
+  const p = c.connect()
+  MockWebSocket.instances[0]._open()
+  MockWebSocket.instances[0]._message({ type: 'ready', capabilities: { createAttachSplitV1: true, attachViewportV1: true } })
+  await p
+  const flushed = MockWebSocket.instances[0].sent.map((x) => JSON.parse(x))
+  expect(flushed.some((m) => m.type === 'terminal.create' && m.requestId === 'queued-1' && m.attachOnCreate === false)).toBe(true)
+})
+
+it('connect failure then ready flush sends queued create exactly once', async () => {
+  const c = new WsClient('ws://example/ws')
+  c.send({ type: 'terminal.create', requestId: 'queued-fail-then-ready', mode: 'shell' } as any)
+
+  const p1 = c.connect()
+  MockWebSocket.instances[0]._open()
+  MockWebSocket.instances[0]._close(1006, 'before-ready')
+  await expect(p1).rejects.toThrow()
+
+  const p2 = c.connect()
+  MockWebSocket.instances[1]._open()
+  MockWebSocket.instances[1]._message({ type: 'ready', capabilities: { createAttachSplitV1: true, attachViewportV1: true } })
+  await p2
+
+  const sent = MockWebSocket.instances[1].sent.map((x) => JSON.parse(x))
+  expect(sent.filter((m) => m.type === 'terminal.create' && m.requestId === 'queued-fail-then-ready')).toHaveLength(1)
+})
+
+it('capabilities reset to unknown/false on close and refresh on next ready', async () => {
+  const c = new WsClient('ws://example/ws')
+  const p1 = c.connect()
+  MockWebSocket.instances[0]._open()
+  MockWebSocket.instances[0]._message({ type: 'ready', capabilities: { createAttachSplitV1: true, attachViewportV1: true } })
+  await p1
+  expect(c.supportsCreateAttachSplitV1()).toBe(true)
+
+  MockWebSocket.instances[0]._close(1006, 'reconnect')
+  const p2 = c.connect()
+  MockWebSocket.instances[1]._open()
+  MockWebSocket.instances[1]._message({ type: 'ready', capabilities: { createAttachSplitV1: false, attachViewportV1: false } })
+  await p2
   expect(c.supportsCreateAttachSplitV1()).toBe(false)
   expect(c.supportsAttachViewportV1()).toBe(false)
 })
@@ -599,6 +778,27 @@ it('hidden create path defers attach until visible and measured', async () => {
     attachRequestId: expect.any(String),
   })
 })
+
+it('reconnect downgrade/upgrade changes apply only to future creates, not latched in-flight mode', async () => {
+  wsMocks.supportsCreateAttachSplitV1.mockReturnValue(true)
+  wsMocks.supportsAttachViewportV1.mockReturnValue(true)
+  const first = await renderTerminalHarness({ status: 'creating', hidden: false })
+  expect(lastSent('terminal.create')).toMatchObject({ requestId: first.requestId, attachOnCreate: false })
+
+  // simulate reconnect downgrade
+  wsMocks.supportsCreateAttachSplitV1.mockReturnValue(false)
+  wsMocks.supportsAttachViewportV1.mockReturnValue(false)
+  triggerReconnect()
+
+  // existing split terminal still reconnects via explicit attach generation
+  emitServer({ type: 'terminal.created', requestId: first.requestId, terminalId: 'term-latched-1', createdAt: Date.now() })
+  expect(lastSent('terminal.attach')).toMatchObject({ terminalId: 'term-latched-1' })
+
+  // new create after downgrade must use legacy mode
+  const second = await renderTerminalHarness({ status: 'creating', hidden: false })
+  expect(lastSent('terminal.create')).toMatchObject({ requestId: second.requestId })
+  expect(lastSent('terminal.create').attachOnCreate).toBeUndefined()
+})
 ```
 
 - [ ] **Step 3: Add failing hidden restore/remount e2e tests**
@@ -658,6 +858,14 @@ if (msg.type === 'ready') {
   }
 }
 
+if (ws.onclose) {
+  // clear to unknown/legacy-safe defaults until next ready
+  this.serverCapabilities = {
+    createAttachSplitV1: false,
+    attachViewportV1: false,
+  }
+}
+
 // keep hello capability payload unchanged:
 // { sessionsPatchV1, sessionsPaginationV1, uiScreenshotV1 }
 // do not send createAttachSplitV1 / attachViewportV1 in hello
@@ -679,6 +887,8 @@ const deferredAttachRef = useRef<DeferredAttachState>({
   pendingSinceSeq: 0,
   pendingIntent: null,
 })
+
+const createModeByRequestIdRef = useRef<Map<string, 'legacy' | 'split'>>(new Map())
 ```
 
 Transition rules to implement explicitly:
@@ -692,6 +902,7 @@ Transition rules to implement explicitly:
 
 ```ts
 const splitMode = ws.supportsCreateAttachSplitV1() && ws.supportsAttachViewportV1()
+createModeByRequestIdRef.current.set(requestId, splitMode ? 'split' : 'legacy')
 
 ws.send({
   type: 'terminal.create',
@@ -706,7 +917,8 @@ ws.send({
 })
 
 // on terminal.created:
-if (splitMode) {
+const modeForRequest = createModeByRequestIdRef.current.get(requestId) ?? 'legacy'
+if (modeForRequest === 'split') {
   // explicit attach path (defer when hidden)
   queueOrSendAttachForCurrentVisibility(newId)
 } else {
@@ -936,14 +1148,135 @@ git commit -m "refactor(terminal): finalize skew-safe option-c create/attach vie
 
 ---
 
+## Chunk 6: Bounded Final Convergence (Remove Create Auto-Attach Contract)
+
+### Task 6: Remove legacy create auto-attach/replay and close the migration
+
+**Files:**
+- Modify: `server/ws-handler.ts`
+- Modify: `server/terminal-stream/broker.ts`
+- Modify: `test/server/ws-edge-cases.test.ts`
+- Modify: `test/server/ws-protocol.test.ts`
+- Modify: `test/server/ws-terminal-create-reuse-running-claude.test.ts`
+- Modify: `test/server/ws-terminal-create-reuse-running-codex.test.ts`
+- Modify: `test/server/ws-terminal-stream-v2-replay.test.ts`
+
+- [ ] **Step 1: Add failing end-state tests first**
+
+```ts
+it('final contract: terminal.create never emits terminal.attach.ready', async () => {
+  const { ws, close } = await createAuthenticatedConnection()
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'final-no-auto', mode: 'shell' }))
+  const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'final-no-auto')
+  const msgs = await collectMessages(ws, 200)
+  expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
+  await close()
+})
+
+it('final contract applies to reuse/idempotency branches too', async () => {
+  const { ws, close } = await createAuthenticatedConnection()
+
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'final-dup-1', mode: 'shell' }))
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'final-dup-1', mode: 'shell' }))
+  const createdDup = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'final-dup-1')
+  const dupMsgs = await collectMessages(ws, 150)
+  expect(dupMsgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === createdDup.terminalId)).toBe(false)
+
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'final-reuse-codex', mode: 'codex', resumeSessionId: CODEX_SESSION_ID }))
+  const createdReuse = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'final-reuse-codex')
+  const reuseMsgs = await collectMessages(ws, 150)
+  expect(reuseMsgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === createdReuse.terminalId)).toBe(false)
+
+  ws.send(JSON.stringify({
+    type: 'terminal.attach',
+    terminalId: createdReuse.terminalId,
+    sinceSeq: 0,
+    cols: 120,
+    rows: 40,
+    attachRequestId: 'final-reuse-attach-1',
+  }))
+  const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'final-reuse-attach-1')
+  expect(ready.terminalId).toBe(createdReuse.terminalId)
+  await close()
+})
+```
+
+- [ ] **Step 2: Add objective gate checks in plan execution notes**
+
+```text
+Gate A (code): no call sites of terminalStreamBroker.sendCreatedAndAttach remain.
+Gate B (tests): all create/reuse/idempotency tests assert explicit attach requirement.
+Gate C (behavior): npm test passes with final-contract assertions enabled.
+Gate D (deployment): finalize only after a coordinated rollout where all supported clients use explicit attach; no legacy create-only client remains in service.
+```
+
+- [ ] **Step 3: Implement final cleanup**
+
+```ts
+// server/ws-handler.ts
+const createdMsg = {
+  type: 'terminal.created',
+  requestId: m.requestId,
+  terminalId: record.terminalId,
+  createdAt: record.createdAt,
+  ...(effectiveResumeSessionId ? { effectiveResumeSessionId } : {}),
+}
+this.send(ws, createdMsg)
+// apply this for fresh create, duplicate requestId, existingAfterConfig, and canonical reuse.
+// ignore attachOnCreate in final state (accepted for wire compatibility only).
+
+// server/terminal-stream/broker.ts
+// delete sendCreatedAndAttach() and its exports/usages.
+```
+
+- [ ] **Step 4: Update all create-path tests to explicit attach**
+
+```ts
+async function createOnly(ws: WebSocket, requestId: string): Promise<string> {
+  ws.send(JSON.stringify({ type: 'terminal.create', requestId, mode: 'shell' }))
+  const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === requestId)
+  const msgs = await collectMessages(ws, 150)
+  expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
+  return created.terminalId
+}
+
+async function attachWithViewport(ws: WebSocket, terminalId: string, attachRequestId: string): Promise<void> {
+  ws.send(JSON.stringify({ type: 'terminal.attach', terminalId, sinceSeq: 0, cols: 120, rows: 40, attachRequestId }))
+  const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === attachRequestId)
+  expect(ready.terminalId).toBe(terminalId)
+}
+```
+
+- [ ] **Step 5: Run end-state suites**
+
+Run:
+`npx vitest run test/server/ws-protocol.test.ts test/server/ws-edge-cases.test.ts test/server/ws-terminal-stream-v2-replay.test.ts test/server/ws-terminal-create-reuse-running-claude.test.ts test/server/ws-terminal-create-reuse-running-codex.test.ts --config vitest.server.config.ts`
+
+Run:
+`npm test`
+
+Expected: PASS, with no create auto-attach behavior remaining.
+
+- [ ] **Step 6: Commit final convergence**
+
+```bash
+git add server test
+git commit -m "feat(protocol): remove create auto-attach contract and finalize option-c lifecycle"
+```
+
+---
+
 ## Definition of Done (Must Be Demonstrated)
 
-- [ ] New/new path: `terminal.create` (with `attachOnCreate:false`) does not auto-attach; explicit `terminal.attach` with `cols/rows` required and replay starts only after server applies resize.
-- [ ] Old/new path: old client (no split capability) still receives `terminal.attach.ready` from `terminal.create` legacy auto-attach path.
-- [ ] New/old path: new client detects missing ready capabilities and does not send explicit attach-after-created, preventing duplicate replay churn.
+- [ ] Final state: `terminal.create` never auto-attaches or replays in any branch (fresh, idempotent, reused).
+- [ ] `terminal.attach` is the only replay entrypoint and enforces resize-before-replay ordering for each attach generation.
+- [ ] Dual-mode compatibility is preserved during Phase A, then removed in Chunk 6 with passing final-contract tests.
+- [ ] New/old skew safety in Phase A: missing `ready` split capabilities yields legacy create behavior (no explicit attach-after-created).
 - [ ] Negotiation is coherent and one-way: split flags are advertised only in `ready.capabilities`; hello does not carry split flags.
-- [ ] Split attach without viewport is rejected (`INVALID_MESSAGE`) and emits no `terminal.attach.ready` or replay output.
+- [ ] Split attach without viewport in Phase A remains compatibility-safe by applying terminal current geometry and still preserving `resize -> ready -> output` order.
 - [ ] Restore ordering test proves `resize -> attach.ready -> replay output`.
 - [ ] Transport reconnect ordering test proves `resize -> attach.ready -> replay output` for reconnect attach generation.
+- [ ] Duplicate requestId and reuse helpers (all former `sendCreatedAndAttach` paths) are covered with split-mode tests proving no duplicate replay churn.
+- [ ] Capability state tests cover connect-failure flush and reconnect downgrade/upgrade windows.
 - [ ] Hidden-pane create/restore: zero attach while hidden; exactly one attach with concrete viewport on visibility; deferred hydration state not cleared early.
 - [ ] Commands use correct Vitest configs: server tests under `vitest.server.config.ts`, client/e2e/jsdom tests under `vitest.config.ts`.
