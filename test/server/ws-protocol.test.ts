@@ -433,6 +433,18 @@ describe('ws protocol', () => {
     return { ws, close: () => closeWebSocket(ws) }
   }
 
+  it('ready advertises terminal split capabilities', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
+    await new Promise<void>((resolve) => ws.on('open', () => resolve()))
+    ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
+    const ready = await waitForMessage(ws, (m) => m.type === 'ready')
+    expect(ready.capabilities).toMatchObject({
+      createAttachSplitV1: true,
+      attachViewportV1: true,
+    })
+    await closeWebSocket(ws)
+  })
+
   // Helper function to create a terminal and return its ID
   async function createTerminal(ws: WebSocket, requestId: string): Promise<string> {
     ws.send(JSON.stringify({ type: 'terminal.create', requestId, mode: 'shell' }))
@@ -448,6 +460,24 @@ describe('ws protocol', () => {
     }
     return msg.terminalId
   }
+
+  it('terminal.attach rejects partial viewport payload (cols only)', async () => {
+    const { ws, close } = await createAuthenticatedConnection()
+    const terminalId = await createTerminal(ws, 'partial-viewport-create')
+    ws.send(JSON.stringify({ type: 'terminal.attach', terminalId, cols: 120 }))
+    const err = await waitForMessage(ws, (m) => m.type === 'error')
+    expect(err.code).toBe('INVALID_MESSAGE')
+    await close()
+  })
+
+  it('terminal.attach accepts paired viewport payload', async () => {
+    const { ws, close } = await createAuthenticatedConnection()
+    const terminalId = await createTerminal(ws, 'paired-viewport-create')
+    ws.send(JSON.stringify({ type: 'terminal.attach', terminalId, cols: 120, rows: 40, sinceSeq: 0 }))
+    const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId)
+    expect(ready.terminalId).toBe(terminalId)
+    await close()
+  })
 
   // Helper to collect messages until a condition is met
   function collectUntil(ws: WebSocket, predicate: (msg: any) => boolean, timeoutMs = 1000): Promise<any[]> {

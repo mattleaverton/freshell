@@ -913,7 +913,15 @@ export class WsHandler {
           this.sessionRepairService.prioritizeSessions(m.sessions)
         }
 
-        this.send(ws, { type: 'ready', timestamp: nowIso(), serverInstanceId: this.serverInstanceId })
+        this.send(ws, {
+          type: 'ready',
+          timestamp: nowIso(),
+          serverInstanceId: this.serverInstanceId,
+          capabilities: {
+            createAttachSplitV1: true,
+            attachViewportV1: true,
+          },
+        })
         if (this.extensionManager) {
           this.safeSend(ws, {
             type: 'extensions.registry',
