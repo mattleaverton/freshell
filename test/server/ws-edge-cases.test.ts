@@ -1304,20 +1304,31 @@ describe('WebSocket edge cases', () => {
       const { ws: ws2, close: close2 } = await createAuthenticatedConnection()
       ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
 
-      const [ready, firstReplay] = await waitForMessages(ws2, [
+      const ready = await waitForMessage(
+        ws2,
         (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId,
-        (m) => m.type === 'terminal.output' && m.terminalId === terminalId,
-      ], 5000)
-      const replayFrames = await collectMessages(ws2, 150)
-      const replayText = [firstReplay, ...replayFrames]
-        .filter((m) => m.type === 'terminal.output' && m.terminalId === terminalId)
-        .map((m) => m.data as string)
-        .join('')
+      )
+
+      let replayData = ''
+      let nextSeq = ready.replayFromSeq as number
+      const replayToSeq = ready.replayToSeq as number
+      while (nextSeq <= replayToSeq) {
+        const frame = await waitForMessage(
+          ws2,
+          (m) => m.type === 'terminal.output'
+            && m.terminalId === terminalId
+            && typeof m.seqStart === 'number'
+            && m.seqStart === nextSeq
+            && typeof m.seqEnd === 'number',
+        )
+        replayData += frame.data as string
+        nextSeq = (frame.seqEnd as number) + 1
+      }
 
       // Snapshot should contain recent markers but not all
       expect(ready.headSeq).toBeGreaterThan(0)
-      expect(/marker-(6|7|8|9)\|/.test(replayText)).toBe(true)
-      expect(replayText).not.toContain('marker-0')
+      expect(/marker-(6|7|8|9)\|/.test(replayData)).toBe(true)
+      expect(replayData).not.toContain('marker-0')
       // Earlier markers may be evicted depending on buffer size
 
       close2()
