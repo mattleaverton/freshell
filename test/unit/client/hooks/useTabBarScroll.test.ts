@@ -447,4 +447,96 @@ describe('useTabBarScroll', () => {
       })
     })
   })
+
+  describe('auto-scroll on active tab change', () => {
+    it('calls scrollToTab when activeTabId changes', () => {
+      // Container at viewport left=0, clientWidth=300, scrollLeft=0
+      const el = createMockScrollContainer({
+        scrollWidth: 800, clientWidth: 300, scrollLeft: 0, boundingLeft: 0,
+      })
+
+      // Tab at viewport left=350, width=100
+      const tabEl = createMockTabElement('tab-2', { boundingLeft: 350, boundingWidth: 100 })
+      el.appendChild(tabEl)
+      el.querySelector = vi.fn((selector: string) => {
+        if (selector === '[data-tab-id="tab-2"]') return tabEl
+        return null
+      }) as any
+
+      const { result, rerender } = renderHook(
+        ({ activeTabId, tabCount }) => {
+          const hookResult = useTabBarScroll(activeTabId, tabCount)
+          return hookResult
+        },
+        { initialProps: { activeTabId: 'tab-1' as string | null, tabCount: 5 } }
+      )
+
+      // Attach the element via callback ref
+      act(() => {
+        result.current.callbackRef(el)
+      })
+
+      // Clear any initial scrollTo calls
+      ;(el.scrollTo as ReturnType<typeof vi.fn>).mockClear()
+
+      // Change activeTabId to tab-2
+      rerender({ activeTabId: 'tab-2', tabCount: 5 })
+
+      // tabCenter = (350 - 0) + 0 + 50 = 400, target = 400 - 150 = 250
+      expect(el.scrollTo).toHaveBeenCalledWith({
+        left: 250,
+        behavior: 'smooth',
+      })
+    })
+
+    it('does not scroll when activeTabId is null', () => {
+      const el = createMockScrollContainer({ boundingLeft: 0 })
+
+      const { result } = renderHook(
+        ({ activeTabId, tabCount }) => {
+          const hookResult = useTabBarScroll(activeTabId, tabCount)
+          return hookResult
+        },
+        { initialProps: { activeTabId: null as string | null, tabCount: 5 } }
+      )
+
+      act(() => {
+        result.current.callbackRef(el)
+      })
+
+      expect(el.scrollTo).not.toHaveBeenCalled()
+    })
+
+    it('does not scroll when activeTabId stays the same', () => {
+      const el = createMockScrollContainer({ boundingLeft: 0 })
+
+      const tabEl = createMockTabElement('tab-1', { boundingLeft: 50, boundingWidth: 100 })
+      el.appendChild(tabEl)
+      el.querySelector = vi.fn((selector: string) => {
+        if (selector === '[data-tab-id="tab-1"]') return tabEl
+        return null
+      }) as any
+
+      const { result, rerender } = renderHook(
+        ({ activeTabId, tabCount }) => {
+          const hookResult = useTabBarScroll(activeTabId, tabCount)
+          return hookResult
+        },
+        { initialProps: { activeTabId: 'tab-1' as string | null, tabCount: 5 } }
+      )
+
+      act(() => {
+        result.current.callbackRef(el)
+      })
+
+      // Clear initial auto-scroll
+      ;(el.scrollTo as ReturnType<typeof vi.fn>).mockClear()
+
+      // Re-render with same activeTabId
+      rerender({ activeTabId: 'tab-1', tabCount: 5 })
+
+      // Should not scroll again (activeTabId didn't change)
+      expect(el.scrollTo).not.toHaveBeenCalled()
+    })
+  })
 })
