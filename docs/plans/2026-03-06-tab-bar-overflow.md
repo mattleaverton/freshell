@@ -4,7 +4,7 @@
 
 **Goal:** Improve the tab bar when tabs overflow: hide the native scrollbar, pin the "+" button outside the scroll area, auto-scroll to the active tab on activation, and show directional overflow indicators (fade gradients) when tabs are clipped on either side.
 
-**Architecture:** Extract a new `useTabBarScroll` hook that uses a **callback ref** pattern to manage the scrollable container DOM node. When the node attaches, the callback sets up a scroll event listener and a `ResizeObserver`; when it detaches (or the component unmounts), it tears them down. This avoids the stale-ref problem where `useRef` + `useEffect` misses the transition from `null` to a live DOM node. The hook tracks overflow state (`canScrollLeft` / `canScrollRight`) and exposes a `scrollToTab(tabId)` function that centers the active tab using `getBoundingClientRect()` for position calculation (immune to CSS `transform` on ancestor elements from dnd-kit). The TabBar component is restructured so the "+" button lives outside the scrollable container. Overflow indicators are purely decorative gradient overlays controlled by the hook's boolean state. A CSS utility class hides the scrollbar on the tab strip.
+**Architecture:** Extract a new `useTabBarScroll` hook that uses a **callback ref** pattern to manage the scrollable container DOM node. When the node attaches, the callback sets up a scroll event listener and a `ResizeObserver`; when it detaches (or the component unmounts), it tears them down. This avoids the stale-ref problem where `useRef` + `useEffect` misses the transition from `null` to a live DOM node. The hook accepts `activeTabId` and `tabCount` parameters; a `useEffect` keyed on `tabCount` recalculates overflow when tabs are added or removed (since `ResizeObserver` only fires on the container's own dimensions, not its `scrollWidth`). The hook tracks overflow state (`canScrollLeft` / `canScrollRight`) and exposes a `scrollToTab(tabId)` function that centers the active tab using `getBoundingClientRect()` for position calculation (immune to CSS `transform` on ancestor elements from dnd-kit). The TabBar component is restructured so the "+" button lives outside the scrollable container. Overflow indicators are purely decorative gradient overlays controlled by the hook's boolean state. A CSS utility class hides the scrollbar on the tab strip.
 
 **Tech Stack:** React 18, Tailwind CSS, Vitest + Testing Library
 
@@ -22,6 +22,7 @@
 - The "+" button must remain keyboard-reachable (it already is via semantic `<button>`).
 - dnd-kit `SortableContext` stays around the scrollable tab list only; the "+" button is outside it.
 - Auto-scroll uses `Element.scrollTo({ left, behavior: 'smooth' })` for centering.
+- The hook accepts a `tabCount` parameter (passed as `tabs.length` from TabBar) and recalculates overflow in a `useEffect` keyed on it. This handles the case where tabs are added or removed without triggering a scroll event or `ResizeObserver` callback (since the container's `clientWidth` stays the same while `scrollWidth` changes).
 - Tests mock `getBoundingClientRect()`, `scrollWidth`, `clientWidth`, `scrollLeft`, and `scrollTo` on the scrollable element.
 
 ---
@@ -163,7 +164,7 @@ describe('useTabBarScroll', () => {
     it('sets up ResizeObserver and scroll listener when node attaches', () => {
       const el = createMockScrollContainer()
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 1))
 
       // Call the callback ref with the element
       act(() => {
@@ -179,7 +180,7 @@ describe('useTabBarScroll', () => {
       const el = createMockScrollContainer()
       const removeEventListenerSpy = vi.spyOn(el, 'removeEventListener')
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 1))
 
       // Attach
       act(() => {
@@ -198,7 +199,7 @@ describe('useTabBarScroll', () => {
     it('resets overflow to false when node detaches', () => {
       const el = createMockScrollContainer({ scrollWidth: 500, clientWidth: 300, scrollLeft: 0 })
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 1))
 
       // Attach -- triggers initial updateOverflow
       act(() => {
@@ -221,7 +222,7 @@ describe('useTabBarScroll', () => {
       const el2 = createMockScrollContainer({ scrollWidth: 300, clientWidth: 300 })
       const removeSpy1 = vi.spyOn(el1, 'removeEventListener')
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 1))
 
       // Attach first element
       act(() => {
@@ -243,7 +244,7 @@ describe('useTabBarScroll', () => {
 
   describe('overflow detection', () => {
     it('reports no overflow when no node is attached', () => {
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 0))
 
       expect(result.current.canScrollLeft).toBe(false)
       expect(result.current.canScrollRight).toBe(false)
@@ -252,7 +253,7 @@ describe('useTabBarScroll', () => {
     it('reports canScrollRight when content overflows to the right', () => {
       const el = createMockScrollContainer({ scrollWidth: 500, clientWidth: 300, scrollLeft: 0 })
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 5))
 
       act(() => {
         result.current.callbackRef(el)
@@ -265,7 +266,7 @@ describe('useTabBarScroll', () => {
     it('reports canScrollLeft when scrolled away from start', () => {
       const el = createMockScrollContainer({ scrollWidth: 500, clientWidth: 300, scrollLeft: 50 })
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 5))
 
       act(() => {
         result.current.callbackRef(el)
@@ -278,7 +279,7 @@ describe('useTabBarScroll', () => {
     it('reports canScrollLeft only when scrolled to end', () => {
       const el = createMockScrollContainer({ scrollWidth: 500, clientWidth: 300, scrollLeft: 200 })
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 5))
 
       act(() => {
         result.current.callbackRef(el)
@@ -291,7 +292,7 @@ describe('useTabBarScroll', () => {
     it('reports no overflow when scrollWidth equals clientWidth', () => {
       const el = createMockScrollContainer({ scrollWidth: 300, clientWidth: 300, scrollLeft: 0 })
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 1))
 
       act(() => {
         result.current.callbackRef(el)
@@ -304,7 +305,7 @@ describe('useTabBarScroll', () => {
     it('updates overflow when scroll event fires', () => {
       const el = createMockScrollContainer({ scrollWidth: 500, clientWidth: 300, scrollLeft: 0 })
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 5))
 
       act(() => {
         result.current.callbackRef(el)
@@ -319,6 +320,64 @@ describe('useTabBarScroll', () => {
       })
 
       expect(result.current.canScrollLeft).toBe(true)
+    })
+
+    it('recalculates overflow when tabCount changes (tabs added/removed)', () => {
+      // Start with tabs fitting in the container
+      const el = createMockScrollContainer({ scrollWidth: 300, clientWidth: 300, scrollLeft: 0 })
+
+      const { result, rerender } = renderHook(
+        ({ activeTabId, tabCount }) => {
+          const hookResult = useTabBarScroll(activeTabId, tabCount)
+          return hookResult
+        },
+        { initialProps: { activeTabId: null as string | null, tabCount: 3 } }
+      )
+
+      act(() => {
+        result.current.callbackRef(el)
+      })
+
+      // No overflow initially
+      expect(result.current.canScrollRight).toBe(false)
+
+      // Simulate adding tabs: scrollWidth grows but clientWidth stays the same
+      // (ResizeObserver won't fire because the container's own size didn't change)
+      Object.defineProperty(el, 'scrollWidth', { value: 600, configurable: true })
+
+      // Change tabCount to trigger the effect
+      rerender({ activeTabId: null, tabCount: 6 })
+
+      // Overflow should now be detected
+      expect(result.current.canScrollRight).toBe(true)
+    })
+
+    it('recalculates overflow when tabCount decreases (tabs removed)', () => {
+      // Start with overflow
+      const el = createMockScrollContainer({ scrollWidth: 600, clientWidth: 300, scrollLeft: 0 })
+
+      const { result, rerender } = renderHook(
+        ({ activeTabId, tabCount }) => {
+          const hookResult = useTabBarScroll(activeTabId, tabCount)
+          return hookResult
+        },
+        { initialProps: { activeTabId: null as string | null, tabCount: 6 } }
+      )
+
+      act(() => {
+        result.current.callbackRef(el)
+      })
+
+      expect(result.current.canScrollRight).toBe(true)
+
+      // Simulate removing tabs: scrollWidth shrinks
+      Object.defineProperty(el, 'scrollWidth', { value: 300, configurable: true })
+
+      // Change tabCount to trigger the effect
+      rerender({ activeTabId: null, tabCount: 3 })
+
+      // Overflow should be gone
+      expect(result.current.canScrollRight).toBe(false)
     })
   })
 
@@ -339,7 +398,7 @@ describe('useTabBarScroll', () => {
         return null
       }) as any
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 5))
 
       act(() => {
         result.current.callbackRef(el)
@@ -368,7 +427,7 @@ describe('useTabBarScroll', () => {
         return null
       }) as any
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 5))
 
       act(() => {
         result.current.callbackRef(el)
@@ -399,7 +458,7 @@ describe('useTabBarScroll', () => {
         return null
       }) as any
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 5))
 
       act(() => {
         result.current.callbackRef(el)
@@ -417,7 +476,7 @@ describe('useTabBarScroll', () => {
       const el = createMockScrollContainer()
       el.querySelector = vi.fn(() => null) as any
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 5))
 
       act(() => {
         result.current.callbackRef(el)
@@ -442,7 +501,7 @@ describe('useTabBarScroll', () => {
         return null
       }) as any
 
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 5))
 
       act(() => {
         result.current.callbackRef(el)
@@ -456,7 +515,7 @@ describe('useTabBarScroll', () => {
     })
 
     it('does nothing when no node is attached', () => {
-      const { result } = renderHook(() => useTabBarScroll(null))
+      const { result } = renderHook(() => useTabBarScroll(null, 1))
 
       // Should not throw
       act(() => {
@@ -495,7 +554,7 @@ interface TabBarScrollResult extends TabBarScrollState {
 
 const SCROLL_THRESHOLD = 2 // px tolerance for scroll boundary detection
 
-export function useTabBarScroll(activeTabId: string | null): TabBarScrollResult {
+export function useTabBarScroll(activeTabId: string | null, tabCount: number): TabBarScrollResult {
   const nodeRef = useRef<HTMLDivElement | null>(null)
   const cleanupRef = useRef<(() => void) | null>(null)
   const [overflow, setOverflow] = useState<TabBarScrollState>({
@@ -557,6 +616,15 @@ export function useTabBarScroll(activeTabId: string | null): TabBarScrollResult 
       }
     }
   }, [])
+
+  // Recalculate overflow when tab count changes.
+  // ResizeObserver only fires when the container's own dimensions change,
+  // but adding/removing tabs changes scrollWidth without affecting clientWidth
+  // (the container is flex-1 min-w-0, sized by its parent). No scroll event
+  // fires either. So we need an explicit trigger keyed on tabCount.
+  useEffect(() => {
+    updateOverflow(nodeRef.current)
+  }, [tabCount, updateOverflow])
 
   const scrollToTab = useCallback((tabId: string) => {
     const el = nodeRef.current
@@ -652,7 +720,7 @@ Expected: FAIL -- the "+" button is currently inside the `.overflow-x-auto` scro
 Modify the return JSX of the `TabBar` component. The key changes:
 
 1. Import `useTabBarScroll` from `@/hooks/useTabBarScroll`.
-2. Call `useTabBarScroll(activeTabId)` to get `callbackRef`, `canScrollLeft`, `canScrollRight`.
+2. Call `useTabBarScroll(activeTabId, tabs.length)` to get `callbackRef`, `canScrollLeft`, `canScrollRight`.
 3. Split the inner flex div: tabs go in a scrollable div with `ref={callbackRef}` and `scrollbar-none`; the "+" button goes outside.
 4. Add overflow indicator divs.
 
@@ -665,7 +733,7 @@ import { useTabBarScroll } from '@/hooks/useTabBarScroll'
 Destructure the hook result inside the component body, after the existing hooks:
 
 ```ts
-  const { callbackRef, canScrollLeft, canScrollRight } = useTabBarScroll(activeTabId)
+  const { callbackRef, canScrollLeft, canScrollRight } = useTabBarScroll(activeTabId, tabs.length)
 ```
 
 Replace the entire return block (lines 263-401) with:
@@ -975,11 +1043,11 @@ Add to the `useTabBarScroll` describe block:
       }) as any
 
       const { result, rerender } = renderHook(
-        ({ activeTabId }) => {
-          const hookResult = useTabBarScroll(activeTabId)
+        ({ activeTabId, tabCount }) => {
+          const hookResult = useTabBarScroll(activeTabId, tabCount)
           return hookResult
         },
-        { initialProps: { activeTabId: 'tab-1' as string | null } }
+        { initialProps: { activeTabId: 'tab-1' as string | null, tabCount: 5 } }
       )
 
       // Attach the element via callback ref
@@ -991,7 +1059,7 @@ Add to the `useTabBarScroll` describe block:
       ;(el.scrollTo as ReturnType<typeof vi.fn>).mockClear()
 
       // Change activeTabId to tab-2
-      rerender({ activeTabId: 'tab-2' })
+      rerender({ activeTabId: 'tab-2', tabCount: 5 })
 
       // tabCenter = (350 - 0) + 0 + 50 = 400, target = 400 - 150 = 250
       expect(el.scrollTo).toHaveBeenCalledWith({
@@ -1004,11 +1072,11 @@ Add to the `useTabBarScroll` describe block:
       const el = createMockScrollContainer({ boundingLeft: 0 })
 
       const { result } = renderHook(
-        ({ activeTabId }) => {
-          const hookResult = useTabBarScroll(activeTabId)
+        ({ activeTabId, tabCount }) => {
+          const hookResult = useTabBarScroll(activeTabId, tabCount)
           return hookResult
         },
-        { initialProps: { activeTabId: null as string | null } }
+        { initialProps: { activeTabId: null as string | null, tabCount: 5 } }
       )
 
       act(() => {
@@ -1029,11 +1097,11 @@ Add to the `useTabBarScroll` describe block:
       }) as any
 
       const { result, rerender } = renderHook(
-        ({ activeTabId }) => {
-          const hookResult = useTabBarScroll(activeTabId)
+        ({ activeTabId, tabCount }) => {
+          const hookResult = useTabBarScroll(activeTabId, tabCount)
           return hookResult
         },
-        { initialProps: { activeTabId: 'tab-1' as string | null } }
+        { initialProps: { activeTabId: 'tab-1' as string | null, tabCount: 5 } }
       )
 
       act(() => {
@@ -1044,7 +1112,7 @@ Add to the `useTabBarScroll` describe block:
       ;(el.scrollTo as ReturnType<typeof vi.fn>).mockClear()
 
       // Re-render with same activeTabId
-      rerender({ activeTabId: 'tab-1' })
+      rerender({ activeTabId: 'tab-1', tabCount: 5 })
 
       // Should not scroll again (activeTabId didn't change)
       expect(el.scrollTo).not.toHaveBeenCalled()
@@ -1110,6 +1178,7 @@ Check that:
 - The callback ref correctly handles the attach/detach/re-attach lifecycle without leaking listeners.
 - The `cleanupRef` pattern properly tears down on unmount via the `useEffect` cleanup.
 - The `scrollToTab` function correctly uses `getBoundingClientRect()` on both container and tab elements, and adds `el.scrollLeft` to convert from viewport-relative to scroll-space coordinates.
+- The `tabCount` effect correctly recalculates overflow when tabs are added/removed without a scroll event or ResizeObserver firing.
 - No stale closures exist (the callback ref captures `updateOverflow` which is stable, and `scrollToTab` reads from `nodeRef.current` which is always up-to-date).
 
 **Step 2: Review the TabBar component**
@@ -1156,6 +1225,8 @@ git commit -m "refactor(TabBar): clean up overflow hook and indicator implementa
 
 2. **getBoundingClientRect instead of offsetLeft:** The `scrollToTab` function computes tab position via `getBoundingClientRect()` on both the tab element and the scroll container, then adds `el.scrollLeft` to convert viewport-relative coordinates into scrollable-space coordinates. This is immune to CSS `transform` properties that dnd-kit applies to `SortableTab` wrapper elements during drag operations, which would corrupt `offsetLeft` values (since `transform` creates a new `offsetParent`).
 
+3. **`tabCount` parameter for overflow recalculation:** `ResizeObserver` fires when the observed element's own dimensions change, but the scrollable container is `flex-1 min-w-0` -- its `clientWidth` is determined by its parent, not its children. When tabs are added or removed, only `scrollWidth` changes, and `ResizeObserver` does not fire for `scrollWidth` changes. No `scroll` event fires either. Accepting `tabCount` as a parameter and running `updateOverflow` in a `useEffect` keyed on it is the simplest and most idiomatic React solution: the TabBar already knows `tabs.length` and passes it in.
+
 ## Verification Checklist
 
 - [ ] Native scrollbar hidden on tab strip (`scrollbar-none` class)
@@ -1164,6 +1235,7 @@ git commit -m "refactor(TabBar): clean up overflow hook and indicator implementa
 - [ ] Left gradient appears when tabs overflow to the left
 - [ ] Right gradient appears when tabs overflow to the right
 - [ ] Gradients disappear when scrolled to the respective edge
+- [ ] Overflow indicators update when tabs are added/removed (without manual scroll)
 - [ ] Mouse wheel and trackpad scrolling still works
 - [ ] Keyboard scrolling still works
 - [ ] Drag-and-drop tab reordering still works
