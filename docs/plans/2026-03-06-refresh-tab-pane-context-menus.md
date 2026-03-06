@@ -4,7 +4,7 @@
 
 **Goal:** Add `Refresh Tab` and `Refresh Pane` to the existing right-click context menus so browser panes reload or recover in place and terminal panes re-establish their frontend connection to the existing pane session, including tabs that are currently zoomed.
 
-**Architecture:** Make refresh state-driven but one-shot. Store at most one pending refresh request per pane in `panesSlice`, keyed by a unique `requestId` plus a target snapshot derived from the pane’s current content; menus dispatch those requests from the stored layout tree, and panes explicitly consume or clear them so refresh never replays across later remounts. Browser panes must preserve the current live-document reload path when an iframe exists and only fall back to state-reset recovery when the pane is already on an error screen; terminal refresh must be folded into the existing attach lifecycle so a mount with a pending request performs exactly one detach/attach sequence instead of racing the normal mount attach.
+**Architecture:** Make refresh state-driven but one-shot. Store at most one pending refresh request per pane in `panesSlice`, keyed by a unique `requestId` plus a target snapshot derived from the pane’s current content; menus dispatch those requests from the stored layout tree, and panes explicitly consume or clear them so refresh never replays across later remounts. Keep request cleanup layout-driven too: after any reducer or hydration path changes leaf content under a pane id, reconcile that tab’s pending requests against the current layout so stale browser URLs and stale terminal `createRequestId`s are dropped automatically. Browser panes must preserve the current live-document reload path when an iframe exists and only fall back to recovery when the pane is actually on an error screen; a pending browser refresh on mount should be satisfied by the normal initial load path instead of triggering a second resolve/load attempt. Terminal refresh must be folded into the existing attach lifecycle so a mount with a pending request performs exactly one detach/attach sequence instead of racing the normal mount attach.
 
 **Tech Stack:** React 18, Redux Toolkit, TypeScript, xterm.js, Vitest, Testing Library
 
@@ -17,7 +17,8 @@
 - `PaneLayout` renders only the zoomed leaf when a tab is zoomed (`src/components/panes/PaneLayout.tsx:66-72`), so menu enablement and request creation must come from stored layout state, not mounted-pane registries.
 - Refresh requests must be ephemeral UI/runtime state like `renameRequest*` and `zoomedPane`, not persisted to localStorage.
 - Refresh must be a one-shot consume/ack flow. A request may stay pending while a pane is unmounted, but once a pane claims it, the request must be removed from Redux so later remounts do not replay it.
-- Pane IDs are reused across replacement/content changes, so each refresh request needs a target snapshot and the slice must clear stale requests when pane content changes enough that the request no longer applies.
+- Pane IDs are reused across replacement/content changes, so each refresh request needs a target snapshot specific enough to detect stale requests. For browser panes that means the stored browser URL, not just `kind: 'browser'`.
+- Stale-request cleanup must be layout-driven and comprehensive: after any reducer or hydration path changes leaf content under a pane id, reconcile that tab’s pending requests against the new layout. This includes `swapPanes` and `hydratePanes`, not just direct `updatePaneContent`.
 - Refreshable pane kinds for this issue:
   - `terminal`
   - `browser`
@@ -26,7 +27,8 @@
   - `picker`
   - `agent-chat`
   - `extension`
-- Browser refresh must preserve the existing `iframe.contentWindow?.location.reload()` behavior when an iframe exists. Recreating the iframe from the stored Redux URL is only the recovery path when the iframe is missing because the pane is on an error screen.
+- Browser refresh must preserve the existing `iframe.contentWindow?.location.reload()` behavior when an iframe exists. Recreating or re-resolving from the stored Redux URL is only the recovery path when the iframe is missing because the pane is on an error screen.
+- Browser refresh must not add a second resolve/load path on mount. A pre-existing pending browser request on mount should be consumed by the normal initial load work for that pane.
 - Terminal refresh must not add a second attach path on mount. A pre-existing pending refresh request on mount must replace the normal mount attach, not run before it.
 - No server-side protocol changes are needed.
 - No `docs/index.html` update is required; this is not a major UI mock change.
@@ -70,8 +72,12 @@ describe('buildPaneRefreshTarget', () => {
     })).toEqual({ kind: 'terminal', createRequestId: 'req-1' })
   })
 
-  it('returns a browser target for browser panes', () => {
-    expect(buildPaneRefreshTarget(browserContent)).toEqual({ kind: 'browser' })
+  it('returns a browser target keyed by the stored browser URL', () => {
+    expect(buildPaneRefreshTarget({
+      kind: 'browser',
+      url: 'https://example.test/a',
+      devToolsOpen: false,
+    })).toEqual({ kind: 'browser', url: 'https://example.test/a' })
   })
 
   it('returns null for non-refreshable panes', () => {
@@ -96,9 +102,27 @@ describe('paneRefreshTargetMatchesContent', () => {
     ).toBe(false)
   })
 
-  it('matches browser targets only for browser content', () => {
-    expect(paneRefreshTargetMatchesContent({ kind: 'browser' }, browserContent)).toBe(true)
-    expect(paneRefreshTargetMatchesContent({ kind: 'browser' }, editorContent)).toBe(false)
+  it('matches browser targets only when the current stored URL still matches', () => {
+    expect(
+      paneRefreshTargetMatchesContent(
+        { kind: 'browser', url: 'https://example.test/a' },
+        { kind: 'browser', url: 'https://example.test/a', devToolsOpen: false },
+      ),
+    ).toBe(true)
+
+    expect(
+      paneRefreshTargetMatchesContent(
+        { kind: 'browser', url: 'https://example.test/a' },
+        { kind: 'browser', url: 'https://example.test/b', devToolsOpen: false },
+      ),
+    ).toBe(false)
+
+    expect(
+      paneRefreshTargetMatchesContent(
+        { kind: 'browser', url: 'https://example.test/a' },
+        editorContent,
+      ),
+    ).toBe(false)
   })
 })
 ```
@@ -134,7 +158,7 @@ export function buildPaneRefreshTarget(content: PaneContent): PaneRefreshTarget 
     return { kind: 'terminal', createRequestId: content.createRequestId }
   }
   if (content.kind === 'browser') {
-    return { kind: 'browser' }
+    return { kind: 'browser', url: content.url }
   }
   return null
 }
@@ -147,7 +171,7 @@ export function paneRefreshTargetMatchesContent(
   if (target.kind === 'terminal') {
     return content.kind === 'terminal' && content.createRequestId === target.createRequestId
   }
-  return content.kind === 'browser'
+  return content.kind === 'browser' && content.url === target.url
 }
 ```
 
@@ -186,9 +210,11 @@ Add reducer coverage to `test/unit/client/store/panesSlice.test.ts`:
 ```ts
 import {
   consumePaneRefreshRequest,
+  hydratePanes,
   requestPaneRefresh,
   requestTabRefresh,
   replacePane,
+  swapPanes,
   updatePaneContent,
 } from '../../../../src/store/panesSlice'
 
@@ -246,7 +272,10 @@ describe('requestTabRefresh', () => {
       kind: 'terminal',
       createRequestId: 'req-term',
     })
-    expect(state.refreshRequestsByPane['tab-1']['pane-browser'].target).toEqual({ kind: 'browser' })
+    expect(state.refreshRequestsByPane['tab-1']['pane-browser'].target).toEqual({
+      kind: 'browser',
+      url: browserContent.url,
+    })
   })
 })
 
@@ -300,6 +329,78 @@ describe('refresh request reconciliation', () => {
     )
 
     expect(next.refreshRequestsByPane['tab-1']?.['pane-term']).toBeUndefined()
+  })
+
+  it('clears a pending browser request when the stored browser URL changes', () => {
+    const requested = panesReducer(
+      stateWithLeaf('pane-browser', {
+        kind: 'browser',
+        url: 'https://example.test/a',
+        devToolsOpen: false,
+      }),
+      requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-browser' }),
+    )
+
+    const next = panesReducer(
+      requested,
+      updatePaneContent({
+        tabId: 'tab-1',
+        paneId: 'pane-browser',
+        content: {
+          kind: 'browser',
+          url: 'https://example.test/b',
+          devToolsOpen: false,
+        },
+      }),
+    )
+
+    expect(next.refreshRequestsByPane['tab-1']?.['pane-browser']).toBeUndefined()
+  })
+
+  it('clears a pending request when swapPanes moves different content under the same pane id', () => {
+    const requested = panesReducer(
+      stateWithLayout({
+        'tab-1': split([
+          leaf('pane-browser', { kind: 'browser', url: 'https://example.test/a', devToolsOpen: false }),
+          leaf('pane-editor', editorContent),
+        ]),
+      }),
+      requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-browser' }),
+    )
+
+    const next = panesReducer(
+      requested,
+      swapPanes({ tabId: 'tab-1', paneId: 'pane-browser', otherId: 'pane-editor' }),
+    )
+
+    expect(next.refreshRequestsByPane['tab-1']?.['pane-browser']).toBeUndefined()
+  })
+
+  it('clears stale requests after hydratePanes merges in new browser content from cross-tab sync', () => {
+    const requested = panesReducer(
+      stateWithLeaf('pane-browser', {
+        kind: 'browser',
+        url: 'https://example.test/a',
+        devToolsOpen: false,
+      }),
+      requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-browser' }),
+    )
+
+    const next = panesReducer(
+      requested,
+      hydratePanes({
+        ...requested,
+        layouts: {
+          'tab-1': leaf('pane-browser', {
+            kind: 'browser',
+            url: 'https://example.test/b',
+            devToolsOpen: false,
+          }),
+        },
+      }),
+    )
+
+    expect(next.refreshRequestsByPane['tab-1']?.['pane-browser']).toBeUndefined()
   })
 
   it('clears a pending browser request when the pane is replaced', () => {
@@ -364,7 +465,7 @@ First extend `src/store/paneTypes.ts`:
 ```ts
 export type PaneRefreshTarget =
   | { kind: 'terminal'; createRequestId: string }
-  | { kind: 'browser' }
+  | { kind: 'browser'; url: string }
 
 export interface PaneRefreshRequest {
   requestId: string
@@ -436,36 +537,58 @@ consumePaneRefreshRequest: (
 },
 ```
 
-Add a small slice-local helper to reconcile stale requests whenever pane content mutates:
+Add slice-local helpers that reconcile pending requests against the current layout, not just against a hand-picked subset of reducers:
 
 ```ts
-function reconcilePaneRefreshRequest(
-  state: PanesState,
-  tabId: string,
-  paneId: string,
-  nextContent: PaneContent | null | undefined,
-) {
-  const request = state.refreshRequestsByPane[tabId]?.[paneId]
-  if (!request) return
-  if (paneRefreshTargetMatchesContent(request.target, nextContent)) return
+function reconcileRefreshRequestsForTab(state: PanesState, tabId: string) {
+  const requests = state.refreshRequestsByPane[tabId]
+  if (!requests) return
 
-  delete state.refreshRequestsByPane[tabId][paneId]
-  if (Object.keys(state.refreshRequestsByPane[tabId]).length === 0) {
+  const layout = state.layouts[tabId]
+  if (!layout) {
     delete state.refreshRequestsByPane[tabId]
+    return
+  }
+
+  const leafContentById = new Map(
+    collectPaneLeaves(layout).map((leaf) => [leaf.id, leaf.content] as const),
+  )
+
+  for (const [paneId, request] of Object.entries(requests)) {
+    const content = leafContentById.get(paneId)
+    if (paneRefreshTargetMatchesContent(request.target, content)) continue
+    delete requests[paneId]
+  }
+
+  if (Object.keys(requests).length === 0) {
+    delete state.refreshRequestsByPane[tabId]
+  }
+}
+
+function reconcileAllRefreshRequests(state: PanesState) {
+  for (const tabId of Object.keys(state.refreshRequestsByPane)) {
+    reconcileRefreshRequestsForTab(state, tabId)
   }
 }
 ```
 
-Call that helper from reducers that can invalidate a pending request:
+Call `reconcileRefreshRequestsForTab(state, tabId)` after any reducer that can replace the tab layout or move/replace leaf content under existing pane ids:
 
+- `initLayout`
+- `resetLayout`
+- `splitPane`
+- `addPane`
 - `updatePaneContent`
 - `mergePaneContent`
+- `swapPanes`
 - `replacePane`
 - `closePane`
 - `removeLayout`
-- orphan-layout cleanup during initial state load
+- `hydratePanes` via `reconcileAllRefreshRequests(state)` after `mergedLayouts` is assigned
 
-For `updatePaneContent` and `mergePaneContent`, reconcile after computing the new content. For `replacePane`, `closePane`, and `removeLayout`, delete the request outright because the old pane content is gone.
+Also update `cleanOrphanedLayouts()` so if a future migration or bad state ever contains `refreshRequestsByPane`, orphaned tab entries are deleted there too.
+
+This is intentionally broader than a hand-maintained stale-request list. The rule is: if a reducer can change which content lives under a pane id, reconcile that tab’s refresh requests immediately afterward.
 
 Then update `src/store/persistMiddleware.ts` to strip the new ephemeral field:
 
@@ -813,22 +936,34 @@ it('toolbar Refresh retries forwarding when the pane is on a forwardError screen
   })
 })
 
-it('consumes a pending refresh request once and does not replay it after remount', async () => {
+it('a pending refresh request present on first mount is consumed by the initial load path without a second forward attempt', async () => {
   setWindowHostname('192.168.1.100')
-  vi.mocked(api.post)
-    .mockRejectedValueOnce(new Error('Connection refused'))
-    .mockResolvedValueOnce({ forwardedPort: 45678 })
+  vi.mocked(api.post).mockResolvedValue({ forwardedPort: 45678 })
+
+  const store = createStoreWithPendingBrowserRefresh()
+
+  renderBrowserPane({ url: 'http://localhost:3000' }, store)
+
+  await waitFor(() => {
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(store.getState().panes.refreshRequestsByPane['tab-1']?.['pane-1']).toBeUndefined()
+  })
+})
+
+it('consumed browser refresh requests do not add an extra load after remount', async () => {
+  setWindowHostname('192.168.1.100')
+  vi.mocked(api.post).mockResolvedValue({ forwardedPort: 45678 })
 
   const store = createStoreWithPendingBrowserRefresh()
 
   const first = renderBrowserPane({ url: 'http://localhost:3000' }, store)
-  await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2))
+  await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1))
   expect(store.getState().panes.refreshRequestsByPane['tab-1']?.['pane-1']).toBeUndefined()
 
   first.unmount()
   renderBrowserPane({ url: 'http://localhost:3000' }, store)
 
-  await waitFor(() => expect(api.post).toHaveBeenCalledTimes(3))
+  await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2))
 })
 
 it('dispatching requestPaneRefresh uses the same refresh path as the toolbar button', async () => {
@@ -862,7 +997,7 @@ Run:
 npm run test:client -- test/unit/client/components/panes/BrowserPane.test.tsx
 ```
 
-Expected: FAIL because the current `refresh()` is iframe-only and there is no consume/clear path for pane refresh requests.
+Expected: FAIL because the current `refresh()` is iframe-only, browser refresh requests are not target-specific enough, and there is no mount-aware consume/clear path for pane refresh requests.
 
 **Step 3: Write minimal implementation**
 
@@ -922,25 +1057,53 @@ Keep using `forwardRetryKey` or rename it to `resolveAttemptKey`; either is fine
 - existing iframe -> reload the live document
 - no iframe because of `forwardError`/`loadError` -> clear errors and retry resolution
 
-Finally, add a request-consumption effect:
+Finally, add a mount-aware request-consumption effect below the existing resolve/load effect:
 
 ```ts
+const refreshEffectArmedRef = useRef(false)
+const isBrowserLoadInFlight = !!currentUrl && !iframeRef.current && !loadError && !forwardError
+
 useEffect(() => {
   const request = pendingRefreshRequest
+  if (!refreshEffectArmedRef.current) {
+    refreshEffectArmedRef.current = true
+    if (!request) return
+    dispatch(consumePaneRefreshRequest({ tabId, paneId, requestId: request.requestId }))
+    return
+  }
+
   if (!request) return
   if (!paneRefreshTargetMatchesContent(request.target, { kind: 'browser', url, devToolsOpen })) {
     dispatch(consumePaneRefreshRequest({ tabId, paneId, requestId: request.requestId }))
     return
   }
 
+  if (isBrowserLoadInFlight) {
+    // A normal load/resolve path is already in progress for this URL.
+    dispatch(consumePaneRefreshRequest({ tabId, paneId, requestId: request.requestId }))
+    return
+  }
+
   dispatch(consumePaneRefreshRequest({ tabId, paneId, requestId: request.requestId }))
   refreshBrowser()
-}, [pendingRefreshRequest?.requestId, dispatch, paneId, refreshBrowser, tabId, url, devToolsOpen])
+}, [
+  pendingRefreshRequest?.requestId,
+  dispatch,
+  paneId,
+  refreshBrowser,
+  tabId,
+  url,
+  devToolsOpen,
+  isBrowserLoadInFlight,
+])
 ```
 
 Important constraints:
 
 - No `handledRefreshGenerationRef` pattern. The store consume/clear path is what makes the request one-shot.
+- The effect must be declared after the existing URL-resolution/port-forward effect so a pre-existing request on mount is satisfied by the normal first load instead of forcing a second `/api/proxy/forward` call.
+- Browser requests must target the stored browser URL (`{ kind: 'browser', url }`) so navigation/back/forward and cross-tab layout replacement can invalidate stale requests correctly.
+- If a request arrives while a normal load is already in flight and there is still no iframe or error screen, consume it without extra work; the in-flight load already satisfies the refresh.
 - Keep the toolbar Refresh button and the registered browser action (`reload`) pointed at the same `refreshBrowser()` helper.
 - Do not force a new iframe from the last saved Redux URL when a live iframe exists. That would regress in-iframe navigation reload behavior.
 
@@ -1221,13 +1384,13 @@ describe('refresh context menu flow', () => {
 
     expect(store.getState().panes.refreshRequestsByPane['tab-1']['pane-browser']).toMatchObject({
       requestId: expect.any(String),
-      target: { kind: 'browser' },
+      target: { kind: 'browser', url: 'http://localhost:3000' },
     })
 
     store.dispatch(toggleZoom({ tabId: 'tab-1', paneId: 'pane-editor' }))
 
     await waitFor(() => {
-      expect(api.post).toHaveBeenCalled()
+      expect(api.post).toHaveBeenCalledTimes(1)
       expect(store.getState().panes.refreshRequestsByPane['tab-1']?.['pane-browser']).toBeUndefined()
     })
 
@@ -1243,7 +1406,7 @@ describe('refresh context menu flow', () => {
       </Provider>,
     )
 
-    await waitFor(() => expect(api.post).not.toHaveBeenCalled())
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1))
   })
 })
 ```
@@ -1266,8 +1429,8 @@ Finish the test with the real store shape and mocks that the app already uses. T
 
 - `Refresh tab` remains enabled while only the zoomed editor leaf is mounted.
 - Clicking it stores one-shot refresh requests for hidden refreshable siblings.
-- Unzooming later causes the previously skipped browser sibling to claim and consume its request.
-- Remounting the same tab contents afterward does not replay the old request.
+- Unzooming later causes the previously skipped browser sibling to claim and consume its request while performing only the single normal mount load for that pane.
+- Remounting the same tab contents afterward performs one normal browser load for the remount, not an extra replay of the already-consumed refresh request.
 
 This test must not pre-register hidden pane action registries; that would reintroduce the bug the test is supposed to catch.
 
@@ -1310,8 +1473,8 @@ Expected final state:
 - Right-clicking a pane header shows `Refresh pane`.
 - Menu enablement depends on the stored pane content kinds, not mounted component registries.
 - `Refresh Tab` creates requests for every terminal/browser leaf in the tab’s layout tree, even in zoomed tabs where siblings are currently unmounted.
-- Refresh requests are one-shot: panes explicitly consume them, stale requests are cleared when content changes, and old requests do not replay after later remounts.
-- Browser panes preserve live-document reload when an iframe exists and recover from `forwardError`/`loadError` when no iframe exists.
+- Refresh requests are one-shot: panes explicitly consume them, targets are specific enough to detect stale browser URLs and stale terminal sessions, and layout reconciliation clears invalid requests after content swaps, updates, and hydration.
+- Browser panes preserve live-document reload when an iframe exists, recover from `forwardError`/`loadError` when no iframe exists, and fold mount-time refresh requests into the normal initial browser load instead of starting redundant retry/load work.
 - Terminal panes refresh through exactly one detach/attach decision per mount, with visible panes using full replay and hidden panes preserving the deferred-hydration path.
 - Refresh bookkeeping is ephemeral and is not persisted to localStorage.
 
