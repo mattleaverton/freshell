@@ -10,6 +10,8 @@ import panesReducer, {
   resizeMultipleSplits,
   updatePaneContent,
   mergePaneContent,
+  requestPaneRefresh,
+  requestTabRefresh,
   replacePane,
   removeLayout,
   hydratePanes,
@@ -42,10 +44,72 @@ describe('panesSlice', () => {
       renameRequestTabId: null,
       renameRequestPaneId: null,
       zoomedPane: {},
+      refreshRequestsByPane: {},
     }
     mockIdCounter = 0
     vi.clearAllMocks()
   })
+
+  function refreshLeaf(id: string, content: PaneContent): PaneNode {
+    return { type: 'leaf', id, content }
+  }
+
+  function refreshSplit(children: [PaneNode, PaneNode]): PaneNode {
+    return {
+      type: 'split',
+      id: 'split-refresh',
+      direction: 'horizontal',
+      children,
+      sizes: [50, 50],
+    }
+  }
+
+  function firstLeafId(node: PaneNode): string {
+    if (node.type === 'leaf') return node.id
+    return firstLeafId(node.children[0])
+  }
+
+  function stateWithLayout(layouts: Record<string, PaneNode>): PanesState {
+    const activePane = Object.fromEntries(
+      Object.entries(layouts).map(([tabId, layout]) => [tabId, firstLeafId(layout)]),
+    )
+    return {
+      layouts,
+      activePane,
+      paneTitles: {},
+      paneTitleSetByUser: {},
+      renameRequestTabId: null,
+      renameRequestPaneId: null,
+      zoomedPane: {},
+      refreshRequestsByPane: {},
+    }
+  }
+
+  function stateWithLeaf(paneId: string, content: PaneContent): PanesState {
+    return stateWithLayout({ 'tab-1': refreshLeaf(paneId, content) })
+  }
+
+  function stateWithLayoutAndZoom({
+    layout,
+    zoomedPaneId,
+  }: {
+    layout: PaneNode
+    zoomedPaneId: string
+  }): PanesState {
+    return {
+      ...stateWithLayout({ 'tab-1': layout }),
+      zoomedPane: { 'tab-1': zoomedPaneId },
+    }
+  }
+
+  const refreshEditorContent: EditorPaneContent = {
+    kind: 'editor',
+    filePath: '/tmp/example.ts',
+    language: 'typescript',
+    readOnly: false,
+    content: 'export const x = 1',
+    viewMode: 'source',
+  }
 
   describe('initLayout', () => {
     it('creates a single-pane layout for a tab', () => {
@@ -1337,6 +1401,118 @@ describe('panesSlice', () => {
         browserInstanceId: 'browser-1',
         url: 'https://example.org',
       })
+    })
+  })
+
+  describe('refresh requests', () => {
+    it('requestPaneRefresh skips blank browser panes and unattached terminals', () => {
+      const blankBrowserState = panesReducer(
+        stateWithLeaf('pane-browser', {
+          kind: 'browser',
+          browserInstanceId: 'browser-1',
+          url: '',
+          devToolsOpen: false,
+        }),
+        requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-browser' }),
+      )
+      expect(blankBrowserState.refreshRequestsByPane['tab-1']).toBeUndefined()
+
+      const unattachedTerminalState = panesReducer(
+        stateWithLeaf('pane-term', {
+          kind: 'terminal',
+          mode: 'shell',
+          createRequestId: 'req-1',
+          status: 'running',
+        }),
+        requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-term' }),
+      )
+      expect(unattachedTerminalState.refreshRequestsByPane['tab-1']).toBeUndefined()
+    })
+
+    it('requestTabRefresh exits zoom first and queues only live-capable leaves', () => {
+      const state = panesReducer(
+        stateWithLayoutAndZoom({
+          layout: refreshSplit([
+            refreshLeaf('pane-editor', refreshEditorContent),
+            refreshSplit([
+              refreshLeaf('pane-live-browser', {
+                kind: 'browser',
+                browserInstanceId: 'browser-1',
+                url: 'https://example.test/a',
+                devToolsOpen: false,
+              }),
+              refreshLeaf('pane-blank-browser', {
+                kind: 'browser',
+                browserInstanceId: 'browser-2',
+                url: '',
+                devToolsOpen: false,
+              }),
+            ]),
+          ]),
+          zoomedPaneId: 'pane-editor',
+        }),
+        requestTabRefresh({ tabId: 'tab-1' }),
+      )
+
+      expect(state.zoomedPane['tab-1']).toBeUndefined()
+      expect(Object.keys(state.refreshRequestsByPane['tab-1'])).toEqual(['pane-live-browser'])
+    })
+
+    it('preserves a browser refresh request across same-instance url changes', () => {
+      const requested = panesReducer(
+        stateWithLeaf('pane-browser', {
+          kind: 'browser',
+          browserInstanceId: 'browser-1',
+          url: 'https://example.test/a',
+          devToolsOpen: false,
+        }),
+        requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-browser' }),
+      )
+
+      const next = panesReducer(
+        requested,
+        updatePaneContent({
+          tabId: 'tab-1',
+          paneId: 'pane-browser',
+          content: {
+            kind: 'browser',
+            browserInstanceId: 'browser-1',
+            url: 'https://example.test/b',
+            devToolsOpen: false,
+          },
+        }),
+      )
+
+      expect(next.refreshRequestsByPane['tab-1']?.['pane-browser']).toBeDefined()
+    })
+
+    it('clears a pending browser request after a same-url browser swap changes instance identity', () => {
+      const requested = panesReducer(
+        stateWithLayout({
+          'tab-1': refreshSplit([
+            refreshLeaf('pane-a', {
+              kind: 'browser',
+              browserInstanceId: 'browser-a',
+              url: 'https://example.test/shared',
+              devToolsOpen: false,
+            }),
+            refreshLeaf('pane-b', {
+              kind: 'browser',
+              browserInstanceId: 'browser-b',
+              url: 'https://example.test/shared',
+              devToolsOpen: false,
+            }),
+          ]),
+        }),
+        requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-a' }),
+      )
+
+      const next = panesReducer(
+        requested,
+        swapPanes({ tabId: 'tab-1', paneId: 'pane-a', otherId: 'pane-b' }),
+      )
+
+      expect(next.refreshRequestsByPane['tab-1']?.['pane-a']).toBeUndefined()
     })
   })
 

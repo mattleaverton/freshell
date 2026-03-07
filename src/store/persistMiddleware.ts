@@ -319,6 +319,7 @@ export const persistMiddleware: Middleware<{}, PersistState> = (store) => {
           renameRequestTabId: _rrt,
           renameRequestPaneId: _rrp,
           zoomedPane: _zp,
+          refreshRequestsByPane: _rrbp,
           ...persistablePanes
         } = state.panes
         const panesPayload = {

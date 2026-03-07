@@ -1,4 +1,4 @@
-import type { PaneContent, PaneNode } from '@/store/paneTypes'
+import type { PaneContent, PaneNode, PaneRefreshTarget } from '@/store/paneTypes'
 
 /**
  * Get the cwd of the first terminal in the pane tree (depth-first traversal).
@@ -51,4 +51,35 @@ export function findPaneContent(node: PaneNode, paneId: string): PaneContent | n
     return node.id === paneId ? node.content : null
   }
   return findPaneContent(node.children[0], paneId) || findPaneContent(node.children[1], paneId)
+}
+
+export function buildPaneRefreshTarget(content: PaneContent): PaneRefreshTarget | null {
+  if (content.kind === 'terminal') {
+    return content.terminalId
+      ? { kind: 'terminal', createRequestId: content.createRequestId }
+      : null
+  }
+  if (content.kind === 'browser') {
+    return content.url.trim()
+      ? { kind: 'browser', browserInstanceId: content.browserInstanceId }
+      : null
+  }
+  return null
+}
+
+export function paneRefreshTargetMatchesContent(
+  target: PaneRefreshTarget,
+  content: PaneContent | null | undefined,
+): boolean {
+  if (!content) return false
+
+  if (target.kind === 'terminal') {
+    return content.kind === 'terminal'
+      && !!content.terminalId
+      && content.createRequestId === target.createRequestId
+  }
+
+  return content.kind === 'browser'
+    && !!content.url.trim()
+    && content.browserInstanceId === target.browserInstanceId
 }

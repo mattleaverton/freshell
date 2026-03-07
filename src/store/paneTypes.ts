@@ -161,6 +161,15 @@ export type ExtensionPaneInput = ExtensionPaneContent
 export type PaneContentInput = TerminalPaneInput | BrowserPaneInput | EditorPaneInput
   | PickerPaneContent | AgentChatPaneInput | ExtensionPaneInput
 
+export type PaneRefreshTarget =
+  | { kind: 'terminal'; createRequestId: string }
+  | { kind: 'browser'; browserInstanceId: string }
+
+export interface PaneRefreshRequest {
+  requestId: string
+  target: PaneRefreshTarget
+}
+
 /**
  * Recursive tree structure for pane layouts.
  * A leaf is a single pane with content.
@@ -197,6 +206,11 @@ export interface PanesState {
    * Must never be persisted.
    */
   zoomedPane: Record<string, string | undefined>
+  /**
+   * Ephemeral one-shot refresh requests keyed by tab and pane id.
+   * Must never be persisted.
+   */
+  refreshRequestsByPane: Record<string, Record<string, PaneRefreshRequest>>
 }
 
 /**

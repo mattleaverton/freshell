@@ -18,7 +18,7 @@ Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, wri
 
 // Now import slices - they'll see our mocked localStorage
 import tabsReducer, { hydrateTabs, addTab } from '../../../../src/store/tabsSlice'
-import panesReducer, { hydratePanes, initLayout, splitPane } from '../../../../src/store/panesSlice'
+import panesReducer, { hydratePanes, initLayout, requestPaneRefresh, splitPane } from '../../../../src/store/panesSlice'
 import {
   loadPersistedPanes,
   loadPersistedTabs,
@@ -257,6 +257,35 @@ describe('Panes Persistence Integration', () => {
     expect(layout.content.kind).toBe('browser')
     expect(layout.content.browserInstanceId).toBeDefined()
     expect(loaded!.version).toBe(PANES_SCHEMA_VERSION)
+  })
+
+  it('does not persist refreshRequestsByPane', () => {
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+      },
+      middleware: (getDefault) => getDefault().concat(persistMiddleware as any),
+    })
+
+    store.dispatch(addTab({ mode: 'shell' }))
+    const tabId = store.getState().tabs.tabs[0].id
+    store.dispatch(initLayout({
+      tabId,
+      content: {
+        kind: 'browser',
+        url: 'https://example.com',
+        devToolsOpen: false,
+      } as any,
+    }))
+
+    const paneId = store.getState().panes.activePane[tabId]
+    store.dispatch(requestPaneRefresh({ tabId, paneId }))
+
+    vi.runAllTimers()
+
+    const saved = JSON.parse(localStorage.getItem('freshell.panes.v2')!)
+    expect(saved.refreshRequestsByPane).toBeUndefined()
   })
 
   it('flushes pending writes on visibility change', () => {
