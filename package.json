@@ -7,7 +7,7 @@
     "freshell": "dist/server/cli/index.js"
   },
   "scripts": {
-    "predev": "tsx scripts/precheck.ts",
+    "predev": "cross-env PORT=3002 tsx scripts/precheck.ts",
     "preserve": "tsx scripts/precheck.ts",
     "dev": "cross-env PORT=3002 concurrently -n client,server -c blue,green \"vite\" \"tsx watch server/index.ts\"",
     "dev:client": "vite",
