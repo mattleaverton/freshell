@@ -11,14 +11,19 @@ import { createLogger } from '@/lib/client-logger'
 const log = createLogger('PanesSlice')
 
 /**
- * Normalize terminal input to full PaneContent with defaults.
+ * Normalize pane content to the full persisted/runtime shape.
  */
-function normalizeContent(input: PaneContentInput): PaneContent {
+function normalizePaneContent(
+  input: PaneContentInput | PaneContent,
+  previous?: PaneContent,
+): PaneContent {
   if (input.kind === 'terminal') {
     const mode = input.mode || 'shell'
+    const hasLifecycleFields = input.createRequestId !== undefined || input.status !== undefined
     // Only validate Claude resume IDs; other providers pass through unchanged.
-    const resumeSessionId =
-      mode === 'claude' && isValidClaudeSessionId(input.resumeSessionId)
+    const resumeSessionId = hasLifecycleFields
+      ? input.resumeSessionId
+      : mode === 'claude' && isValidClaudeSessionId(input.resumeSessionId)
         ? input.resumeSessionId
         : mode === 'claude'
           ? undefined
@@ -43,6 +48,16 @@ function normalizeContent(input: PaneContentInput): PaneContent {
       resumeSessionId,
       ...(sessionRef ? { sessionRef } : {}),
       initialCwd: input.initialCwd,
+    }
+  }
+  if (input.kind === 'browser') {
+    const previousBrowserInstanceId =
+      previous?.kind === 'browser' ? previous.browserInstanceId : undefined
+    return {
+      kind: 'browser',
+      browserInstanceId: input.browserInstanceId || previousBrowserInstanceId || nanoid(),
+      url: input.url,
+      devToolsOpen: input.devToolsOpen,
     }
   }
   if (input.kind === 'agent-chat') {
@@ -77,7 +92,7 @@ function normalizeContent(input: PaneContentInput): PaneContent {
   if (input.kind === 'extension') {
     return input  // Extension content passes through unchanged
   }
-  // Browser/editor/picker content passes through unchanged
+  // Editor/picker content passes through unchanged
   return input
 }
 
@@ -223,6 +238,23 @@ function findLeaf(node: PaneNode, id: string): Extract<PaneNode, { type: 'leaf' 
   return findLeaf(node.children[0], id) || findLeaf(node.children[1], id)
 }
 
+function normalizePaneTree(node: PaneNode, previous?: PaneNode): PaneNode {
+  if (node.type === 'leaf') {
+    const previousLeaf = previous ? findLeaf(previous, node.id) : null
+    return {
+      ...node,
+      content: normalizePaneContent(node.content, previousLeaf?.content),
+    }
+  }
+  return {
+    ...node,
+    children: [
+      normalizePaneTree(node.children[0], previous),
+      normalizePaneTree(node.children[1], previous),
+    ],
+  }
+}
+
 /**
  * Merge incoming (remote) pane tree with local state, preserving local
  * terminal assignments that are more advanced. A local terminal pane
@@ -319,7 +351,7 @@ export const panesSlice = createSlice({
       if (state.layouts[tabId]) return
 
       const paneId = providedPaneId ?? nanoid()
-      const normalized = normalizeContent(content)
+      const normalized = normalizePaneContent(content)
       state.layouts[tabId] = {
         type: 'leaf',
         id: paneId,
@@ -334,7 +366,7 @@ export const panesSlice = createSlice({
     ) => {
       const { tabId, content } = action.payload
       const paneId = nanoid()
-      const normalized = normalizeContent(content)
+      const normalized = normalizePaneContent(content)
       state.layouts[tabId] = {
         type: 'leaf',
         id: paneId,
@@ -359,7 +391,7 @@ export const panesSlice = createSlice({
       if (!root) return
 
       const newPaneId = providedPaneId ?? nanoid()
-      const normalizedContent = normalizeContent(newContent)
+      const normalizedContent = normalizePaneContent(newContent)
 
       const targetPane = findLeaf(root, paneId)
       if (!targetPane) return
@@ -420,7 +452,7 @@ export const panesSlice = createSlice({
 
       // Create new leaf
       const newPaneId = nanoid()
-      const normalizedContent = normalizeContent(newContent)
+      const normalizedContent = normalizePaneContent(newContent)
       const newLeaf: PaneNode = {
         type: 'leaf',
         id: newPaneId,
@@ -705,7 +737,7 @@ export const panesSlice = createSlice({
 
     updatePaneContent: (
       state,
-      action: PayloadAction<{ tabId: string; paneId: string; content: PaneContent }>
+      action: PayloadAction<{ tabId: string; paneId: string; content: PaneContentInput | PaneContent }>
     ) => {
       const { tabId, paneId, content } = action.payload
       const root = state.layouts[tabId]
@@ -714,7 +746,7 @@ export const panesSlice = createSlice({
       function updateContent(node: PaneNode): PaneNode {
         if (node.type === 'leaf') {
           if (node.id === paneId) {
-            return { ...node, content }
+            return { ...node, content: normalizePaneContent(content, node.content) }
           }
           return node
         }
@@ -748,7 +780,10 @@ export const panesSlice = createSlice({
       function mergeContent(node: PaneNode): PaneNode {
         if (node.type === 'leaf') {
           if (node.id === paneId) {
-            return { ...node, content: { ...node.content, ...updates } as PaneContent }
+            return {
+              ...node,
+              content: normalizePaneContent({ ...node.content, ...updates } as PaneContentInput | PaneContent, node.content),
+            }
           }
           return node
         }
@@ -795,15 +830,16 @@ export const panesSlice = createSlice({
       const mergedLayouts: Record<string, PaneNode> = {}
       for (const [tabId, incomingNode] of Object.entries(incoming.layouts || {})) {
         const localNode = state.layouts[tabId]
-        mergedLayouts[tabId] = localNode
+        const mergedNode = localNode
           ? mergeTerminalState(incomingNode as PaneNode, localNode)
           : incomingNode as PaneNode
+        mergedLayouts[tabId] = normalizePaneTree(mergedNode, localNode)
       }
       // Include any local-only tabs not in incoming (shouldn't normally happen,
       // but defensive)
       for (const tabId of Object.keys(state.layouts)) {
         if (!(tabId in mergedLayouts)) {
-          mergedLayouts[tabId] = state.layouts[tabId]
+          mergedLayouts[tabId] = normalizePaneTree(state.layouts[tabId])
         }
       }
 

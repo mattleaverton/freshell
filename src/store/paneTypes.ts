@@ -36,8 +36,13 @@ export type TerminalPaneContent = {
  */
 export type BrowserPaneContent = {
   kind: 'browser'
+  browserInstanceId: string
   url: string
   devToolsOpen: boolean
+}
+
+export type BrowserPaneInput = Omit<BrowserPaneContent, 'browserInstanceId'> & {
+  browserInstanceId?: string
 }
 
 /**
@@ -153,7 +158,7 @@ export type AgentChatPaneInput = Omit<AgentChatPaneContent, 'createRequestId' | 
  */
 export type ExtensionPaneInput = ExtensionPaneContent
 
-export type PaneContentInput = TerminalPaneInput | BrowserPaneContent | EditorPaneInput
+export type PaneContentInput = TerminalPaneInput | BrowserPaneInput | EditorPaneInput
   | PickerPaneContent | AgentChatPaneInput | ExtensionPaneInput
 
 /**

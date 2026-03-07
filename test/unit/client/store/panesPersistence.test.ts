@@ -236,6 +236,29 @@ describe('Panes Persistence Integration', () => {
     expect(layout.content.content).toBe('')
   })
 
+  it('migrates older browser pane content to include browserInstanceId', () => {
+    localStorage.setItem('freshell.panes.v2', JSON.stringify({
+      version: 5,
+      layouts: {
+        'tab-1': {
+          type: 'leaf',
+          id: 'pane-1',
+          content: { kind: 'browser', url: 'https://example.com', devToolsOpen: true },
+        },
+      },
+      activePane: { 'tab-1': 'pane-1' },
+      paneTitles: {},
+      paneTitleSetByUser: {},
+    }))
+
+    const loaded = loadPersistedPanes()
+    const layout = loaded!.layouts['tab-1'] as any
+
+    expect(layout.content.kind).toBe('browser')
+    expect(layout.content.browserInstanceId).toBeDefined()
+    expect(loaded!.version).toBe(PANES_SCHEMA_VERSION)
+  })
+
   it('flushes pending writes on visibility change', () => {
     const store = configureStore({
       reducer: {
@@ -364,7 +387,7 @@ describe('PaneContent migration', () => {
     expect(layout.content.shell).toBe('powershell') // Preserved
   })
 
-  it('preserves browser pane content unchanged', () => {
+  it('preserves browser pane content while assigning browserInstanceId', () => {
     const oldPanesState = {
       layouts: {
         'tab1': {
@@ -382,6 +405,7 @@ describe('PaneContent migration', () => {
 
     const layout = loaded.layouts['tab1'] as { type: 'leaf'; content: any }
     expect(layout.content.kind).toBe('browser')
+    expect(layout.content.browserInstanceId).toBeDefined()
     expect(layout.content.url).toBe('https://example.com')
     expect(layout.content.devToolsOpen).toBe(true)
   })

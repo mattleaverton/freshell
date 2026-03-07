@@ -78,19 +78,19 @@ export function loadPersistedTabs(): any | null {
 }
 
 /**
- * Migrate terminal pane content to include lifecycle fields.
- * Only runs if content is missing required fields.
+ * Migrate pane content to include required lifecycle/identity fields.
  */
 function migratePaneContent(content: any): any {
   if (!content || typeof content !== 'object') {
     return content
   }
-  if (content.kind !== 'terminal') {
-    return content
+  if (content.kind === 'browser') {
+    return {
+      ...content,
+      browserInstanceId: content.browserInstanceId || nanoid(),
+    }
   }
-
-  // Already has lifecycle fields - no migration needed
-  if (content.createRequestId && content.status) {
+  if (content.kind !== 'terminal') {
     return content
   }
 
@@ -244,6 +244,15 @@ function loadPersistedPanesUncached(): any | null {
         droppedLayouts[tabId] = dropClaudeChatNodes(node)
       }
       layouts = droppedLayouts
+    }
+
+    // Version 5 -> 6: assign stable browser instance ids.
+    if (currentVersion < 6) {
+      const migratedLayouts: Record<string, any> = {}
+      for (const [tabId, node] of Object.entries(layouts)) {
+        migratedLayouts[tabId] = migrateNode(node)
+      }
+      layouts = migratedLayouts
     }
 
     const sanitizedLayouts: Record<string, any> = {}
