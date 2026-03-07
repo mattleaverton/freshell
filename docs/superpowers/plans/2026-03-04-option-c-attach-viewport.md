@@ -15,7 +15,8 @@
 ## Final Contract
 
 - Mixed-version compatibility is intentionally not supported. This rollout requires a protocol version bump and rejects stale clients with `PROTOCOL_MISMATCH`.
-- `terminal.create` returns exactly one `terminal.created` for a given `requestId`. It never auto-attaches, never replays output, and never emits `terminal.attach.ready`.
+- `terminal.create` resolves via `terminal.created` only. It never auto-attaches, never replays output, and never emits `terminal.attach.ready`.
+- Duplicate `terminal.create` requests may re-emit the same `terminalId`, but only through `terminal.created`.
 - `terminal.attach` is the only replay entrypoint.
 - Every `terminal.attach` must include `cols` and `rows`.
 - The server must call `registry.resize(terminalId, cols, rows)` before broker attach/replay for that generation.
