@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react'
 import { Provider } from 'react-redux'
 import { configureStore } from '@reduxjs/toolkit'
-import panesReducer from '@/store/panesSlice'
+import panesReducer, { requestPaneRefresh } from '@/store/panesSlice'
 import settingsReducer from '@/store/settingsSlice'
 import BrowserPane from '@/components/panes/BrowserPane'
 
@@ -32,6 +32,18 @@ const createMockStore = () =>
       panes: panesReducer,
       settings: settingsReducer,
     },
+    preloadedState: {
+      panes: {
+        layouts: {},
+        activePane: {},
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      },
+    },
   })
 
 function renderBrowserPane(
@@ -41,6 +53,7 @@ function renderBrowserPane(
   const defaultProps = {
     paneId: 'pane-1',
     tabId: 'tab-1',
+    browserInstanceId: 'browser-1',
     url: '',
     devToolsOpen: false,
     ...props,
@@ -204,6 +217,92 @@ describe('BrowserPane', () => {
       expect(screen.getByText('Enter a URL to browse')).toBeInTheDocument()
       expect(screen.getByTitle('Back')).toBeDisabled()
       expect(screen.getByTitle('Forward')).toBeDisabled()
+    })
+  })
+
+  describe('refresh requests', () => {
+    function createBrowserStore() {
+      return configureStore({
+        reducer: {
+          panes: panesReducer,
+          settings: settingsReducer,
+        },
+        preloadedState: {
+          panes: {
+            layouts: {
+              'tab-1': {
+                type: 'leaf',
+                id: 'pane-1',
+                content: {
+                  kind: 'browser',
+                  browserInstanceId: 'browser-1',
+                  url: 'https://example.com',
+                  devToolsOpen: false,
+                },
+              },
+            },
+            activePane: { 'tab-1': 'pane-1' },
+            paneTitles: {},
+            paneTitleSetByUser: {},
+            renameRequestTabId: null,
+            renameRequestPaneId: null,
+            zoomedPane: {},
+            refreshRequestsByPane: {},
+          },
+        },
+      })
+    }
+
+    it('reloads the live iframe when a matching refresh request arrives', async () => {
+      const store = createBrowserStore()
+      renderBrowserPane({ url: 'https://example.com' }, store)
+
+      const iframe = document.querySelector('iframe') as HTMLIFrameElement
+      expect(iframe).toBeTruthy()
+
+      const reload = vi.fn()
+      Object.defineProperty(iframe, 'contentWindow', {
+        configurable: true,
+        value: { location: { reload } },
+      })
+
+      act(() => {
+        store.dispatch(requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-1' }))
+      })
+
+      await waitFor(() => {
+        expect(reload).toHaveBeenCalledTimes(1)
+      })
+      expect(store.getState().panes.refreshRequestsByPane['tab-1']).toBeUndefined()
+    })
+
+    it('retries a failed forwarded page when a matching refresh request arrives without an iframe', async () => {
+      const store = createBrowserStore()
+      setWindowHostname('192.168.1.100')
+      vi.mocked(api.post)
+        .mockRejectedValueOnce(new Error('Connection refused'))
+        .mockResolvedValueOnce({ forwardedPort: 45678 })
+
+      await act(async () => {
+        renderBrowserPane({ url: 'http://localhost:3000' }, store)
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText('Failed to connect')).toBeInTheDocument()
+      })
+
+      act(() => {
+        store.dispatch(requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-1' }))
+      })
+
+      await waitFor(() => {
+        expect(api.post).toHaveBeenCalledTimes(2)
+      })
+      await waitFor(() => {
+        expect(screen.queryByText('Failed to connect')).not.toBeInTheDocument()
+      })
+      expect(document.querySelector('iframe')?.getAttribute('src')).toBe('http://192.168.1.100:45678/')
+      expect(store.getState().panes.refreshRequestsByPane['tab-1']).toBeUndefined()
     })
   })
 

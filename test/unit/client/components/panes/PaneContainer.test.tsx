@@ -14,11 +14,23 @@ import type { PanesState } from '@/store/panesSlice'
 import type { PaneNode, PaneContent, EditorPaneContent } from '@/store/paneTypes'
 
 // Hoist mock functions so vi.mock can reference them
-const { mockSend, mockTerminalView, mockApiGet, mockApiPost, mockApiPatch } = vi.hoisted(() => ({
+const {
+  mockSend,
+  mockTerminalView,
+  mockBrowserPane,
+  browserPaneMounts,
+  browserPaneUnmounts,
+  mockApiGet,
+  mockApiPost,
+  mockApiPatch,
+} = vi.hoisted(() => ({
   mockSend: vi.fn(),
   mockTerminalView: vi.fn(({ tabId, paneId, hidden }: { tabId: string; paneId: string; hidden?: boolean }) => (
     <div data-testid={`terminal-${paneId}`} data-hidden={String(hidden)}>Terminal for {tabId}/{paneId}</div>
   )),
+  mockBrowserPane: vi.fn(),
+  browserPaneMounts: [] as string[],
+  browserPaneUnmounts: [] as string[],
   mockApiGet: vi.fn(),
   mockApiPost: vi.fn(),
   mockApiPatch: vi.fn(),
@@ -116,9 +128,21 @@ vi.mock('@/components/TerminalView', () => ({
 
 // Mock BrowserPane component
 vi.mock('@/components/panes/BrowserPane', () => ({
-  default: ({ paneId, url }: { paneId: string; url: string }) => (
-    <div data-testid={`browser-${paneId}`}>Browser: {url}</div>
-  ),
+  default: ({ paneId, url, browserInstanceId }: { paneId: string; url: string; browserInstanceId: string }) => {
+    const React = require('react')
+    React.useEffect(() => {
+      browserPaneMounts.push(browserInstanceId)
+      return () => {
+        browserPaneUnmounts.push(browserInstanceId)
+      }
+    }, [browserInstanceId])
+    mockBrowserPane({ paneId, url, browserInstanceId })
+    return (
+      <div data-testid={`browser-${paneId}`} data-browser-instance-id={browserInstanceId}>
+        Browser: {url}
+      </div>
+    )
+  },
 }))
 
 // Mock Monaco editor
@@ -203,6 +227,9 @@ describe('PaneContainer', () => {
   beforeEach(() => {
     mockSend.mockClear()
     mockTerminalView.mockClear()
+    mockBrowserPane.mockClear()
+    browserPaneMounts.length = 0
+    browserPaneUnmounts.length = 0
     mockApiGet.mockReset()
     mockApiPost.mockReset()
     mockApiPatch.mockReset()
@@ -315,6 +342,7 @@ describe('PaneContainer', () => {
 
       const browserContent: PaneContent = {
         kind: 'browser',
+        browserInstanceId: 'browser-1',
         url: 'https://example.com',
         devToolsOpen: false,
       }
@@ -579,6 +607,7 @@ describe('PaneContainer', () => {
       const paneId = 'pane-1'
       const browserContent: PaneContent = {
         kind: 'browser',
+        browserInstanceId: 'browser-1',
         url: 'https://example.com',
         devToolsOpen: false,
       }
@@ -600,6 +629,51 @@ describe('PaneContainer', () => {
 
       expect(screen.getByTestId(`browser-${paneId}`)).toBeInTheDocument()
       expect(screen.getByText('Browser: https://example.com')).toBeInTheDocument()
+      expect(screen.getByTestId(`browser-${paneId}`)).toHaveAttribute('data-browser-instance-id', 'browser-1')
+    })
+
+    it('remounts browser runtime when browserInstanceId changes under the same pane id', () => {
+      const paneId = 'pane-1'
+      const initialNode: PaneNode = {
+        type: 'leaf',
+        id: paneId,
+        content: {
+          kind: 'browser',
+          browserInstanceId: 'browser-1',
+          url: 'https://example.com',
+          devToolsOpen: false,
+        },
+      }
+      const nextNode: PaneNode = {
+        type: 'leaf',
+        id: paneId,
+        content: {
+          kind: 'browser',
+          browserInstanceId: 'browser-2',
+          url: 'https://example.org',
+          devToolsOpen: false,
+        },
+      }
+
+      const store = createStore({
+        layouts: { 'tab-1': initialNode },
+        activePane: { 'tab-1': paneId },
+      })
+
+      const { rerender } = renderWithStore(
+        <PaneContainer tabId="tab-1" node={initialNode} />,
+        store
+      )
+
+      rerender(
+        <Provider store={store}>
+          <PaneContainer tabId="tab-1" node={nextNode} />
+        </Provider>
+      )
+
+      expect(browserPaneMounts).toEqual(['browser-1', 'browser-2'])
+      expect(browserPaneUnmounts).toContain('browser-1')
+      expect(screen.getByTestId(`browser-${paneId}`)).toHaveAttribute('data-browser-instance-id', 'browser-2')
     })
   })
 

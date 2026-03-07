@@ -603,8 +603,14 @@ function renderContent(tabId: string, paneId: string, content: PaneContent, isOn
 
   if (content.kind === 'browser') {
     return (
-      <ErrorBoundary key={paneId} label="Browser">
-        <BrowserPane paneId={paneId} tabId={tabId} url={content.url} devToolsOpen={content.devToolsOpen} />
+      <ErrorBoundary key={`${paneId}:${content.browserInstanceId}`} label="Browser">
+        <BrowserPane
+          paneId={paneId}
+          tabId={tabId}
+          browserInstanceId={content.browserInstanceId}
+          url={content.url}
+          devToolsOpen={content.devToolsOpen}
+        />
       </ErrorBoundary>
     )
   }
