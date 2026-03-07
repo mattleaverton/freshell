@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
-**Goal:** Ensure every session that is already open in a local tab appears in the left sidebar even when it falls outside the initial 100-session paginated window.
+**Goal:** Ensure any session already open in a local tab is included in the authoritative initial sidebar snapshot even when it is older than the normal 100-session first page.
 
-**Architecture:** Keep the existing paginated `/api/sessions?limit=100` and websocket snapshot contracts unchanged. After the first authoritative server baseline lands, `App` will collect the open local session locators from tabs and panes, exact-resolve only the missing local sessions through a new lookup endpoint, and merge the returned sessions into `state.sessions.projects` with a reducer that never mutates server-baseline freshness markers. Use `sessions.lastLoadedAt` only as the retry token for authoritative server-driven updates, which means the new local merge reducer must not touch `lastLoadedAt`, `wsSnapshotReceived`, or pagination metadata.
+**Architecture:** Fix the authoritative first-page selection path instead of adding a second client-side hydration system. The client will send the set of open tab session locators to the two baseline producers that already seed sidebar state today: the initial HTTP bootstrap request and the websocket handshake snapshot; the server will extend `paginateProjects()` so the first page is the normal newest-100 window plus any matching open local sessions, while keeping the pagination cursor anchored to the normal 100-session boundary so page 2 does not skip sessions. After that first baseline lands, the existing `mergeSnapshotProjects()` behavior in `src/store/sessionsSlice.ts` continues preserving those extra sessions across later paginated snapshots.
 
 **Tech Stack:** React 18, Redux Toolkit, Express, Zod, Vitest, Testing Library
 
@@ -12,11 +12,12 @@
 
 **Notes:**
 - Work in `/home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar`.
-- Do not change the shape of `GET /api/sessions` or any websocket session payload for this feature.
-- Do not synthesize sidebar-only fake sessions. Hydrate missing local open-tab sessions into canonical `state.sessions.projects` instead.
-- Only hydrate sessions that are local to this Freshell server: either the tab has no `serverInstanceId`, or `sessionRef.serverInstanceId === state.connection.serverInstanceId`. Foreign copied-tab locators stay tab-only because the local sidebar cannot authoritatively manufacture their metadata.
-- `mergeSnapshotProjects()` already preserves older sessions when `hasMore === true`; keep that invariant explicit with tests so later paginated baselines never drop hydrated open-tab sessions.
-- No `docs/index.html` update is needed because the UI layout does not change.
+- This plan intentionally replaces the previous client-side hydration direction. Do not add `POST /sessions/resolve`, `mergeResolvedProjects()`, or any App retry/parking effect.
+- Do not use `lastLoadedAt` as a retry or baseline token. Its current semantics are broader than “authoritative baseline” and do not need to change for this feature.
+- Only local sessions are force-included into the first page: locators with no `serverInstanceId`, or locators whose `serverInstanceId` matches this server's `serverInstanceId`.
+- Legacy clients that do not advertise sessions pagination already receive the full session list over websocket and need no special handling.
+- When force-included sessions are older than the normal page boundary, `oldestIncludedTimestamp` and `oldestIncludedSessionId` must continue to describe the next-page cursor for the primary 100-session window, not the literal oldest returned forced extra. Add comments and tests that make this explicit.
+- `docs/index.html` does not need an update because the UI layout does not change.
 
 ### Task 1: Extract Shared Open-Session Locator Collection
 
@@ -28,7 +29,7 @@
 
 **Step 1: Write the failing tests**
 
-In `test/unit/client/lib/session-utils.test.ts`, add coverage for a new helper that walks tabs plus pane layouts and returns the best deduped locator for each open session key:
+In `test/unit/client/lib/session-utils.test.ts`, add focused coverage for a new helper that walks tabs plus pane layouts and returns the best deduped locator for each open session key:
 
 ```typescript
 expect(collectSessionLocatorsFromTabs(tabs, panes, { localServerInstanceId: 'srv-local' })).toEqual([
@@ -48,11 +49,11 @@ Cover:
 - pane-level explicit `sessionRef` preserving `serverInstanceId`
 - terminal and `agent-chat` panes
 - legacy tab-level `resumeSessionId` fallback when no layout exists
-- duplicate `provider:sessionId` across multiple tabs and panes
+- duplicate `provider:sessionId` across panes and tabs
 - local-vs-foreign duplicate preference when the same session appears in both forms
-- invalid Claude IDs ignored the same way the existing helpers ignore them
+- invalid Claude IDs ignored the same way existing helpers ignore them
 
-In `test/unit/client/store/selectors/sidebarSelectors.test.ts`, add a small regression proving `buildSessionItems()` still marks `hasTab` from the shared helper for both pane-backed tabs and legacy tabs-without-layout.
+In `test/unit/client/store/selectors/sidebarSelectors.test.ts`, add a small regression proving `buildSessionItems()` still marks `hasTab` correctly after it switches to the shared helper for pane-backed tabs and tabs without layouts.
 
 **Step 2: Run the targeted tests to verify failure**
 
@@ -63,15 +64,17 @@ cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
 npx vitest run test/unit/client/lib/session-utils.test.ts test/unit/client/store/selectors/sidebarSelectors.test.ts
 ```
 
-Expected: FAIL because the new tab-level locator collector does not exist yet.
+Expected: FAIL because the shared tab-level locator collector does not exist yet.
 
-**Step 3: Implement the shared helpers and refactor sidebar tab detection**
+**Step 3: Implement the shared helpers**
 
 In `src/lib/session-utils.ts`:
-- Add `extractSessionLocator()` that preserves explicit `sessionRef.serverInstanceId`.
-- Add `collectSessionLocatorsFromNode()` and `collectSessionLocatorsFromTabs()`.
-- Keep `collectSessionRefsFromNode()` as the server-instance-id-stripping wrapper used by existing call sites.
-- Add a small local-priority helper so duplicate keys prefer the local locator:
+- add `extractSessionLocator()` that preserves explicit `sessionRef.serverInstanceId`
+- add `collectSessionLocatorsFromNode()` and `collectSessionLocatorsFromTabs()`
+- keep `collectSessionRefsFromNode()` and `collectSessionRefsFromTabs()` as thin wrappers that strip `serverInstanceId`
+- add a small priority helper so duplicate keys prefer the local locator when both local and foreign variants exist
+
+Use this shape:
 
 ```typescript
 function locatorPriority(locator: SessionLocator, localServerInstanceId?: string): number {
@@ -81,7 +84,7 @@ function locatorPriority(locator: SessionLocator, localServerInstanceId?: string
 }
 ```
 
-In `src/store/selectors/sidebarSelectors.ts`, replace the inline tab traversal in `buildSessionItems()` with `collectSessionRefsFromTabs(tabs, panes)`. This keeps the selector behavior unchanged while giving `App` a single source of truth for the open-session locator list it will hydrate in Task 4.
+Then refactor `src/store/selectors/sidebarSelectors.ts` so `buildSessionItems()` calls `collectSessionRefsFromTabs(tabs, panes)` instead of traversing tabs inline.
 
 **Step 4: Re-run the targeted tests**
 
@@ -102,96 +105,183 @@ git add src/lib/session-utils.ts src/store/selectors/sidebarSelectors.ts test/un
 git commit -m "refactor: share open-tab session locator collection"
 ```
 
-### Task 2: Add Exact Session Resolve API And Client Helper
+### Task 2: Teach `paginateProjects()` To Force-Include Open Sessions On The First Page
+
+**Files:**
+- Modify: `server/session-pagination.ts`
+- Modify: `test/unit/server/session-pagination.test.ts`
+
+**Step 1: Write the failing pagination tests**
+
+Extend `test/unit/server/session-pagination.test.ts` with cases for:
+- a first page with `limit: 100` returns the normal newest 100 sessions plus an older explicitly force-included session outside that window
+- force-including a session already inside the newest 100 does not duplicate it
+- force-included sessions are ignored when `before`/`beforeId` request a later page
+- the next-page cursor remains anchored to the primary 100-session window, so page 2 still returns the sessions immediately after that window and does not skip over anything because of an ancient forced extra
+
+Use an explicit cursor test like:
+
+```typescript
+const page1 = paginateProjects(projects, {
+  limit: 2,
+  forceIncludeSessionKeys: new Set(['claude:very-old-open']),
+})
+
+expect(page1.projects.flatMap((p) => p.sessions).map((s) => s.sessionId)).toEqual([
+  'newest',
+  'second-newest',
+  'very-old-open',
+])
+expect(page1.oldestIncludedSessionId).toBe('claude:second-newest')
+
+const page2 = paginateProjects(projects, {
+  limit: 2,
+  before: page1.oldestIncludedTimestamp,
+  beforeId: page1.oldestIncludedSessionId,
+})
+
+expect(page2.projects.flatMap((p) => p.sessions).map((s) => s.sessionId)).toEqual([
+  'third-newest',
+  'fourth-newest',
+])
+```
+
+**Step 2: Run the targeted tests to verify failure**
+
+Run:
+
+```bash
+cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
+npx vitest run --config vitest.server.config.ts test/unit/server/session-pagination.test.ts
+```
+
+Expected: FAIL because `paginateProjects()` cannot force-include first-page session keys yet.
+
+**Step 3: Implement force-included first-page selection**
+
+In `server/session-pagination.ts`:
+- extend `PaginateOptions` with `forceIncludeSessionKeys?: ReadonlySet<string>`
+- keep the existing global recency ordering and cursor filtering
+- on the first page only (`before === undefined && beforeId === undefined`), take the normal recency window first, then union in any matching `forceIncludeSessionKeys` not already present
+- keep `totalSessions` and `hasMore` based on the canonical catalog, not the inflated returned row count
+- keep `oldestIncludedTimestamp` and `oldestIncludedSessionId` tied to the primary recency window
+- update the interface comment so those fields are documented as the next-page cursor when force-included sessions are present
+
+Use this structure:
+
+```typescript
+const primaryPage = filteredSessions.slice(0, limit)
+const primaryKeys = new Set(primaryPage.map(cursorKey))
+const forcedExtras = isFirstPage && options.forceIncludeSessionKeys?.size
+  ? filteredSessions.filter((session) => (
+      options.forceIncludeSessionKeys!.has(cursorKey(session)) && !primaryKeys.has(cursorKey(session))
+    ))
+  : []
+
+const selected = [...primaryPage, ...forcedExtras].sort(compareSessionsDesc)
+const cursor = primaryPage.at(-1)
+```
+
+Then regroup `selected` back into `ProjectGroup[]`, preserving project colors.
+
+**Step 4: Re-run the targeted tests**
+
+Run:
+
+```bash
+cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
+npx vitest run --config vitest.server.config.ts test/unit/server/session-pagination.test.ts
+```
+
+Expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
+git add server/session-pagination.ts test/unit/server/session-pagination.test.ts
+git commit -m "feat: force include open sessions on the first page"
+```
+
+### Task 3: Thread Open Session Locators Through The HTTP Bootstrap Path
 
 **Files:**
 - Modify: `server/sessions-router.ts`
-- Modify: `src/lib/api.ts`
-- Create: `test/unit/server/sessions-router.resolve.test.ts`
-- Modify: `test/unit/client/lib/api.test.ts`
+- Modify: `server/index.ts`
+- Modify: `src/App.tsx`
+- Modify: `test/unit/server/sessions-router-pagination.test.ts`
+- Modify: `test/unit/client/components/App.ws-bootstrap.test.tsx`
 
-**Step 1: Write the failing server and client tests**
+**Step 1: Write the failing HTTP bootstrap tests**
 
-Create `test/unit/server/sessions-router.resolve.test.ts` covering:
-- `POST /sessions/resolve` returns only the requested sessions, grouped by project and preserving project colors
-- duplicate request entries are deduped
-- missing sessions are ignored instead of failing the whole request
-- malformed bodies and oversized batches return `400`
+In `test/unit/server/sessions-router-pagination.test.ts`, add cases for:
+- `GET /sessions?limit=100&openSession=...` returns the normal first page plus the older requested local session
+- the same request ignores a foreign-only locator whose `serverInstanceId` does not match this server
+- the next-page cursor from that force-included first page still pages correctly
+- invalid `openSession` query values return `400`
+- `GET /sessions` without pagination params still returns the raw array for backward compatibility
 
-Extend `test/unit/client/lib/api.test.ts` with a new `resolveSessions()` helper test:
+In `test/unit/client/components/App.ws-bootstrap.test.tsx`, add cases for:
+- the initial sessions bootstrap request includes the open-tab locators from tabs/panes
+- the pre-connected websocket fallback refetch uses the same request shape
+- the request preserves explicit `sessionRef.serverInstanceId` so the server can reject foreign copied-tab sessions
+
+**Step 2: Run the targeted tests to verify failure**
+
+Run:
+
+```bash
+cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
+npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx
+npx vitest run --config vitest.server.config.ts test/unit/server/sessions-router-pagination.test.ts
+```
+
+Expected: FAIL because neither the router nor `App` currently threads open session locators through the HTTP baseline request.
+
+**Step 3: Implement HTTP bootstrap force-inclusion**
+
+In `server/index.ts`, pass `serverInstanceId` into `createSessionsRouter(...)`.
+
+In `server/sessions-router.ts`:
+- add a parser for repeated `openSession` query params
+- parse each `openSession` value as JSON and validate it with a small Zod schema matching `{ provider, sessionId, serverInstanceId? }`
+- convert the validated locators into a `Set<string>` of local session keys by dropping any locator whose explicit `serverInstanceId` does not match `deps.serverInstanceId`
+- pass that set into `paginateProjects()` as `forceIncludeSessionKeys`
+
+Keep the route behavior narrow:
+- force inclusion only matters on paginated requests
+- raw `GET /sessions` without pagination params still returns the legacy raw array
+
+Use this kind of parsing flow:
 
 ```typescript
-await resolveSessions([
-  { provider: 'codex', sessionId: '019cbc9d-bea0-7c93-9248-21d7e48f8ead' },
-])
+const rawOpen = req.query.openSession
+const rawValues = rawOpen === undefined ? [] : Array.isArray(rawOpen) ? rawOpen : [rawOpen]
 
-expect(mockFetch).toHaveBeenCalledWith(
-  '/api/sessions/resolve',
-  expect.objectContaining({
-    method: 'POST',
-    body: JSON.stringify({
-      sessions: [{ provider: 'codex', sessionId: '019cbc9d-bea0-7c93-9248-21d7e48f8ead' }],
-    }),
-  }),
+const openLocators = rawValues.map((value) => OpenSessionLocatorSchema.parse(JSON.parse(String(value))))
+const forceIncludeSessionKeys = new Set(
+  openLocators
+    .filter((locator) => !locator.serverInstanceId || locator.serverInstanceId === deps.serverInstanceId)
+    .map((locator) => `${locator.provider}:${locator.sessionId}`)
 )
 ```
 
-**Step 2: Run the targeted tests to verify failure**
-
-Run:
-
-```bash
-cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-npx vitest run test/unit/client/lib/api.test.ts
-npx vitest run --config vitest.server.config.ts test/unit/server/sessions-router.resolve.test.ts
-```
-
-Expected: FAIL because the exact lookup route and client helper do not exist yet.
-
-**Step 3: Implement the lookup-only route and client helper**
-
-In `server/sessions-router.ts`, add a lookup-only route. Keep the request explicit and capped:
+In `src/App.tsx`, factor the repeated initial/fallback sessions fetch into a helper that reads the restored tabs and panes from `store.getState()`, collects locators with `collectSessionLocatorsFromTabs(...)`, and builds the request path:
 
 ```typescript
-const ResolveSessionsBodySchema = z.object({
-  sessions: z.array(z.object({
-    provider: CodingCliProviderSchema,
-    sessionId: z.string().min(1),
-  })).min(1).max(100),
-})
-
-router.post('/sessions/resolve', (req, res) => {
-  const parsed = ResolveSessionsBodySchema.safeParse(req.body ?? {})
-  if (!parsed.success) {
-    return res.status(400).json({ error: 'Invalid request', details: parsed.error.issues })
+function buildInitialSessionsPath(): string {
+  const state = store.getState()
+  const params = new URLSearchParams({ limit: '100' })
+  for (const locator of collectSessionLocatorsFromTabs(state.tabs.tabs, state.panes)) {
+    params.append('openSession', JSON.stringify(locator))
   }
-
-  const requested = new Set(parsed.data.sessions.map((session) => makeSessionKey(session.provider, session.sessionId)))
-  const projects = codingCliIndexer.getProjects()
-    .map((project) => ({
-      ...project,
-      sessions: project.sessions.filter((session) => {
-        const provider = session.provider || 'claude'
-        return requested.has(makeSessionKey(provider, session.sessionId))
-      }),
-    }))
-    .filter((project) => project.sessions.length > 0)
-
-  res.json(projects)
-})
-```
-
-In `src/lib/api.ts`, add:
-
-```typescript
-export async function resolveSessions(
-  sessions: Array<{ provider: CodingCliProviderName; sessionId: string }>,
-): Promise<ProjectGroup[]> {
-  return api.post<ProjectGroup[]>('/api/sessions/resolve', { sessions })
+  return `/api/sessions?${params}`
 }
 ```
 
-Do not change `GET /api/sessions`, do not add pagination metadata here, and do not touch websocket protocol files in this task.
+Use that helper for:
+- the first bootstrap fetch
+- the pre-connected websocket fallback refetch
 
 **Step 4: Re-run the targeted tests**
 
@@ -199,8 +289,8 @@ Run:
 
 ```bash
 cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-npx vitest run test/unit/client/lib/api.test.ts
-npx vitest run --config vitest.server.config.ts test/unit/server/sessions-router.resolve.test.ts
+npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx
+npx vitest run --config vitest.server.config.ts test/unit/server/sessions-router-pagination.test.ts
 ```
 
 Expected: PASS.
@@ -209,126 +299,30 @@ Expected: PASS.
 
 ```bash
 cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-git add server/sessions-router.ts src/lib/api.ts test/unit/server/sessions-router.resolve.test.ts test/unit/client/lib/api.test.ts
-git commit -m "feat: add exact session resolve lookup"
+git add server/index.ts server/sessions-router.ts src/App.tsx test/unit/server/sessions-router-pagination.test.ts test/unit/client/components/App.ws-bootstrap.test.tsx
+git commit -m "feat: include open tab sessions in the bootstrap page"
 ```
 
-### Task 3: Merge Hydrated Sessions Into Canonical Session State
+### Task 4: Thread Open Session Locators Through Websocket Hello And Handshake Snapshot
 
 **Files:**
-- Modify: `src/store/sessionsSlice.ts`
-- Modify: `test/unit/client/store/sessionsSlice.test.ts`
-
-**Step 1: Write the failing reducer tests**
-
-Add tests for a new `mergeResolvedProjects()` reducer covering:
-- upserting resolved sessions into an existing project without dropping the first-page recent sessions already loaded
-- creating a new project when the resolved session belongs to a project not yet in state
-- preserving project color
-- not mutating `lastLoadedAt`, `wsSnapshotReceived`, `hasMore`, `loadingMore`, or the oldest-loaded cursor fields
-- keeping the hydrated open-tab session after a later paginated `mergeSnapshotProjects()` baseline for the same project
-
-Use an explicit action sequence for the last point:
-
-```typescript
-let state = sessionsReducer(undefined, setProjects(firstPage))
-state = sessionsReducer(state, mergeResolvedProjects(openTabProject))
-state = sessionsReducer(state, mergeSnapshotProjects(refreshedFirstPage))
-
-expect(state.projects.find((p) => p.projectPath === '/repo')?.sessions.map((s) => s.sessionId)).toContain('open-tab-old')
-```
-
-**Step 2: Run the targeted tests to verify failure**
-
-Run:
-
-```bash
-cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-npx vitest run test/unit/client/store/sessionsSlice.test.ts
-```
-
-Expected: FAIL because `mergeResolvedProjects()` does not exist yet.
-
-**Step 3: Implement the local merge reducer**
-
-In `src/store/sessionsSlice.ts`, add a reducer that upserts individual sessions by `provider:sessionId` instead of replacing whole projects:
-
-```typescript
-mergeResolvedProjects: (state, action: PayloadAction<ProjectGroup[]>) => {
-  const incoming = normalizeProjects(action.payload)
-  const projectMap = new Map(state.projects.map((project) => [
-    project.projectPath,
-    { ...project, sessions: [...project.sessions] },
-  ]))
-
-  for (const incomingProject of incoming) {
-    const existing = projectMap.get(incomingProject.projectPath)
-    if (!existing) {
-      projectMap.set(incomingProject.projectPath, incomingProject)
-      continue
-    }
-
-    const byKey = new Map(existing.sessions.map((session: any) => [
-      `${session.provider || 'claude'}:${session.sessionId}`,
-      session,
-    ]))
-    for (const session of incomingProject.sessions as any[]) {
-      byKey.set(`${session.provider || 'claude'}:${session.sessionId}`, session)
-    }
-
-    projectMap.set(incomingProject.projectPath, {
-      ...existing,
-      ...incomingProject,
-      sessions: Array.from(byKey.values()).sort(compareSessionsDesc),
-    })
-  }
-
-  state.projects = sortProjectsByRecency(Array.from(projectMap.values()))
-  // Intentionally do not touch lastLoadedAt, wsSnapshotReceived, or pagination meta.
-}
-```
-
-Add a local `compareSessionsDesc()` inside this slice so merged project session arrays stay in descending recency order.
-
-**Step 4: Re-run the targeted tests**
-
-Run:
-
-```bash
-cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-npx vitest run test/unit/client/store/sessionsSlice.test.ts
-```
-
-Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-git add src/store/sessionsSlice.ts test/unit/client/store/sessionsSlice.test.ts
-git commit -m "feat: merge hydrated sessions into sidebar state"
-```
-
-### Task 4: Hydrate Missing Open-Tab Sessions After The First Server Baseline
-
-**Files:**
+- Modify: `shared/ws-protocol.ts`
+- Modify: `src/lib/ws-client.ts`
 - Modify: `src/App.tsx`
-- Create: `test/unit/client/components/App.open-tab-session-hydration.test.tsx`
+- Modify: `server/ws-handler.ts`
+- Modify: `test/server/ws-handshake-snapshot.test.ts`
 - Modify: `test/unit/client/components/App.ws-bootstrap.test.tsx`
 
-**Step 1: Write the failing App tests**
+**Step 1: Write the failing websocket tests**
 
-Create `test/unit/client/components/App.open-tab-session-hydration.test.tsx` and cover:
-- App does not call `/api/sessions/resolve` before `wsSnapshotReceived === true`
-- once the first authoritative baseline is ready, App resolves the missing local open-tab session and dispatches it into `sessions.projects`
-- a foreign copied-tab locator (`sessionRef.serverInstanceId !== local server`) is ignored
-- an empty or failed resolve result is parked for the current `lastLoadedAt` token so the effect does not tight-loop and spam requests
-- when a later authoritative server update changes `lastLoadedAt`, the parked key retries
+In `test/server/ws-handshake-snapshot.test.ts`, add cases for:
+- a pagination-capable client whose `hello` includes an older local open session receives that session in the handshake `sessions.updated` snapshot even though it is outside the newest 100
+- a foreign-only locator is ignored
+- a legacy client without pagination capability still gets the full snapshot and needs no `sidebarOpenSessions`
 
-Extend `test/unit/client/components/App.ws-bootstrap.test.tsx` with the pre-connected fallback case:
-- the initial `/api/sessions?limit=100` load fails
-- the pre-connected fallback refetch succeeds and marks the baseline ready
-- the hydration effect runs after that fallback baseline and resolves the missing open-tab session
+In `test/unit/client/components/App.ws-bootstrap.test.tsx`, extend the existing hello extension test so the provider now returns both:
+- `sessions` for session repair prioritization
+- `sidebarOpenSessions` for first-page inclusion
 
 **Step 2: Run the targeted tests to verify failure**
 
@@ -336,52 +330,62 @@ Run:
 
 ```bash
 cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-npx vitest run test/unit/client/components/App.open-tab-session-hydration.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx
+npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx
+npx vitest run --config vitest.server.config.ts test/server/ws-handshake-snapshot.test.ts
 ```
 
-Expected: FAIL because `App` does not yet perform any missing-session hydration.
+Expected: FAIL because hello messages and handshake snapshots do not carry or use open-tab session locators yet.
 
-**Step 3: Implement the hydration orchestration in `App.tsx`**
+**Step 3: Implement websocket first-page inclusion**
 
-Add a small orchestration effect in `App.tsx`:
-- use `makeSelectKnownSessionKeys()` to get the canonical session key set
-- use `collectSessionLocatorsFromTabs()` to gather open-tab locators
-- gate on `wsSnapshotReceived` plus a numeric `lastLoadedAt`
-- keep `attemptedAtByKeyRef` and `inFlightKeysRef` in component refs so request bookkeeping does not enter Redux
-- batch resolve requests to the same `100`-item cap the route enforces
-- dispatch `mergeResolvedProjects()` with the exact matches
-
-Use the current server-driven timestamp as the retry token:
+In `shared/ws-protocol.ts`, add a shared locator schema and extend `HelloSchema`:
 
 ```typescript
-const attemptedAtByKeyRef = useRef(new Map<string, number>())
-const inFlightKeysRef = useRef(new Set<string>())
+export const SessionLocatorSchema = z.object({
+  provider: CodingCliProviderSchema,
+  sessionId: z.string().min(1),
+  serverInstanceId: z.string().min(1).optional(),
+})
 
-useEffect(() => {
-  if (!wsSnapshotReceived || typeof lastLoadedAt !== 'number') return
-
-  const hydratable = openSessionLocators.filter((locator) => {
-    const key = `${locator.provider}:${locator.sessionId}`
-    const sameServer = !locator.serverInstanceId || (
-      localServerInstanceId != null && locator.serverInstanceId === localServerInstanceId
-    )
-    if (!sameServer) return false
-    if (knownSessionKeys.has(key)) return false
-    if (inFlightKeysRef.current.has(key)) return false
-    return attemptedAtByKeyRef.current.get(key) !== lastLoadedAt
-  })
-
-  if (hydratable.length === 0) return
-
-  void hydrateMissingOpenSessions(hydratable, lastLoadedAt)
-}, [dispatch, knownSessionKeys, lastLoadedAt, localServerInstanceId, openSessionLocators, wsSnapshotReceived])
+export const HelloSchema = z.object({
+  // ...
+  sessions: z.object({
+    active: z.string().optional(),
+    visible: z.array(z.string()).optional(),
+    background: z.array(z.string()).optional(),
+  }).optional(),
+  sidebarOpenSessions: z.array(SessionLocatorSchema).max(200).optional(),
+})
 ```
 
-Important implementation details:
-- prune the ref maps down to currently-open session keys each time the effect runs so they do not grow forever
-- mark every key in a batch as attempted before firing the request so React re-renders cannot double-queue it
-- keep `mergeResolvedProjects()` local-only: it must not modify `lastLoadedAt`, or the effect will immediately re-arm failed keys
-- log resolve failures with the existing `App` logger, but leave the keys parked until the next authoritative server update changes `lastLoadedAt`
+In `src/lib/ws-client.ts`, extend `HelloExtensionProvider` so it can return `sidebarOpenSessions`.
+
+In `src/App.tsx`, update the existing hello extension provider to include:
+
+```typescript
+ws.setHelloExtensionProvider(() => {
+  const state = store.getState()
+  return {
+    sessions: getSessionsForHello(state),
+    sidebarOpenSessions: collectSessionLocatorsFromTabs(state.tabs.tabs, state.panes),
+    client: { mobile: isMobileRef.current },
+  }
+})
+```
+
+In `server/ws-handler.ts`:
+- extend `ClientState` with `sidebarOpenSessionKeys: Set<string>`
+- on `hello`, validate `m.sidebarOpenSessions`, drop any explicit foreign locator whose `serverInstanceId` does not match `this.serverInstanceId`, and store the remaining composite keys in `state.sidebarOpenSessionKeys`
+- in `sendHandshakeSnapshot()`, when the client supports pagination, call:
+
+```typescript
+const paginated = paginateProjects(snapshot.projects, {
+  limit: 100,
+  forceIncludeSessionKeys: state.sidebarOpenSessionKeys,
+})
+```
+
+Do not change `broadcastSessionsUpdated()` for already-connected clients. Once the first authoritative baseline includes the open-tab session, the existing client-side `mergeSnapshotProjects()` path already preserves it across later paginated snapshots.
 
 **Step 4: Re-run the targeted tests**
 
@@ -389,7 +393,8 @@ Run:
 
 ```bash
 cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-npx vitest run test/unit/client/components/App.open-tab-session-hydration.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx
+npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx
+npx vitest run --config vitest.server.config.ts test/server/ws-handshake-snapshot.test.ts
 ```
 
 Expected: PASS.
@@ -398,23 +403,23 @@ Expected: PASS.
 
 ```bash
 cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-git add src/App.tsx test/unit/client/components/App.open-tab-session-hydration.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx
-git commit -m "feat: hydrate open-tab sessions into the sidebar"
+git add shared/ws-protocol.ts src/lib/ws-client.ts src/App.tsx server/ws-handler.ts test/server/ws-handshake-snapshot.test.ts test/unit/client/components/App.ws-bootstrap.test.tsx
+git commit -m "feat: include open tab sessions in handshake snapshots"
 ```
 
-### Task 5: Add A User-Visible Regression Test And Run Full Verification
+### Task 5: Add A User-Visible Regression And Run Full Verification
 
 **Files:**
-- Create: `test/e2e/app-open-tab-sidebar-hydration.test.tsx`
+- Create: `test/e2e/app-open-tab-session-first-page.test.tsx`
+- Modify: `test/unit/client/store/sessionsSlice.test.ts`
 
-**Step 1: Write the failing e2e regression**
+**Step 1: Write the failing regression tests**
 
-Create an App-level regression that exercises the user-visible flow:
-- seed the store with a tab and pane whose `sessionRef` or `resumeSessionId` points at an older session
-- make `/api/sessions?limit=100` return only the newer first-page sessions
-- make `/api/sessions/resolve` return the older open-tab session
-- use a lightweight mocked `Sidebar` component that reads `state.sessions.projects` and renders the visible session titles from Redux
-- assert that the older open-tab session title appears without any manual scroll or search
+Create `test/e2e/app-open-tab-session-first-page.test.tsx` covering the user-visible flow:
+- seed the store with a tab/pane that points at an older session
+- mock the sessions bootstrap endpoint so it returns the server-style first page only when the request includes the expected `openSession` locator
+- use a lightweight mocked `Sidebar` that reads `state.sessions.projects` and renders the visible session titles
+- assert that the older open-tab session appears immediately without scroll or search
 
 Sketch:
 
@@ -423,51 +428,51 @@ await waitFor(() => {
   expect(screen.getByText('Older open tab session')).toBeInTheDocument()
 })
 
-expect(mockApiPost).toHaveBeenCalledWith(
-  '/api/sessions/resolve',
-  expect.objectContaining({
-    sessions: [{ provider: 'codex', sessionId: 'open-tab-old' }],
-  }),
-)
+const sessionsCalls = mockApiGet.mock.calls
+  .map(([url]) => String(url))
+  .filter((url) => url.startsWith('/api/sessions?'))
+
+expect(sessionsCalls[0]).toContain('openSession=')
 ```
 
-**Step 2: Run the targeted e2e test to verify failure**
+Also add one explicit reducer-level regression in `test/unit/client/store/sessionsSlice.test.ts` if needed to name the invariant this feature relies on: a later paginated `mergeSnapshotProjects()` snapshot preserves an older session that was already present in state but is outside the latest paginated window.
+
+**Step 2: Run the targeted tests to verify failure**
 
 Run:
 
 ```bash
 cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-npx vitest run test/e2e/app-open-tab-sidebar-hydration.test.tsx
+npx vitest run test/e2e/app-open-tab-session-first-page.test.tsx test/unit/client/store/sessionsSlice.test.ts
 ```
 
-Expected: FAIL because the current App bootstrap never hydrates the missing open-tab session.
+Expected: FAIL because the new bootstrap request shape and rendered behavior are not fully covered yet.
 
-**Step 3: Finish any missing wiring in the test harness**
+**Step 3: Finish any missing wiring revealed by the regression**
 
-If the test needs extra harness wiring, keep it inside the test file:
-- expose the session titles from the mocked `Sidebar`
-- mock `api.post('/api/sessions/resolve')`
-- drive the websocket into the same “baseline ready” state the real App uses
+If the e2e regression needs minor harness changes, keep them inside the test file:
+- mocked `Sidebar` should render session titles from Redux
+- mocked `api.get` should parse the bootstrap URL and only return the older session when the request carries the correct locator
 
-Do not add product code in this task unless the new e2e test reveals a real regression missed by the unit tests.
+Do not add new product behavior in this step unless the regression reveals a real missing piece from Tasks 1-4.
 
-**Step 4: Run the e2e test, lint, and the full test suite**
+**Step 4: Run regression, lint, and the full test suite**
 
 Run:
 
 ```bash
 cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-npx vitest run test/e2e/app-open-tab-sidebar-hydration.test.tsx
+npx vitest run test/e2e/app-open-tab-session-first-page.test.tsx test/unit/client/store/sessionsSlice.test.ts
 npm run lint
 npm test
 ```
 
-Expected: PASS for all three commands. If `npm test` surfaces any failure, stop and fix it before merging anything back to `main`.
+Expected: PASS for all commands.
 
 **Step 5: Commit**
 
 ```bash
 cd /home/user/code/freshell/.worktrees/show-open-tab-sessions-in-sidebar
-git add test/e2e/app-open-tab-sidebar-hydration.test.tsx
-git commit -m "test: cover open-tab sidebar session hydration"
+git add test/e2e/app-open-tab-session-first-page.test.tsx test/unit/client/store/sessionsSlice.test.ts
+git commit -m "test: cover open tab sessions in the first page"
 ```
