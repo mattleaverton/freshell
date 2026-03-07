@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import Pane from '@/components/panes/Pane'
+import { ContextIds } from '@/components/context-menu/context-menu-constants'
 
 // Mock lucide-react icons
 vi.mock('lucide-react', () => ({
@@ -230,6 +231,26 @@ describe('Pane', () => {
 
       const paneDiv = container.firstChild as HTMLElement
       expect(paneDiv.getAttribute('tabindex')).toBe('0')
+    })
+
+    it('marks the pane shell as the pane context target', () => {
+      const { container } = render(
+        <Pane
+          tabId="t1"
+          paneId="p1"
+          isActive={true}
+          isOnlyPane={false}
+          onClose={vi.fn()}
+          onFocus={vi.fn()}
+        >
+          <div>Content</div>
+        </Pane>
+      )
+
+      const paneDiv = container.firstChild as HTMLElement
+      expect(paneDiv.dataset.context).toBe(ContextIds.Pane)
+      expect(paneDiv.dataset.tabId).toBe('t1')
+      expect(paneDiv.dataset.paneId).toBe('p1')
     })
 
     it('uses descriptive aria-label with "Pane:" prefix', () => {

@@ -60,6 +60,7 @@ export default function Pane({
   return (
     <div
       data-pane-shell="true"
+      data-context={ContextIds.Pane}
       data-tab-id={tabId}
       data-pane-id={paneId}
       className={cn(
@@ -80,7 +81,7 @@ export default function Pane({
     >
       {/* Pane header */}
       {showHeader && (
-        <div data-context={ContextIds.Pane} data-tab-id={tabId} data-pane-id={paneId}>
+        <div>
           <PaneHeader
             title={title}
             metaLabel={metaLabel}
