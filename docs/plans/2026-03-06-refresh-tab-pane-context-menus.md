@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
-**Goal:** Add `Refresh Tab` and `Refresh Pane` to the existing right-click context menus so browser panes reload the correct embedded browser instance, terminal panes reconnect to the existing terminal session, and the behavior stays correct for zoomed tabs, keyboard-opened menus, and hidden panes.
+**Goal:** Add `Refresh Tab` and `Refresh Pane` to the existing right-click context menus so browser panes reload the correct embedded browser instance, terminal panes reconnect to the existing terminal session, and `Refresh Tab` intentionally exits zoom before refreshing the full tab.
 
-**Architecture:** Keep refresh state one-shot and Redux-driven. Store ephemeral refresh requests in `panesSlice`, but target them by stable pane-instance identity, not by pane id alone and not by browser URL. Terminals already have `createRequestId`; browser panes need the same concept via a new persisted `browserInstanceId` on browser pane content. Menu enablement and request creation must use a single helper that only returns a target for panes that can actually refresh right now: terminals with an attached `terminalId`, and browser panes with a non-empty URL. Pane components consume matching requests exactly once and reducers reconcile stale requests after every layout/content mutation.
+**Architecture:** Keep refresh state one-shot and Redux-driven. Store ephemeral refresh requests in `panesSlice`, but target them by stable pane-instance identity, not by pane id alone and not by browser URL. Terminals already have `createRequestId`; browser panes need the same concept via a persisted `browserInstanceId` on browser pane content, and that identity must be normalized on every relevant ingress path: pane creation reducers, direct content updates, merge updates, persisted migrations, and `hydratePanes` / cross-tab payloads. `Refresh Tab` should be implemented in the state layer as an atomic unzoom-then-refresh transition, with an inline code comment stating this behavior was intentionally chosen by explicit user direction. Browser runtime state must reset when `browserInstanceId` changes so a new browser instance under the same `paneId` cannot inherit stale history, error, or forwarding state.
 
 **Tech Stack:** React 18, Redux Toolkit, TypeScript, xterm.js, Vitest, Testing Library
 
@@ -17,27 +17,32 @@
   - `ContextIds.Terminal`
   - `ContextIds.Browser`
 - `Refresh Pane` does **not** apply to `editor`, `picker`, `agent-chat`, or `extension` panes in this issue.
-- `Refresh Tab` must walk the stored layout tree, not mounted pane instances, so zoomed tabs still queue hidden refreshable leaves.
+- `Refresh Tab` must be interpreted as: if the tab is zoomed, exit zoom first, then refresh the tab.
+- The implementation must include an inline code comment at the unzoom point stating that this behavior was intentionally chosen by explicit user direction.
+- `Refresh Tab` should still rely on stored layout state rather than mounted pane registries, but zoomed tabs must unzoom as part of the same action instead of queueing hidden panes for a later manual unzoom.
 - Refresh requests are ephemeral like `renameRequest*` and `zoomedPane`; they must never persist to localStorage or hydrate from remote state.
 - Browser refresh requests must target `browserInstanceId`, not URL.
-  - Same browser instance with a new URL should still satisfy the pending request.
-  - Same URL on a different browser instance must **not** satisfy the pending request.
-- Browser panes need a real persisted instance identity:
-  - Generate `browserInstanceId` when browser pane content is created or normalized.
+  - Same browser instance with a new URL should still satisfy a pending request.
+  - Same URL on a different browser instance must **not** satisfy a pending request.
+- `browserInstanceId` must be a state invariant:
+  - Generate it when browser pane content is created or normalized.
   - Preserve it across normal browser navigation and devtools toggles.
-  - Migrate older persisted browser panes that do not have it yet.
+  - Normalize it across every relevant ingress path: pane creation reducers, `updatePaneContent`, `mergePaneContent`, persisted payload migration, and `hydratePanes` / cross-tab payloads.
+  - Reducer-level normalization is the invariant; helper code should preserve the current `browserInstanceId`, but correctness must not depend on each caller remembering to do so.
 - Refreshable pane states for this feature:
   - Terminal pane: `kind === 'terminal'` and `terminalId` is present.
   - Browser pane: `kind === 'browser'` and `url.trim()` is non-empty.
 - Guaranteed no-op panes must not advertise refresh:
   - Blank browser panes stay disabled and are skipped by `Refresh Tab`.
   - Exited or unattached terminal panes stay disabled and are skipped by `Refresh Tab`.
+- When `browserInstanceId` changes under the same `paneId`, the browser subtree must remount or otherwise fully reset its runtime state.
 - Browser refresh must preserve the current live iframe reload path when an iframe exists and only fall back to error recovery when there is no iframe to reload.
 - Terminal refresh must fold into the existing attach lifecycle so a mount-time pending request replaces the normal attach path instead of adding a second attach.
 - No server or WebSocket protocol changes are needed.
+- No menu labels or tooltips need to change.
 - No `docs/index.html` update is required; this is not a major mock/UI-doc change.
 
-### Task 1: Introduce Stable Browser Instance Identity
+### Task 1: Make `browserInstanceId` A True State Invariant
 
 **Files:**
 - Modify: `src/store/paneTypes.ts`
@@ -49,7 +54,7 @@
 
 **Step 1: Write the failing tests**
 
-Extend `test/unit/client/store/panesSlice.test.ts` with browser normalization coverage:
+Extend `test/unit/client/store/panesSlice.test.ts`:
 
 ```ts
 it('generates browserInstanceId for browser pane input', () => {
@@ -88,9 +93,95 @@ it('preserves provided browserInstanceId when normalizing browser input', () => 
     browserInstanceId: 'browser-1',
   })
 })
+
+it('normalizes browserInstanceId for direct updatePaneContent browser payloads', () => {
+  const start = panesReducer(
+    initialState,
+    initLayout({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: { kind: 'browser', url: 'https://example.com', devToolsOpen: false },
+    }),
+  )
+
+  const next = panesReducer(
+    start,
+    updatePaneContent({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: { kind: 'browser', url: 'https://example.org', devToolsOpen: false } as any,
+    }),
+  )
+
+  const layout = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+  expect(layout.content.kind).toBe('browser')
+  if (layout.content.kind === 'browser') {
+    expect(layout.content.browserInstanceId).toBeDefined()
+  }
+})
+
+it('preserves existing browserInstanceId when mergePaneContent updates browser fields', () => {
+  const start = panesReducer(
+    initialState,
+    initLayout({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: {
+        kind: 'browser',
+        browserInstanceId: 'browser-1',
+        url: 'https://example.com',
+        devToolsOpen: false,
+      },
+    }),
+  )
+
+  const next = panesReducer(
+    start,
+    mergePaneContent({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      updates: { url: 'https://example.org' },
+    }),
+  )
+
+  const layout = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+  expect(layout.content).toMatchObject({
+    kind: 'browser',
+    browserInstanceId: 'browser-1',
+    url: 'https://example.org',
+  })
+})
+
+it('normalizes browserInstanceId from hydratePanes cross-tab payloads', () => {
+  const next = panesReducer(
+    initialState,
+    hydratePanes({
+      layouts: {
+        'tab-1': {
+          type: 'leaf',
+          id: 'pane-1',
+          content: { kind: 'browser', url: 'https://example.com', devToolsOpen: false },
+        },
+      },
+      activePane: { 'tab-1': 'pane-1' },
+      paneTitles: {},
+      paneTitleSetByUser: {},
+      renameRequestTabId: null,
+      renameRequestPaneId: null,
+      zoomedPane: {},
+      refreshRequestsByPane: {},
+    } as any),
+  )
+
+  const layout = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+  expect(layout.content.kind).toBe('browser')
+  if (layout.content.kind === 'browser') {
+    expect(layout.content.browserInstanceId).toBeDefined()
+  }
+})
 ```
 
-Extend `test/unit/client/store/panesPersistence.test.ts` with migration coverage:
+Extend `test/unit/client/store/panesPersistence.test.ts`:
 
 ```ts
 it('migrates older browser pane content to include browserInstanceId', () => {
@@ -125,7 +216,7 @@ Run:
 npm run test:client -- test/unit/client/store/panesSlice.test.ts test/unit/client/store/panesPersistence.test.ts
 ```
 
-Expected: FAIL because browser panes do not yet have a stable instance identity or migration path.
+Expected: FAIL because browser panes do not yet maintain a stable instance identity across every ingress path.
 
 **Step 3: Write minimal implementation**
 
@@ -152,20 +243,60 @@ export type PaneContentInput =
   | ExtensionPaneInput
 ```
 
-Update `normalizeContent()` in `src/store/panesSlice.ts`:
+In `src/store/panesSlice.ts`, centralize browser normalization so every reducer ingress path can reuse it:
 
 ```ts
-if (input.kind === 'browser') {
+function normalizePaneContent(
+  input: PaneContentInput | PaneContent,
+  previous?: PaneContent,
+): PaneContent {
+  if (input.kind === 'browser') {
+    const previousBrowserInstanceId =
+      previous?.kind === 'browser' ? previous.browserInstanceId : undefined
+    return {
+      kind: 'browser',
+      browserInstanceId: input.browserInstanceId || previousBrowserInstanceId || nanoid(),
+      url: input.url,
+      devToolsOpen: input.devToolsOpen,
+    }
+  }
+
+  // existing terminal / agent-chat / editor / picker / extension handling...
+}
+
+function normalizePaneTree(node: PaneNode): PaneNode {
+  if (node.type === 'leaf') {
+    return {
+      ...node,
+      content: normalizePaneContent(node.content),
+    }
+  }
   return {
-    kind: 'browser',
-    browserInstanceId: input.browserInstanceId || nanoid(),
-    url: input.url,
-    devToolsOpen: input.devToolsOpen,
+    ...node,
+    children: [normalizePaneTree(node.children[0]), normalizePaneTree(node.children[1])],
   }
 }
 ```
 
-Update migration and versioning:
+Use that normalization in all relevant ingress paths:
+
+- `initLayout`
+- `resetLayout`
+- `splitPane`
+- `addPane`
+- `updatePaneContent`
+- `mergePaneContent`
+- `hydratePanes`
+
+That means:
+
+```ts
+const normalized = normalizePaneContent(nextContent, previousContent)
+```
+
+instead of writing raw browser payloads into state.
+
+Keep persisted migration/versioning updated:
 
 ```ts
 export const PANES_SCHEMA_VERSION = 6
@@ -183,7 +314,7 @@ function migratePaneContent(content: any): any {
 }
 ```
 
-Also update any normalized browser fixtures touched by these suites so state-shaped browser content includes `browserInstanceId`; input-only call sites can stay on `BrowserPaneInput`.
+Reducer normalization is the invariant; browser commands should still pass through the current `browserInstanceId`, but correctness must not depend on each caller remembering to do so.
 
 **Step 4: Run tests to verify they pass**
 
@@ -199,7 +330,7 @@ Expected: PASS.
 
 ```bash
 git add src/store/paneTypes.ts src/store/panesSlice.ts src/store/persistMiddleware.ts src/store/persistedState.ts test/unit/client/store/panesSlice.test.ts test/unit/client/store/panesPersistence.test.ts
-git commit -m "refactor(browser): add stable browser instance ids"
+git commit -m "refactor(browser): enforce browser instance ids"
 ```
 
 ### Task 2: Add One-Shot Refresh Helpers And Request Reconciliation
@@ -305,7 +436,7 @@ it('requestPaneRefresh skips blank browser panes and unattached terminals', () =
   expect(unattachedTerminalState.refreshRequestsByPane['tab-1']).toBeUndefined()
 })
 
-it('requestTabRefresh queues only live-capable leaves in a zoomed tab', () => {
+it('requestTabRefresh exits zoom first and queues only live-capable leaves', () => {
   const state = panesReducer(
     stateWithLayoutAndZoom({
       layout: split([
@@ -330,6 +461,7 @@ it('requestTabRefresh queues only live-capable leaves in a zoomed tab', () => {
     requestTabRefresh({ tabId: 'tab-1' }),
   )
 
+  expect(state.zoomedPane['tab-1']).toBeUndefined()
   expect(Object.keys(state.refreshRequestsByPane['tab-1'])).toEqual(['pane-live-browser'])
 })
 
@@ -395,7 +527,7 @@ Add a persistence assertion to `test/unit/client/store/panesPersistence.test.ts`
 
 ```ts
 it('does not persist refreshRequestsByPane', () => {
-  // existing store setup ...
+  // existing store setup...
   expect(JSON.parse(localStorage.getItem('freshell.panes.v2')!).refreshRequestsByPane).toBeUndefined()
 })
 ```
@@ -463,6 +595,17 @@ requestPaneRefresh(...)
 requestTabRefresh(...)
 consumePaneRefreshRequest(...)
 ```
+
+In `requestTabRefresh`, clear zoom before queueing refresh requests and include the required inline comment there:
+
+```ts
+// User-directed behavior: Refresh Tab exits zoom first so the whole tab refreshes immediately.
+if (state.zoomedPane[tabId]) {
+  delete state.zoomedPane[tabId]
+}
+```
+
+Because `requestTabRefresh` owns the behavior, keep this comment in reducer code rather than burying it in UI glue.
 
 Reconcile pending requests after any reducer that can change which content lives under a pane id or whether a pane is refresh-capable:
 
@@ -626,7 +769,7 @@ Placement:
 - Terminal menu: before split actions
 - Browser menu: before split actions
 
-Do not use terminal/browser action registries to decide refresh enablement.
+No label or tooltip changes are needed.
 
 **Step 4: Run test to verify it passes**
 
@@ -692,7 +835,7 @@ it('shows Refresh pane from the browser content menu and dispatches a browser-in
   })
 })
 
-it('Refresh tab queues only refresh-capable leaves from a zoomed tab', async () => {
+it('Refresh tab exits zoom first and queues refreshes for the full tab layout', async () => {
   const user = userEvent.setup()
   const store = createZoomedStore({
     layout: split([
@@ -710,6 +853,7 @@ it('Refresh tab queues only refresh-capable leaves from a zoomed tab', async () 
   await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
   await user.click(screen.getByRole('menuitem', { name: 'Refresh tab' }))
 
+  expect(store.getState().panes.zoomedPane['tab-1']).toBeUndefined()
   expect(Object.keys(store.getState().panes.refreshRequestsByPane['tab-1'])).toEqual(['pane-term'])
 })
 ```
@@ -781,12 +925,13 @@ git add src/components/context-menu/ContextMenuProvider.tsx src/components/panes
 git commit -m "feat(ui): dispatch refresh requests from context menus"
 ```
 
-### Task 5: Make `BrowserPane` Refresh Instance-Aware And Recovery-Safe
+### Task 5: Make `BrowserPane` Refresh Instance-Aware, Recovery-Safe, And Reset On Instance Changes
 
 **Files:**
 - Modify: `src/components/panes/BrowserPane.tsx`
 - Modify: `src/components/panes/PaneContainer.tsx`
 - Test: `test/unit/client/components/panes/BrowserPane.test.tsx`
+- Test: `test/unit/client/components/panes/PaneContainer.test.tsx`
 
 **Step 1: Write the failing tests**
 
@@ -794,7 +939,14 @@ Extend `test/unit/client/components/panes/BrowserPane.test.tsx`:
 
 ```tsx
 it('toolbar Refresh reloads the live iframe document when an iframe exists', async () => {
-  renderBrowserPane({ paneContent: { kind: 'browser', browserInstanceId: 'browser-1', url: 'https://example.com', devToolsOpen: false } })
+  renderBrowserPane({
+    paneContent: {
+      kind: 'browser',
+      browserInstanceId: 'browser-1',
+      url: 'https://example.com',
+      devToolsOpen: false,
+    },
+  })
 
   const iframe = await screen.findByTitle('Browser content')
   const reloadSpy = vi.fn()
@@ -814,7 +966,12 @@ it('dispatching requestPaneRefresh retries an error-screen browser pane without 
     .mockResolvedValueOnce({ forwardedPort: 45678 })
 
   const { store } = renderBrowserPane({
-    paneContent: { kind: 'browser', browserInstanceId: 'browser-1', url: 'http://localhost:3000', devToolsOpen: false },
+    paneContent: {
+      kind: 'browser',
+      browserInstanceId: 'browser-1',
+      url: 'http://localhost:3000',
+      devToolsOpen: false,
+    },
   })
 
   await waitFor(() => expect(screen.getByText(/Failed to connect/i)).toBeInTheDocument())
@@ -831,7 +988,12 @@ it('dispatching requestPaneRefresh retries an error-screen browser pane without 
 
 it('ignores a stale refresh request for a different browserInstanceId', async () => {
   const store = createStoreWithPendingBrowserRefresh({
-    paneContent: { kind: 'browser', browserInstanceId: 'browser-live', url: 'https://example.com', devToolsOpen: false },
+    paneContent: {
+      kind: 'browser',
+      browserInstanceId: 'browser-live',
+      url: 'https://example.com',
+      devToolsOpen: false,
+    },
     requestTarget: { kind: 'browser', browserInstanceId: 'browser-stale' },
   })
 
@@ -843,23 +1005,62 @@ it('ignores a stale refresh request for a different browserInstanceId', async ()
 })
 ```
 
+Extend `test/unit/client/components/panes/PaneContainer.test.tsx` with an instance-reset regression:
+
+```tsx
+it('remounts the browser subtree when browserInstanceId changes under the same paneId and url', async () => {
+  const { rerender } = renderRealBrowserPaneContainer({
+    paneId: 'pane-1',
+    content: {
+      kind: 'browser',
+      browserInstanceId: 'browser-1',
+      url: 'https://example.com',
+      devToolsOpen: false,
+    },
+  })
+
+  fireEvent.change(screen.getByPlaceholderText('Enter URL...'), {
+    target: { value: 'https://example.org' },
+  })
+  fireEvent.keyDown(screen.getByPlaceholderText('Enter URL...'), { key: 'Enter' })
+  expect(screen.getByTitle('Back')).not.toBeDisabled()
+
+  rerenderRealBrowserPaneContainer(rerender, {
+    paneId: 'pane-1',
+    content: {
+      kind: 'browser',
+      browserInstanceId: 'browser-2',
+      url: 'https://example.com',
+      devToolsOpen: false,
+    },
+  })
+
+  expect(screen.getByTitle('Back')).toBeDisabled()
+  expect((screen.getByPlaceholderText('Enter URL...') as HTMLInputElement).value).toBe('https://example.com')
+})
+```
+
 **Step 2: Run test to verify it fails**
 
 Run:
 
 ```bash
-npm run test:client -- test/unit/client/components/panes/BrowserPane.test.tsx
+npm run test:client -- test/unit/client/components/panes/BrowserPane.test.tsx test/unit/client/components/panes/PaneContainer.test.tsx
 ```
 
-Expected: FAIL because browser refresh is still iframe-only and refresh requests are not yet targeted by browser instance identity.
+Expected: FAIL because browser refresh is still iframe-only and the browser subtree does not yet reset local runtime state when `browserInstanceId` changes.
 
 **Step 3: Write minimal implementation**
 
 Make `BrowserPane` consume normalized browser content instead of loose props. In `src/components/panes/PaneContainer.tsx`:
 
 ```tsx
-<BrowserPane paneId={paneId} tabId={tabId} paneContent={content} />
+<ErrorBoundary key={`${paneId}:${content.browserInstanceId}`} label="Browser">
+  <BrowserPane paneId={paneId} tabId={tabId} paneContent={content} />
+</ErrorBoundary>
 ```
+
+Keying the error-boundary wrapper is preferable to keying only `BrowserPane` because it resets both browser runtime state and any surrounding browser-specific error state.
 
 In `src/components/panes/BrowserPane.tsx`, use `browserInstanceId` from `paneContent`, preserve it on Redux updates, and add one refresh entrypoint:
 
@@ -894,12 +1095,19 @@ dispatch(updatePaneContent({
 }))
 ```
 
+The keyed remount boundary must guarantee that changing `browserInstanceId` resets:
+
+- navigation history
+- load and forward errors
+- pending forwarding/loading state
+- any browser-specific error boundary state
+
 **Step 4: Run test to verify it passes**
 
 Run:
 
 ```bash
-npm run test:client -- test/unit/client/components/panes/BrowserPane.test.tsx
+npm run test:client -- test/unit/client/components/panes/BrowserPane.test.tsx test/unit/client/components/panes/PaneContainer.test.tsx
 ```
 
 Expected: PASS.
@@ -907,7 +1115,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/components/panes/BrowserPane.tsx src/components/panes/PaneContainer.tsx test/unit/client/components/panes/BrowserPane.test.tsx
+git add src/components/panes/BrowserPane.tsx src/components/panes/PaneContainer.tsx test/unit/client/components/panes/BrowserPane.test.tsx test/unit/client/components/panes/PaneContainer.test.tsx
 git commit -m "fix(browser): refresh the correct browser instance"
 ```
 
@@ -1014,7 +1222,7 @@ git add src/components/TerminalView.tsx test/unit/client/components/TerminalView
 git commit -m "fix(terminals): consume refresh requests in attach lifecycle"
 ```
 
-### Task 7: Add A Zoomed-Tab Refresh Flow Regression Test
+### Task 7: Add An Unzoom-Then-Refresh Regression Flow
 
 **Files:**
 - Create: `test/e2e/refresh-context-menu-flow.test.tsx`
@@ -1024,7 +1232,7 @@ git commit -m "fix(terminals): consume refresh requests in attach lifecycle"
 Create an end-to-end client flow that exercises the real context-menu path:
 
 ```tsx
-it('Refresh tab queues only live-capable hidden leaves, consumes them on mount, and does not replay after remount', async () => {
+it('Refresh tab exits zoom first, refreshes the full tab immediately, and does not replay after remount', async () => {
   const user = userEvent.setup()
   const store = createZoomedStore({
     layout: split([
@@ -1054,9 +1262,8 @@ it('Refresh tab queues only live-capable hidden leaves, consumes them on mount, 
   await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
   await user.click(screen.getByRole('menuitem', { name: 'Refresh tab' }))
 
+  expect(store.getState().panes.zoomedPane['tab-1']).toBeUndefined()
   expect(Object.keys(store.getState().panes.refreshRequestsByPane['tab-1'])).toEqual(['pane-browser-live'])
-
-  store.dispatch(toggleZoom({ tabId: 'tab-1', paneId: 'pane-editor' }))
 
   await waitFor(() => {
     expect(api.post).toHaveBeenCalledTimes(1)
@@ -1086,9 +1293,9 @@ Expected: FAIL until Tasks 1-6 are complete.
 Finish the store helpers and mocks so the test uses:
 
 - the real tab context menu
-- a zoomed tab whose refreshable browser sibling is unmounted when the request is created
+- a zoomed tab that becomes unzoomed immediately when `Refresh tab` is selected
 - a blank browser sibling that proves no-op leaves are skipped
-- the real browser mount/load path when the hidden pane becomes visible
+- the real browser mount/load path that starts right away after the unzoom transition
 
 Do not fake pane action registries for hidden panes; the point of the test is that layout state, not mounted registries, drives refresh.
 
@@ -1106,7 +1313,7 @@ Expected: PASS.
 
 ```bash
 git add test/e2e/refresh-context-menu-flow.test.tsx
-git commit -m "test(ui): cover zoomed refresh context menu flow"
+git commit -m "test(ui): cover refresh tab unzoom flow"
 ```
 
 ## Final Validation
@@ -1114,7 +1321,7 @@ git commit -m "test(ui): cover zoomed refresh context menu flow"
 Run the focused suites first:
 
 ```bash
-npm run test:client -- test/unit/client/store/panesSlice.test.ts test/unit/client/store/panesPersistence.test.ts test/unit/client/lib/pane-utils.test.ts test/unit/client/context-menu/menu-defs.test.ts test/unit/client/components/ContextMenuProvider.test.tsx test/unit/client/components/panes/BrowserPane.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx
+npm run test:client -- test/unit/client/store/panesSlice.test.ts test/unit/client/store/panesPersistence.test.ts test/unit/client/lib/pane-utils.test.ts test/unit/client/context-menu/menu-defs.test.ts test/unit/client/components/ContextMenuProvider.test.tsx test/unit/client/components/panes/BrowserPane.test.tsx test/unit/client/components/panes/PaneContainer.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx
 npx vitest run test/e2e/refresh-context-menu-flow.test.tsx
 ```
 
@@ -1130,11 +1337,12 @@ Expected final state:
 - Right-clicking a tab shows `Refresh tab`, enabled only when at least one leaf can actually refresh.
 - Right-clicking a pane header, terminal content, or browser content shows `Refresh pane`.
 - Keyboard opening the pane menu from the focusable pane shell (`Shift+F10` / context-menu key) shows `Refresh pane`.
-- `Refresh Tab` queues refresh requests for hidden zoom siblings by walking the stored layout tree.
+- `Refresh Tab` exits zoom first, then refreshes the now-unzoomed tab immediately.
 - Blank browser panes and unattached/exited terminals never advertise refresh and are skipped by `Refresh Tab`.
 - Refresh requests are one-shot and ephemeral.
 - Terminal requests target `createRequestId` and only run when a terminal session is still attached.
 - Browser requests target `browserInstanceId`, so same-instance URL changes preserve the request while same-URL browser swaps clear it.
+- Changing `browserInstanceId` remounts the browser subtree so new browser instances do not inherit old runtime state.
 - Browser panes preserve live iframe reload when possible and only use recovery logic when the pane is on an error screen.
 - Terminal panes perform exactly one detach/attach decision per refresh.
 
