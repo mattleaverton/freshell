@@ -331,6 +331,18 @@ describe('ws protocol', () => {
       (msg) => msg.type === 'terminal.created' && msg.requestId === requestId,
       5000,
     )
+    ws.send(JSON.stringify({
+      type: 'terminal.attach',
+      terminalId: created.terminalId,
+      sinceSeq: 0,
+      cols: 120,
+      rows: 40,
+    }))
+    await waitForMessage(
+      ws,
+      (msg) => msg.type === 'terminal.attach.ready' && msg.terminalId === created.terminalId,
+      5000,
+    )
 
     const record = registry.records.get(created.terminalId)
     expect(record).toBeDefined()
@@ -433,18 +445,6 @@ describe('ws protocol', () => {
     return { ws, close: () => closeWebSocket(ws) }
   }
 
-  it('ready advertises terminal split capabilities', async () => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
-    await new Promise<void>((resolve) => ws.on('open', () => resolve()))
-    ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-    const ready = await waitForMessage(ws, (m) => m.type === 'ready')
-    expect(ready.capabilities).toMatchObject({
-      createAttachSplitV1: true,
-      attachViewportV1: true,
-    })
-    await closeWebSocket(ws)
-  })
-
   // Helper function to create a terminal and return its ID
   async function createTerminal(ws: WebSocket, requestId: string): Promise<string> {
     ws.send(JSON.stringify({ type: 'terminal.create', requestId, mode: 'shell' }))
@@ -460,6 +460,15 @@ describe('ws protocol', () => {
     }
     return msg.terminalId
   }
+
+  it('terminal.attach rejects missing viewport payload', async () => {
+    const { ws, close } = await createAuthenticatedConnection()
+    const terminalId = await createTerminal(ws, 'missing-viewport-create')
+    ws.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+    const err = await waitForMessage(ws, (m) => m.type === 'error')
+    expect(err.code).toBe('INVALID_MESSAGE')
+    await close()
+  })
 
   it('terminal.attach rejects partial viewport payload (cols only)', async () => {
     const { ws, close } = await createAuthenticatedConnection()
@@ -510,7 +519,7 @@ describe('ws protocol', () => {
     // Create a second connection to attach
     const { ws: ws2, close: close2 } = await createAuthenticatedConnection()
 
-    ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+    ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId, sinceSeq: 0, cols: 120, rows: 40 }))
 
     const ready = await new Promise<any>((resolve) => {
       ws2.on('message', (data) => {
@@ -531,7 +540,7 @@ describe('ws protocol', () => {
   it('terminal.attach returns error for non-existent terminal', async () => {
     const { ws, close } = await createAuthenticatedConnection()
 
-    ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: 'nonexistent_terminal' }))
+    ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: 'nonexistent_terminal', sinceSeq: 0, cols: 120, rows: 40 }))
 
     const error = await new Promise<any>((resolve) => {
       ws.on('message', (data) => {

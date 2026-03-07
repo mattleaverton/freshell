@@ -238,41 +238,39 @@ async function createAuthenticatedConnection(port: number): Promise<{ ws: WebSoc
 }
 
 async function createTerminal(ws: WebSocket, requestId: string): Promise<{ terminalId: string }> {
-  const pending = waitForMessages(ws, [
-    (msg) => msg.type === 'terminal.created' && msg.requestId === requestId,
-    (msg) => msg.type === 'terminal.attach.ready',
-  ])
-
   ws.send(JSON.stringify({
     type: 'terminal.create',
     requestId,
     mode: 'shell',
     shell: 'system',
-  }))
-
-  const [created, ready] = await pending
-  const terminalId = created.terminalId as string
-  expect(ready.terminalId).toBe(terminalId)
-
-  return { terminalId }
-}
-
-async function createTerminalSplitNoAutoAttach(ws: WebSocket, requestId: string): Promise<{ terminalId: string }> {
-  ws.send(JSON.stringify({
-    type: 'terminal.create',
-    requestId,
-    mode: 'shell',
-    shell: 'system',
-    attachOnCreate: false,
   }))
 
   const created = await waitForMessage(ws, (msg) => msg.type === 'terminal.created' && msg.requestId === requestId)
-  const trailing = await collectMessages(ws, 150)
-  const autoAttachReadySeen = trailing.some(
-    (msg) => msg.type === 'terminal.attach.ready' && msg.terminalId === created.terminalId,
-  )
-  expect(autoAttachReadySeen).toBe(false)
-  return { terminalId: created.terminalId as string }
+  const terminalId = created.terminalId as string
+  sendAttach(ws, terminalId)
+  const ready = await waitForMessage(ws, (msg) => msg.type === 'terminal.attach.ready' && msg.terminalId === terminalId)
+  expect(ready.terminalId).toBe(terminalId)
+  return { terminalId }
+}
+
+function sendAttach(
+  ws: WebSocket,
+  terminalId: string,
+  opts?: {
+    sinceSeq?: number
+    attachRequestId?: string
+    cols?: number
+    rows?: number
+  },
+) {
+  ws.send(JSON.stringify({
+    type: 'terminal.attach',
+    terminalId,
+    sinceSeq: opts?.sinceSeq ?? 0,
+    cols: opts?.cols ?? 120,
+    rows: opts?.rows ?? 40,
+    ...(opts?.attachRequestId ? { attachRequestId: opts.attachRequestId } : {}),
+  }))
 }
 
 describe('terminal stream v2 replay', () => {
@@ -342,7 +340,7 @@ describe('terminal stream v2 replay', () => {
     )
     const attachRequestId = 'attach-delta-1'
 
-    ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId, sinceSeq: 2, attachRequestId }))
+    sendAttach(ws2, terminalId, { sinceSeq: 2, attachRequestId })
 
     const ready = await readyPromise
     await replayPromise
@@ -361,18 +359,11 @@ describe('terminal stream v2 replay', () => {
     await close2()
   })
 
-  it('split-mode create returns created only until explicit attach', async () => {
+  it('terminal.create returns created only until explicit attach', async () => {
     const { ws, close } = await createAuthenticatedConnection(port)
-    const { terminalId } = await createTerminalSplitNoAutoAttach(ws, 'stream-split-create')
+    const { terminalId } = await createTerminal(ws, 'stream-split-create')
 
-    ws.send(JSON.stringify({
-      type: 'terminal.attach',
-      terminalId,
-      sinceSeq: 0,
-      cols: 120,
-      rows: 40,
-      attachRequestId: 'stream-split-create-attach',
-    }))
+    sendAttach(ws, terminalId, { attachRequestId: 'stream-split-create-attach' })
 
     const ready = await waitForMessage(
       ws,
@@ -413,12 +404,7 @@ describe('terminal stream v2 replay', () => {
           && msg.reason === 'replay_window_exceeded',
       )
 
-      ws2.send(JSON.stringify({
-        type: 'terminal.attach',
-        terminalId,
-        sinceSeq: 0,
-        attachRequestId: 'attach-replay-1',
-      }))
+      sendAttach(ws2, terminalId, { attachRequestId: 'attach-replay-1' })
 
       const ready = await readyPromise
       const gap = await gapPromise
@@ -465,7 +451,7 @@ describe('terminal stream v2 replay', () => {
       (msg) => msg.type === 'terminal.output' && msg.terminalId === terminalId && msg.seqEnd === 12,
     )
 
-    ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId, sinceSeq: 5 }))
+    sendAttach(ws2, terminalId, { sinceSeq: 5 })
 
     const ready = await readyPromise
     await replayTailPromise
@@ -492,12 +478,7 @@ describe('terminal stream v2 replay', () => {
     const { terminalId } = await createTerminal(ws, 'stream-gap-create')
     const attachRequestId = 'attach-overflow-1'
 
-    ws.send(JSON.stringify({
-      type: 'terminal.attach',
-      terminalId,
-      sinceSeq: 0,
-      attachRequestId,
-    }))
+    sendAttach(ws, terminalId, { attachRequestId })
     await waitForMessage(
       ws,
       (msg) =>

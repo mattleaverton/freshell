@@ -188,7 +188,7 @@ describe('terminal.create reuse running claude terminal', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }, HOOK_TIMEOUT_MS)
 
-  it('reuses running terminal via broker auto-attach without snapshot pipeline', async () => {
+  it('reuses running terminal and requires explicit attach without snapshot pipeline', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
@@ -197,10 +197,6 @@ describe('terminal.create reuse running claude terminal', () => {
 
       const requestId = 'reuse-1'
       const createdPromise = waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === requestId)
-      const readyPromise = waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.attach.ready' && m.terminalId === 'term-existing',
-      )
       const listUpdatedPromise = waitForMessage(ws, (m) => m.type === 'terminal.list.updated')
 
       ws.send(JSON.stringify({
@@ -211,13 +207,28 @@ describe('terminal.create reuse running claude terminal', () => {
       }))
 
       const created = await createdPromise
-      const ready = await readyPromise
+      const preAttachMsgs = await collectMessages(ws, 150)
       expect(created.terminalId).toBe('term-existing')
       expect(created.snapshot).toBeUndefined()
       expect(created.snapshotChunked).toBeUndefined()
-      expect(ready.type).toBe('terminal.attach.ready')
+      expect(preAttachMsgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === 'term-existing')).toBe(false)
       await listUpdatedPromise
 
+      expect(registry.attachCalls).toHaveLength(0)
+      ws.send(JSON.stringify({
+        type: 'terminal.attach',
+        terminalId: created.terminalId,
+        sinceSeq: 0,
+        cols: 120,
+        rows: 40,
+        attachRequestId: 'reuse-1-attach',
+      }))
+      const ready = await waitForMessage(
+        ws,
+        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'reuse-1-attach',
+      )
+
+      expect(ready.type).toBe('terminal.attach.ready')
       expect(registry.attachCalls).toHaveLength(1)
       expect(registry.attachCalls[0]?.opts?.suppressOutput).toBe(true)
       expect(snapshotSpy).not.toHaveBeenCalled()
@@ -226,7 +237,7 @@ describe('terminal.create reuse running claude terminal', () => {
     }
   })
 
-  it('existingAfterConfig branch + attachOnCreate:false returns created only until explicit attach', async () => {
+  it('existingAfterConfig branch returns created only until explicit attach', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
@@ -238,7 +249,6 @@ describe('terminal.create reuse running claude terminal', () => {
         requestId: 'reuse-split-existingAfterConfig',
         mode: 'claude',
         resumeSessionId: VALID_SESSION_ID,
-        attachOnCreate: false,
       }))
       const created = await waitForMessage(
         ws,
@@ -265,7 +275,7 @@ describe('terminal.create reuse running claude terminal', () => {
     }
   })
 
-  it('duplicate requestId in split mode => one created, no duplicate replay churn', async () => {
+  it('duplicate requestId => one created, no duplicate replay churn', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
@@ -277,14 +287,12 @@ describe('terminal.create reuse running claude terminal', () => {
         requestId: 'reuse-claude-dup-split',
         mode: 'claude',
         resumeSessionId: VALID_SESSION_ID,
-        attachOnCreate: false,
       }))
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId: 'reuse-claude-dup-split',
         mode: 'claude',
         resumeSessionId: VALID_SESSION_ID,
-        attachOnCreate: false,
       }))
 
       const created = await waitForMessage(

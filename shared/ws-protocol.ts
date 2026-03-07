@@ -29,7 +29,7 @@ export const ErrorCode = z.enum([
 
 export type ErrorCode = z.infer<typeof ErrorCode>
 
-export const WS_PROTOCOL_VERSION = 2 as const
+export const WS_PROTOCOL_VERSION = 3 as const
 
 export const ShellSchema = z.enum(['system', 'cmd', 'powershell', 'wsl'])
 
@@ -173,17 +173,8 @@ export const TerminalAttachSchema = z.object({
   terminalId: z.string().min(1),
   sinceSeq: z.number().int().nonnegative().optional(),
   attachRequestId: z.string().min(1).optional(),
-  cols: z.number().int().min(2).max(1000).optional(),
-  rows: z.number().int().min(2).max(500).optional(),
-}).superRefine((msg, ctx) => {
-  const hasCols = typeof msg.cols === 'number'
-  const hasRows = typeof msg.rows === 'number'
-  if (hasCols !== hasRows) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'terminal.attach requires both cols and rows when viewport is provided',
-    })
-  }
+  cols: z.number().int().min(2).max(1000),
+  rows: z.number().int().min(2).max(500),
 })
 
 export const TerminalDetachSchema = z.object({
@@ -402,10 +393,6 @@ export type ReadyMessage = {
   type: 'ready'
   timestamp: string
   serverInstanceId?: string
-  capabilities?: {
-    createAttachSplitV1?: boolean
-    attachViewportV1?: boolean
-  }
 }
 
 export type PongMessage = {

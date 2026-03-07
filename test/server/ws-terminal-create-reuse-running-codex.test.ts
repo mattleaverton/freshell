@@ -219,7 +219,7 @@ describe('terminal.create reuse running codex terminal', () => {
     await new Promise<void>((resolve) => server!.close(() => resolve()))
   }, HOOK_TIMEOUT_MS)
 
-  it('reuses existing codex terminal instead of creating new one', async () => {
+  it('reuses existing codex terminal and requires an explicit attach', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
@@ -234,25 +234,35 @@ describe('terminal.create reuse running codex terminal', () => {
         resumeSessionId: CODEX_SESSION_ID,
       }))
 
-      const [created, ready] = await waitForMessages(ws, [
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-        (m) => m.type === 'terminal.attach.ready' && m.terminalId === 'term-codex-existing',
-      ])
+      const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === requestId)
+      const preAttachMsgs = await collectMessages(ws, 150)
 
-      // Should reuse existing terminal, not create a new one
       expect(created.terminalId).toBe('term-codex-existing')
-      expect(created.snapshot).toBeUndefined()
-      expect(created.snapshotChunked).toBeUndefined()
+      expect(preAttachMsgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
+      expect(registry.attachCalls).toHaveLength(0)
+      expect(registry.createCalls).toHaveLength(0)
+
+      ws.send(JSON.stringify({
+        type: 'terminal.attach',
+        terminalId: created.terminalId,
+        sinceSeq: 0,
+        cols: 120,
+        rows: 40,
+        attachRequestId: 'reuse-existing-codex-attach',
+      }))
+      const ready = await waitForMessage(
+        ws,
+        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'reuse-existing-codex-attach',
+      )
+      expect(ready.headSeq).toBeGreaterThanOrEqual(0)
       expect(registry.attachCalls).toHaveLength(1)
       expect(registry.attachCalls[0]?.terminalId).toBe('term-codex-existing')
-      expect(registry.createCalls).toHaveLength(0)
-      expect(ready.headSeq).toBeGreaterThanOrEqual(0)
     } finally {
       ws.close()
     }
   })
 
-  it('canonical reuse branch + attachOnCreate:false returns created only until explicit attach', async () => {
+  it('canonical reuse branch returns created only until explicit attach', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
@@ -264,7 +274,6 @@ describe('terminal.create reuse running codex terminal', () => {
         requestId: 'reuse-canonical-split',
         mode: 'codex',
         resumeSessionId: CODEX_SESSION_ID,
-        attachOnCreate: false,
       }))
 
       const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'reuse-canonical-split')
@@ -289,7 +298,7 @@ describe('terminal.create reuse running codex terminal', () => {
     }
   })
 
-  it('existingId branch + attachOnCreate:false returns created only and requires explicit attach', async () => {
+  it('existingId branch returns created only and requires explicit attach', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
@@ -301,7 +310,6 @@ describe('terminal.create reuse running codex terminal', () => {
         requestId: 'reuse-existingId-split',
         mode: 'codex',
         resumeSessionId: CODEX_SESSION_ID,
-        attachOnCreate: false,
       }))
       const firstCreated = await waitForMessage(
         ws,
@@ -315,7 +323,6 @@ describe('terminal.create reuse running codex terminal', () => {
         requestId: 'reuse-existingId-split',
         mode: 'codex',
         resumeSessionId: CODEX_SESSION_ID,
-        attachOnCreate: false,
       }))
       const secondCreated = await waitForMessage(
         ws,
@@ -404,6 +411,19 @@ describe('terminal.create reuse running codex terminal', () => {
       expect(dupeRegistry.createCalls).toHaveLength(0)
       expect(dupeRegistry.repairCalls).toHaveLength(1)
       expect(dupeRegistry.repairCalls[0]).toEqual({ mode: 'codex', sessionId: CODEX_SESSION_ID })
+
+      ws.send(JSON.stringify({
+        type: 'terminal.attach',
+        terminalId: created.terminalId,
+        sinceSeq: 0,
+        cols: 120,
+        rows: 40,
+        attachRequestId: 'codex-reuse-repair-attach',
+      }))
+      await waitForMessage(
+        ws,
+        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'codex-reuse-repair-attach',
+      )
       expect(dupeRegistry.attachCalls[0]?.terminalId).toBe('term-canonical')
     } finally {
       ws.close()

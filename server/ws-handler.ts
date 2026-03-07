@@ -114,12 +114,6 @@ function isMobileUserAgent(userAgent: string | undefined): boolean {
   return /Mobi|Android|iPhone|iPad|iPod/i.test(userAgent)
 }
 
-function shouldAutoAttachOnCreate(msg: { attachOnCreate?: boolean }): boolean {
-  // One-way negotiation model:
-  // client decides via attachOnCreate from ready.capabilities.
-  return msg.attachOnCreate !== false
-}
-
 const TabsSyncPushRecordSchema = TabRegistryRecordBaseSchema.omit({
   serverInstanceId: true,
   deviceId: true,
@@ -232,13 +226,11 @@ export class WsHandler {
   private layoutStore?: LayoutStore
   private extensionManager?: ExtensionManager
   private terminalStreamBroker: TerminalStreamBroker
-  private splitAttachTerminalIds = new Set<string>()
   private createdTerminalByRequestId = new Map<string, CreatedTerminalByRequestIdEntry>()
   private screenshotRequests = new Map<string, PendingScreenshot>()
   private readonly serverInstanceId: string
   private onTerminalExitBound = (payload: { terminalId?: string }) => {
     if (!payload?.terminalId) return
-    this.splitAttachTerminalIds.delete(payload.terminalId)
     this.forgetCreatedRequestIdsForTerminal(payload.terminalId)
   }
   private sessionRepairListeners?: {
@@ -982,10 +974,6 @@ export class WsHandler {
           type: 'ready',
           timestamp: nowIso(),
           serverInstanceId: this.serverInstanceId,
-          capabilities: {
-            createAttachSplitV1: true,
-            attachViewportV1: true,
-          },
         })
         if (this.extensionManager) {
           this.safeSend(ws, {
@@ -1055,7 +1043,6 @@ export class WsHandler {
             return cached
           }
 
-          const autoAttach = shouldAutoAttachOnCreate(m)
           // Resolve session metadata before terminal creation.
           let effectiveResumeSessionId = m.resumeSessionId
           if (m.mode === 'claude' && effectiveResumeSessionId && !isValidClaudeSessionId(effectiveResumeSessionId)) {
@@ -1069,28 +1056,11 @@ export class WsHandler {
             terminalId: string
             createdAt: number
             effectiveResumeSessionId?: string
-            autoAttach: boolean
           }): Promise<boolean> => {
-            if (opts.autoAttach) {
-              const attached = await this.terminalStreamBroker.sendCreatedAndAttach(opts.ws, {
-                requestId: opts.requestId,
-                terminalId: opts.terminalId,
-                createdAt: opts.createdAt,
-                effectiveResumeSessionId: opts.effectiveResumeSessionId,
-              })
-              if (!attached) {
-                this.sendError(opts.ws, {
-                  code: 'INVALID_TERMINAL_ID',
-                  message: 'Unknown terminalId',
-                  terminalId: opts.terminalId,
-                })
-                return false
-              }
-              state.attachedTerminalIds.add(opts.terminalId)
-              return true
+            if (opts.ws.readyState !== WebSocket.OPEN) {
+              return false
             }
 
-            this.splitAttachTerminalIds.add(opts.terminalId)
             this.send(opts.ws, {
               type: 'terminal.created',
               requestId: opts.requestId,
@@ -1112,7 +1082,6 @@ export class WsHandler {
               terminalId: reusedTerminalId,
               createdAt,
               effectiveResumeSessionId: resumeSessionId,
-              autoAttach,
             })
             if (!sent) {
               return false
@@ -1297,7 +1266,6 @@ export class WsHandler {
             terminalId: record.terminalId,
             createdAt: record.createdAt,
             effectiveResumeSessionId,
-            autoAttach,
           })
           if (!sent) {
             // Terminal may still exist even if created+attach delivery failed (for
@@ -1328,26 +1296,15 @@ export class WsHandler {
       }
 
       case 'terminal.attach': {
-        const splitAttach = this.splitAttachTerminalIds.has(m.terminalId)
-        const hasViewport = typeof m.cols === 'number' && typeof m.rows === 'number'
-        const record = this.registry.get(m.terminalId)
-        if (!record) {
+        if (!this.registry.get(m.terminalId)) {
           this.sendError(ws, { code: 'INVALID_TERMINAL_ID', message: 'Terminal not running', terminalId: m.terminalId })
           return
         }
 
-        // Compatibility behavior:
-        // - split attach with viewport: use caller viewport
-        // - split attach without viewport: fallback to record.cols/rows (legacy-safe skew path)
-        // - legacy attach: keep existing behavior
-        const resizeCols = hasViewport ? m.cols : (splitAttach ? record.cols : undefined)
-        const resizeRows = hasViewport ? m.rows : (splitAttach ? record.rows : undefined)
-        if (typeof resizeCols === 'number' && typeof resizeRows === 'number') {
-          const resized = this.registry.resize(m.terminalId, resizeCols, resizeRows)
-          if (!resized) {
-            this.sendError(ws, { code: 'INVALID_TERMINAL_ID', message: 'Terminal not running', terminalId: m.terminalId })
-            return
-          }
+        const resized = this.registry.resize(m.terminalId, m.cols, m.rows)
+        if (!resized) {
+          this.sendError(ws, { code: 'INVALID_TERMINAL_ID', message: 'Terminal not running', terminalId: m.terminalId })
+          return
         }
 
         const attached = await this.terminalStreamBroker.attach(ws, m.terminalId, m.sinceSeq, m.attachRequestId)
@@ -1394,7 +1351,6 @@ export class WsHandler {
           this.sendError(ws, { code: 'INVALID_TERMINAL_ID', message: 'Unknown terminalId', terminalId: m.terminalId })
           return
         }
-        this.splitAttachTerminalIds.delete(m.terminalId)
         this.broadcast({ type: 'terminal.list.updated' })
         return
       }

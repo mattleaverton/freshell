@@ -339,7 +339,7 @@ describe('WebSocket edge cases', () => {
   async function createTerminal(ws: WebSocket, requestId: string): Promise<string> {
     ws.send(JSON.stringify({ type: 'terminal.create', requestId, mode: 'shell' }))
 
-    return new Promise((resolve, reject) => {
+    const terminalId = await new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Create terminal timeout')), 5000)
       const handler = (data: WebSocket.Data) => {
         const msg = JSON.parse(data.toString())
@@ -355,6 +355,30 @@ describe('WebSocket edge cases', () => {
       }
       ws.on('message', handler)
     })
+
+    sendAttach(ws, terminalId)
+    await waitForMessage(ws, (msg) => msg.type === 'terminal.attach.ready' && msg.terminalId === terminalId)
+    return terminalId
+  }
+
+  function sendAttach(
+    ws: WebSocket,
+    terminalId: string,
+    opts?: {
+      sinceSeq?: number
+      cols?: number
+      rows?: number
+      attachRequestId?: string
+    },
+  ) {
+    ws.send(JSON.stringify({
+      type: 'terminal.attach',
+      terminalId,
+      sinceSeq: opts?.sinceSeq ?? 0,
+      cols: opts?.cols ?? 120,
+      rows: opts?.rows ?? 40,
+      ...(opts?.attachRequestId ? { attachRequestId: opts.attachRequestId } : {}),
+    }))
   }
 
   // Helper: collect messages for a duration
@@ -584,6 +608,7 @@ describe('WebSocket edge cases', () => {
 
       // Create terminal
       const terminalId = await createTerminal(ws, 'interleave-1')
+      registry.resizeCalls = []
 
       // Send multiple operations rapidly in different order
       const operations = [
@@ -759,7 +784,7 @@ describe('WebSocket edge cases', () => {
       await new Promise((resolve) => setTimeout(resolve, 25))
 
       const { ws: ws2, close: close2 } = await createAuthenticatedConnection()
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId, sinceSeq: lastSeq }))
+      sendAttach(ws2, terminalId, { sinceSeq: lastSeq })
 
       const ready = await waitForMessage(
         ws2,
@@ -818,7 +843,7 @@ describe('WebSocket edge cases', () => {
           (m) => m.type === 'terminal.output.gap' && m.terminalId === terminalId && m.reason === 'replay_window_exceeded',
           (m) => m.type === 'terminal.output' && m.terminalId === terminalId,
         ], 5000)
-        ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId, sinceSeq: 1, attachRequestId }))
+        sendAttach(ws2, terminalId, { sinceSeq: 1, attachRequestId })
         const [ready, gap, replayTail] = await pending
 
         registry.simulateOutput(terminalId, 'live-after-gap-tail')
@@ -925,7 +950,7 @@ describe('WebSocket edge cases', () => {
       const { ws: ws2, close: close2 } = await createAuthenticatedConnection()
 
       // Attach to existing terminal
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
       const [ready, firstReplay] = await waitForMessages(ws2, [
         (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId,
         (m) => m.type === 'terminal.output' && m.terminalId === terminalId,
@@ -972,7 +997,7 @@ describe('WebSocket edge cases', () => {
         }
 
         ws2.on('message', handler)
-        ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+        sendAttach(ws2, terminalId)
       })
 
       expect(received[0]).toBe('ready')
@@ -996,7 +1021,7 @@ describe('WebSocket edge cases', () => {
 
       // Reconnect
       const { ws: ws2, close: close2 } = await createAuthenticatedConnection()
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
       await waitForMessage(ws2, (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId)
 
       // Set up listener for new output
@@ -1028,7 +1053,7 @@ describe('WebSocket edge cases', () => {
 
       // Try to reconnect
       const { ws: ws2, close: close2 } = await createAuthenticatedConnection()
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
 
       const error = await waitForMessage(ws2, (m) => m.type === 'error')
       expect(error.code).toBe('INVALID_TERMINAL_ID')
@@ -1046,7 +1071,7 @@ describe('WebSocket edge cases', () => {
       await new Promise((r) => setTimeout(r, 50))
 
       const { ws: ws2, close: close2 } = await createAuthenticatedConnection()
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
 
       const [ready, replay] = await waitForMessages(ws2, [
         (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId,
@@ -1063,21 +1088,26 @@ describe('WebSocket edge cases', () => {
       close2()
     })
 
-    it('reused terminal.create returns snapshot-free terminal.created and attach.ready', async () => {
+    it('reused terminal.create returns snapshot-free terminal.created and requires explicit attach', async () => {
       const { ws, close } = await createAuthenticatedConnection()
       const requestId = 'attach-v2-create-reuse'
       const terminalId = await createTerminal(ws, requestId)
       registry.simulateOutput(terminalId, 'seed output')
 
       ws.send(JSON.stringify({ type: 'terminal.create', requestId, mode: 'shell' }))
-      const [created, ready] = await waitForMessages(ws, [
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-        (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId,
-      ], 5000)
+      const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === requestId)
+      const preAttachMsgs = await collectMessages(ws, 150)
 
       expect(created.terminalId).toBe(terminalId)
       expect(created.snapshot).toBeUndefined()
       expect(created.snapshotChunked).toBeUndefined()
+      expect(preAttachMsgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId)).toBe(false)
+
+      sendAttach(ws, terminalId, { attachRequestId: 'attach-v2-create-reuse-explicit' })
+      const ready = await waitForMessage(
+        ws,
+        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'attach-v2-create-reuse-explicit',
+      )
       expect(ready.headSeq).toBeGreaterThanOrEqual(0)
 
       close()
@@ -1142,10 +1172,10 @@ describe('WebSocket edge cases', () => {
       const terminalId = await createTerminal(ws1, 'multi-client')
 
       // Attach other clients
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
       await waitForMessage(ws2, (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId)
 
-      ws3.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws3, terminalId)
       await waitForMessage(ws3, (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId)
 
       // Set up listeners on all clients
@@ -1187,7 +1217,7 @@ describe('WebSocket edge cases', () => {
 
       const terminalId = await createTerminal(ws1, 'partial-disconnect')
 
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
       await waitForMessage(ws2, (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId)
 
       // Disconnect first client
@@ -1212,7 +1242,7 @@ describe('WebSocket edge cases', () => {
       const { ws: ws2, close: close2 } = await createAuthenticatedConnection()
 
       const attachReady = waitForMessage(ws2, (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId)
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
       await attachReady
 
       // Both clients send input
@@ -1237,7 +1267,7 @@ describe('WebSocket edge cases', () => {
 
       const terminalId = await createTerminal(ws1, 'multi-exit')
 
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
       await waitForMessage(ws2, (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId)
 
       // Set up exit listeners
@@ -1308,7 +1338,7 @@ describe('WebSocket edge cases', () => {
       await new Promise((r) => setTimeout(r, 50))
 
       const { ws: ws2, close: close2 } = await createAuthenticatedConnection()
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
 
       const ready = await waitForMessage(
         ws2,
@@ -1548,7 +1578,7 @@ describe('WebSocket edge cases', () => {
 
       // Rapid attach/detach from second client
       for (let i = 0; i < 10; i++) {
-        ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+        sendAttach(ws2, terminalId)
         ws2.send(JSON.stringify({ type: 'terminal.detach', terminalId }))
       }
 
@@ -1556,7 +1586,7 @@ describe('WebSocket edge cases', () => {
       await new Promise((r) => setTimeout(r, 300))
 
       // Terminal should still be accessible
-      ws2.send(JSON.stringify({ type: 'terminal.attach', terminalId }))
+      sendAttach(ws2, terminalId)
       const ready = await waitForMessage(ws2, (m) => m.type === 'terminal.attach.ready' && m.terminalId === terminalId)
       expect(ready.terminalId).toBe(terminalId)
 
@@ -1590,21 +1620,18 @@ describe('WebSocket edge cases', () => {
     })
   })
 
-  describe('Split create/attach compatibility', () => {
-    it('legacy client path: terminal.create auto-attaches when attachOnCreate is omitted', async () => {
+  describe('Explicit create/attach contract', () => {
+    it('terminal.create never auto-attaches when attachOnCreate is omitted', async () => {
       const { ws, close } = await createAuthenticatedConnection()
 
       ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'legacy-auto', mode: 'shell' }))
-      const [created, ready] = await waitForMessages(ws, [
-        (m) => m.type === 'terminal.created' && m.requestId === 'legacy-auto',
-        (m) => m.type === 'terminal.attach.ready',
-      ])
-
-      expect(ready.terminalId).toBe(created.terminalId)
+      const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'legacy-auto')
+      const msgs = await collectMessages(ws, 150)
+      expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
       close()
     })
 
-    it('split path request: terminal.create with attachOnCreate:false does not auto-attach', async () => {
+    it('terminal.create ignores attachOnCreate and still does not auto-attach', async () => {
       const { ws, close } = await createAuthenticatedConnection()
 
       ws.send(JSON.stringify({
@@ -1621,19 +1648,12 @@ describe('WebSocket edge cases', () => {
       close()
     })
 
-    it('split-capable attach applies resize before replay', async () => {
+    it('terminal.attach applies resize before replay', async () => {
       const { ws, close } = await createAuthenticatedConnection()
 
-      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-attach', mode: 'shell', attachOnCreate: false }))
+      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-attach', mode: 'shell' }))
       const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'split-attach')
-      ws.send(JSON.stringify({
-        type: 'terminal.attach',
-        terminalId: created.terminalId,
-        sinceSeq: 0,
-        cols: 111,
-        rows: 37,
-        attachRequestId: 'attach-split-1',
-      }))
+      sendAttach(ws, created.terminalId, { cols: 111, rows: 37, attachRequestId: 'attach-split-1' })
 
       const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)
       expect(registry.resizeCalls).toContainEqual({ terminalId: created.terminalId, cols: 111, rows: 37 })
@@ -1641,7 +1661,7 @@ describe('WebSocket edge cases', () => {
       close()
     })
 
-    it('split-mode duplicate requestId is idempotent without duplicate attach.ready churn', async () => {
+    it('duplicate requestId is idempotent without duplicate attach.ready churn', async () => {
       const { ws, close } = await createAuthenticatedConnection()
       const observed: any[] = []
       const onMessage = (data: WebSocket.RawData) => {
@@ -1652,8 +1672,8 @@ describe('WebSocket edge cases', () => {
         }
       }
       ws.on('message', onMessage)
-      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'dup-split-1', mode: 'shell', attachOnCreate: false }))
-      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'dup-split-1', mode: 'shell', attachOnCreate: false }))
+      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'dup-split-1', mode: 'shell' }))
+      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'dup-split-1', mode: 'shell' }))
 
       const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'dup-split-1')
       await new Promise((resolve) => setTimeout(resolve, 200))
@@ -1667,22 +1687,15 @@ describe('WebSocket edge cases', () => {
       expect(registry.records.size).toBe(1)
       expect(autoReadyCount).toBe(0)
 
-      ws.send(JSON.stringify({
-        type: 'terminal.attach',
-        terminalId: created.terminalId,
-        sinceSeq: 0,
-        cols: 120,
-        rows: 40,
-        attachRequestId: 'dup-split-attach',
-      }))
+      sendAttach(ws, created.terminalId, { attachRequestId: 'dup-split-attach' })
       const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'dup-split-attach')
       expect(ready.terminalId).toBe(created.terminalId)
       close()
     })
 
-    it('split-mode attach retry with same attachRequestId is idempotent and keeps resize-before-replay order', async () => {
+    it('attach retry with same attachRequestId is idempotent and keeps resize-before-replay order', async () => {
       const { ws, close } = await createAuthenticatedConnection()
-      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-attach-retry', mode: 'shell', attachOnCreate: false }))
+      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-attach-retry', mode: 'shell' }))
       const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'split-attach-retry')
 
       const ordered: string[] = []
@@ -1693,22 +1706,8 @@ describe('WebSocket edge cases', () => {
         if (msg.type === 'terminal.output') ordered.push('output')
       })
 
-      ws.send(JSON.stringify({
-        type: 'terminal.attach',
-        terminalId: created.terminalId,
-        sinceSeq: 0,
-        cols: 120,
-        rows: 40,
-        attachRequestId: 'retry-1',
-      }))
-      ws.send(JSON.stringify({
-        type: 'terminal.attach',
-        terminalId: created.terminalId,
-        sinceSeq: 0,
-        cols: 120,
-        rows: 40,
-        attachRequestId: 'retry-1',
-      }))
+      sendAttach(ws, created.terminalId, { attachRequestId: 'retry-1' })
+      sendAttach(ws, created.terminalId, { attachRequestId: 'retry-1' })
 
       const ready = await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'retry-1')
       expect(ready.terminalId).toBe(created.terminalId)
@@ -1722,31 +1721,24 @@ describe('WebSocket edge cases', () => {
       close()
     })
 
-    it('split attach without viewport remains compatibility-safe and still enforces resize-before-replay', async () => {
+    it('terminal.attach without viewport is rejected before replay begins', async () => {
       const { ws, close } = await createAuthenticatedConnection()
-      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-missing-vp', mode: 'shell', attachOnCreate: false }))
+      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-missing-vp', mode: 'shell' }))
       const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'split-missing-vp')
-
-      const ordered: string[] = []
-      registry.onResize = () => ordered.push('resize')
-      ws.on('message', (data) => {
-        const msg = JSON.parse(data.toString())
-        if (msg.type === 'terminal.attach.ready') ordered.push('ready')
-        if (msg.type === 'terminal.output') ordered.push('output')
-      })
 
       registry.simulateOutput(created.terminalId, 'seed-split-missing-vp')
       ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: created.terminalId, sinceSeq: 0 }))
-      await waitForMessage(ws, (m) => m.type === 'terminal.output' && m.terminalId === created.terminalId)
-      expect(ordered.indexOf('resize')).toBeGreaterThanOrEqual(0)
-      expect(ordered.indexOf('ready')).toBeGreaterThan(ordered.indexOf('resize'))
-      expect(ordered.indexOf('output')).toBeGreaterThan(ordered.indexOf('ready'))
+      const error = await waitForMessage(ws, (m) => m.type === 'error')
+      expect(error.code).toBe('INVALID_MESSAGE')
+      const msgs = await collectMessages(ws, 150)
+      expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
+      expect(msgs.some((m) => m.type === 'terminal.output' && m.terminalId === created.terminalId)).toBe(false)
       close()
     })
 
-    it('split restore attach ordering: resize happens before attach.ready and replay output', async () => {
+    it('restore attach ordering: resize happens before attach.ready and replay output', async () => {
       const { ws, close } = await createAuthenticatedConnection()
-      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-restore-order', mode: 'shell', attachOnCreate: false }))
+      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-restore-order', mode: 'shell' }))
       const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'split-restore-order')
 
       registry.simulateOutput(created.terminalId, 'seed-1')
@@ -1760,7 +1752,7 @@ describe('WebSocket edge cases', () => {
         if (msg.type === 'terminal.output') ordered.push('output')
       })
 
-      ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: created.terminalId, sinceSeq: 0, cols: 120, rows: 40 }))
+      sendAttach(ws, created.terminalId)
       await waitForMessage(ws, (m) => m.type === 'terminal.output' && m.terminalId === created.terminalId)
 
       expect(ordered.indexOf('resize')).toBeGreaterThanOrEqual(0)
@@ -1769,11 +1761,11 @@ describe('WebSocket edge cases', () => {
       close()
     })
 
-    it('split reconnect ordering: transport reconnect resize happens before attach.ready and replay delta', async () => {
+    it('reconnect ordering: transport reconnect resize happens before attach.ready and replay delta', async () => {
       const { ws, close } = await createAuthenticatedConnection()
-      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-reconnect-order', mode: 'shell', attachOnCreate: false }))
+      ws.send(JSON.stringify({ type: 'terminal.create', requestId: 'split-reconnect-order', mode: 'shell' }))
       const created = await waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === 'split-reconnect-order')
-      ws.send(JSON.stringify({ type: 'terminal.attach', terminalId: created.terminalId, sinceSeq: 0, cols: 120, rows: 40 }))
+      sendAttach(ws, created.terminalId)
       await waitForMessage(ws, (m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)
       registry.simulateOutput(created.terminalId, 'after-initial')
       const last = await waitForMessage(ws, (m) => m.type === 'terminal.output' && m.terminalId === created.terminalId)
@@ -1789,14 +1781,7 @@ describe('WebSocket edge cases', () => {
         if (msg.type === 'terminal.output') ordered.push('output')
       })
 
-      ws2.send(JSON.stringify({
-        type: 'terminal.attach',
-        terminalId: created.terminalId,
-        sinceSeq: lastSeq,
-        cols: 120,
-        rows: 40,
-        attachRequestId: 'transport-reconnect-1',
-      }))
+      sendAttach(ws2, created.terminalId, { sinceSeq: lastSeq, attachRequestId: 'transport-reconnect-1' })
       await waitForMessage(ws2, (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'transport-reconnect-1')
       registry.simulateOutput(created.terminalId, 'after-reconnect')
       await waitForMessage(

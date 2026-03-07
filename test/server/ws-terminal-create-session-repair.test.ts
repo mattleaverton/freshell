@@ -105,6 +105,8 @@ class FakeRegistry {
       mode: opts.mode || 'shell',
       shell: opts.shell || 'system',
       status: 'running',
+      cols: 80,
+      rows: 24,
       resumeSessionId: opts.resumeSessionId,
       clients: new Set(),
     }
@@ -125,6 +127,14 @@ class FakeRegistry {
   }
 
   finishAttachSnapshot(_terminalId: string, _ws: any) {}
+
+  resize(terminalId: string, cols: number, rows: number) {
+    const rec = this.records.get(terminalId)
+    if (!rec) return false
+    rec.cols = cols
+    rec.rows = rows
+    return true
+  }
 
   detach(terminalId: string, ws: any) {
     const rec = this.records.get(terminalId)
@@ -486,7 +496,6 @@ describe('terminal.create session repair wait', () => {
         type: 'terminal.create',
         requestId,
         mode: 'shell',
-        attachOnCreate: false,
       }))
 
       const firstCreated = await waitForMessage(
@@ -505,7 +514,6 @@ describe('terminal.create session repair wait', () => {
         type: 'terminal.create',
         requestId,
         mode: 'shell',
-        attachOnCreate: false,
       }))
 
       const secondCreated = await waitForMessage(
@@ -524,7 +532,7 @@ describe('terminal.create session repair wait', () => {
     }
   })
 
-  it('broadcasts terminal.list.updated when create succeeds but auto-attach fails', async () => {
+  it('broadcasts terminal.list.updated when create succeeds even if a later explicit attach fails', async () => {
     registry.forceAttachFailure = true
 
     const observer = new WebSocket(`ws://127.0.0.1:${port}/ws`)
@@ -546,14 +554,27 @@ describe('terminal.create session repair wait', () => {
         mode: 'shell',
       }))
 
-      const err = await waitForMessage(
+      const created = await waitForMessage(
         creator,
-        (m) => m.type === 'error' && m.code === 'INVALID_TERMINAL_ID' && typeof m.terminalId === 'string',
+        (m) => m.type === 'terminal.created' && m.requestId === 'create-attach-fail-list-update',
       )
-      expect(err.requestId).toBeUndefined()
       expect(registry.records.size).toBe(1)
 
       await waitForMessage(observer, (m) => m.type === 'terminal.list.updated')
+
+      creator.send(JSON.stringify({
+        type: 'terminal.attach',
+        terminalId: created.terminalId,
+        sinceSeq: 0,
+        cols: 120,
+        rows: 40,
+      }))
+
+      const err = await waitForMessage(
+        creator,
+        (m) => m.type === 'error' && m.code === 'INVALID_TERMINAL_ID' && m.terminalId === created.terminalId,
+      )
+      expect(err.requestId).toBeUndefined()
     } finally {
       await closeWebSocket(observer)
       if (creator) {

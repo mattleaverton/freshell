@@ -19,13 +19,6 @@ const CODING_CLI_MIN_REPLAY_RING_MAX_BYTES = Number(
   process.env.CODING_CLI_MIN_REPLAY_RING_MAX_BYTES || 8 * 1024 * 1024,
 )
 
-type CreatedEnvelope = {
-  requestId: string
-  terminalId: string
-  createdAt: number
-  effectiveResumeSessionId?: string
-}
-
 type PerfLevel = 'debug' | 'info' | 'warn' | 'error'
 type PerfEventLogger = (
   event: TerminalStreamPerfEvent,
@@ -79,20 +72,6 @@ export class TerminalStreamBroker {
     this.terminals.clear()
     this.wsToTerminals.clear()
     this.terminalLocks.clear()
-  }
-
-  async sendCreatedAndAttach(
-    ws: LiveWebSocket,
-    created: CreatedEnvelope,
-    sinceSeq: number | undefined = 0,
-  ): Promise<boolean> {
-    const createdMsg: CreatedEnvelope & { type: 'terminal.created' } = {
-      type: 'terminal.created',
-      ...created,
-    }
-
-    if (!this.safeSend(ws, createdMsg)) return false
-    return await this.attach(ws, created.terminalId, sinceSeq)
   }
 
   async attach(
