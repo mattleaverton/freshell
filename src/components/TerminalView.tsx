@@ -10,7 +10,7 @@ import {
 } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { addTab, updateTab, switchToNextTab, switchToPrevTab } from '@/store/tabsSlice'
-import { initLayout, updatePaneContent, updatePaneTitle } from '@/store/panesSlice'
+import { consumePaneRefreshRequest, initLayout, updatePaneContent, updatePaneTitle } from '@/store/panesSlice'
 import { updateSessionActivity } from '@/store/sessionActivitySlice'
 import { updateSettingsLocal } from '@/store/settingsSlice'
 import { recordTurnComplete, clearTabAttention, clearPaneAttention } from '@/store/turnCompletionSlice'
@@ -25,6 +25,7 @@ import { registerTerminalCaptureHandler } from '@/lib/screenshot-capture-env'
 import { consumeTerminalRestoreRequestId, addTerminalRestoreRequestId } from '@/lib/terminal-restore'
 import { isTerminalPasteShortcut } from '@/lib/terminal-input-policy'
 import { clearTerminalCursor, loadTerminalCursor, saveTerminalCursor } from '@/lib/terminal-cursor'
+import { paneRefreshTargetMatchesContent } from '@/lib/pane-utils'
 import {
   beginAttach,
   createAttachSeqState,
@@ -61,7 +62,7 @@ import { cn } from '@/lib/utils'
 import { Terminal } from '@xterm/xterm'
 import { Loader2 } from 'lucide-react'
 import { ConfirmModal } from '@/components/ui/confirm-modal'
-import type { PaneContent, TerminalPaneContent } from '@/store/paneTypes'
+import type { PaneContent, PaneRefreshRequest, TerminalPaneContent } from '@/store/paneTypes'
 import '@xterm/xterm/css/xterm.css'
 import { createLogger } from '@/lib/client-logger'
 
@@ -165,6 +166,7 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
   const tab = useAppSelector((s) => s.tabs.tabs.find((t) => t.id === tabId))
   const activeTabId = useAppSelector((s) => s.tabs.activeTabId)
   const activePaneId = useAppSelector((s) => s.panes.activePane[tabId])
+  const refreshRequest = useAppSelector((s) => s.panes.refreshRequestsByPane?.[tabId]?.[paneId] ?? null)
   const localServerInstanceId = useAppSelector((s) => s.connection.serverInstanceId)
   const connectionErrorCode = useAppSelector((s) => s.connection.lastErrorCode)
   const settings = useAppSelector((s) => s.settings.settings)
@@ -258,6 +260,9 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
     pendingSinceSeq: 0,
   })
   const contentRef = useRef<TerminalPaneContent | null>(terminalContent)
+  const refreshRequestRef = useRef<PaneRefreshRequest | null>(refreshRequest)
+  const handledRefreshRequestIdRef = useRef<string | null>(null)
+  const hasMountedRefreshEffectRef = useRef(false)
 
   const applySeqState = useCallback((
     nextState: AttachSeqState,
@@ -321,6 +326,7 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
   hasPaneAttentionRef.current = hasPaneAttention
   attentionDismissRef.current = settings.panes?.attentionDismiss ?? 'click'
   debugRef.current = !!settings.logging?.debug
+  refreshRequestRef.current = refreshRequest
 
   const shouldFocusActiveTerminal = !hidden && activeTabId === tabId && activePaneId === paneId
 
@@ -1201,6 +1207,34 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
     })
   }, [ws, applySeqState])
 
+  const runRefreshAttach = useCallback((request: PaneRefreshRequest | null | undefined) => {
+    if (!request) return false
+    if (handledRefreshRequestIdRef.current === request.requestId) return true
+
+    const tid = terminalIdRef.current
+    const currentContent = contentRef.current
+    if (!tid || !currentContent) return false
+    if (!paneRefreshTargetMatchesContent(request.target, currentContent)) return false
+
+    handledRefreshRequestIdRef.current = request.requestId
+    ws.send({ type: 'terminal.detach', terminalId: tid })
+
+    if (hiddenRef.current) {
+      currentAttachRef.current = null
+      deferredAttachStateRef.current = {
+        mode: 'waiting_for_geometry',
+        pendingIntent: 'viewport_hydrate',
+        pendingSinceSeq: 0,
+      }
+      setIsAttaching(false)
+    } else {
+      attachTerminal(tid, 'viewport_hydrate', { clearViewportFirst: true })
+    }
+
+    dispatch(consumePaneRefreshRequest({ tabId, paneId, requestId: request.requestId }))
+    return true
+  }, [attachTerminal, dispatch, paneId, tabId, ws])
+
   // Apply settings changes
   useEffect(() => {
     if (!isTerminal) return
@@ -1672,10 +1706,17 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
         currentTerminalId,
         createRequestId,
         resumeSessionId: contentRef.current?.resumeSessionId,
+        refreshRequestId: refreshRequestRef.current?.requestId,
         action: currentTerminalId
-          ? (deferredAttachStateRef.current.mode === 'live' ? 'keepalive_delta' : 'viewport_hydrate')
+          ? (refreshRequestRef.current
+            ? 'refresh_attach'
+            : (deferredAttachStateRef.current.mode === 'live' ? 'keepalive_delta' : 'viewport_hydrate'))
           : 'sendCreate',
       })
+      if (currentTerminalId && runRefreshAttach(refreshRequestRef.current)) {
+        return
+      }
+
       if (currentTerminalId) {
         if (hiddenRef.current) {
           deferredAttachStateRef.current = deferredAttachStateRef.current.mode === 'live'
@@ -1732,7 +1773,17 @@ export default function TerminalView({ tabId, paneId, paneContent, hidden }: Ter
     handleTerminalOutput,
     attachTerminal,
     markAttachComplete,
+    runRefreshAttach,
   ])
+
+  useEffect(() => {
+    if (!hasMountedRefreshEffectRef.current) {
+      hasMountedRefreshEffectRef.current = true
+      return
+    }
+    if (!isTerminal || !refreshRequest) return
+    runRefreshAttach(refreshRequest)
+  }, [isTerminal, refreshRequest, runRefreshAttach])
 
   const mobileToolbarBottomPx = isMobile ? keyboardInsetPx : 0
   const mobileBottomInsetPx = isMobile ? keyboardInsetPx + MOBILE_KEYBAR_HEIGHT_PX : 0

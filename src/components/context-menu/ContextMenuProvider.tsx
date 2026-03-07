@@ -1,7 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { addTab, closeTab, closePaneWithCleanup, reorderTabs, updateTab, setActiveTab, openSessionTab, requestTabRename } from '@/store/tabsSlice'
-import { addPane, initLayout, replacePane, resetSplit, splitPane as splitPaneAction, swapSplit, requestPaneRename } from '@/store/panesSlice'
+import {
+  addPane,
+  initLayout,
+  replacePane,
+  requestPaneRefresh,
+  requestPaneRename,
+  requestTabRefresh,
+  resetSplit,
+  splitPane as splitPaneAction,
+  swapSplit,
+} from '@/store/panesSlice'
 import { setProjects, setProjectExpanded } from '@/store/sessionsSlice'
 import { getWsClient } from '@/lib/ws-client'
 import { api } from '@/lib/api'
@@ -204,6 +214,14 @@ export function ContextMenuProvider({
   const renamePane = useCallback((tabId: string, paneId: string) => {
     suppressNextFocusRestoreRef.current = true
     dispatch(requestPaneRename({ tabId, paneId }))
+  }, [dispatch])
+
+  const refreshPaneAction = useCallback((tabId: string, paneId: string) => {
+    dispatch(requestPaneRefresh({ tabId, paneId }))
+  }, [dispatch])
+
+  const refreshTabAction = useCallback((tabId: string) => {
+    dispatch(requestTabRefresh({ tabId }))
   }, [dispatch])
 
   const clearStaleTabTerminalId = useCallback((tabId: string, detachedTerminalId: string) => {
@@ -796,12 +814,14 @@ export function ContextMenuProvider({
         copyShareLink,
         openView: onViewChange,
         copyTabName,
+        refreshTab: refreshTabAction,
         renameTab,
         closeTab: closeTabById,
         closeOtherTabs,
         closeTabsToRight,
         moveTab,
         renamePane,
+        refreshPane: refreshPaneAction,
         replacePane: replacePaneAction,
         splitPane: (tabId: string, paneId: string, direction: 'horizontal' | 'vertical') => {
           dispatch(splitPaneAction({ tabId, paneId, direction, newContent: { kind: 'picker' } }))
@@ -864,12 +884,14 @@ export function ContextMenuProvider({
     copyShareLink,
     onViewChange,
     copyTabName,
+    refreshTabAction,
     renameTab,
     closeTabById,
     closeOtherTabs,
     closeTabsToRight,
     moveTab,
     renamePane,
+    refreshPaneAction,
     replacePaneAction,
     clearStaleTabTerminalId,
     ws,

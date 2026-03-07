@@ -12,6 +12,7 @@ import settingsReducer from '@/store/settingsSlice'
 import { ContextMenuProvider } from '@/components/context-menu/ContextMenuProvider'
 import { ContextIds } from '@/components/context-menu/context-menu-constants'
 import TabBar from '@/components/TabBar'
+import Pane from '@/components/panes/Pane'
 
 const clipboardMocks = vi.hoisted(() => ({
   copyText: vi.fn().mockResolvedValue(undefined),
@@ -85,6 +86,11 @@ function createTestStore(options?: { platform?: string | null }) {
         layouts: {},
         activePane: {},
         paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
       },
       sessions: {
         projects: [],
@@ -156,6 +162,11 @@ function createStoreWithSession() {
         },
         activePane: { 'tab-1': 'pane-1' },
         paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
       },
       sessions: {
         projects: [
@@ -175,6 +186,66 @@ function createStoreWithSession() {
           },
         ],
         expandedProjects: new Set<string>(),
+      },
+    },
+  })
+}
+
+function createStoreWithBrowserPane(options?: { zoomedPaneId?: string }) {
+  return configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      sessions: sessionsReducer,
+      connection: connectionReducer,
+      settings: settingsReducer,
+    },
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware({ serializableCheck: false }),
+    preloadedState: {
+      tabs: {
+        tabs: [
+          {
+            id: 'tab-1',
+            createRequestId: 'tab-1',
+            title: 'Tab One',
+            status: 'running',
+            mode: 'shell',
+            shell: 'system',
+            createdAt: 1,
+          },
+        ],
+        activeTabId: 'tab-1',
+        renameRequestTabId: null,
+      },
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'browser',
+              browserInstanceId: 'browser-1',
+              url: 'https://example.com',
+              devToolsOpen: false,
+            },
+          },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Browser' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: options?.zoomedPaneId ? { 'tab-1': options.zoomedPaneId } : {},
+        refreshRequestsByPane: {},
+      },
+      sessions: {
+        projects: [],
+        expandedProjects: new Set<string>(),
+      },
+      connection: {
+        status: 'ready',
+        platform: null,
       },
     },
   })
@@ -271,6 +342,81 @@ describe('ContextMenuProvider', () => {
     fireEvent.keyDown(document, { key: 'F10', shiftKey: true })
 
     expect(screen.getByRole('menu')).toBeInTheDocument()
+  })
+
+  it('refreshes a tab from the tab context menu and clears zoom first', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithBrowserPane({ zoomedPaneId: 'pane-1' })
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div data-context={ContextIds.Tab} data-tab-id="tab-1">
+            Tab One
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Refresh tab' }))
+
+    expect(store.getState().panes.zoomedPane['tab-1']).toBeUndefined()
+    expect(store.getState().panes.refreshRequestsByPane['tab-1']?.['pane-1']).toMatchObject({
+      target: { kind: 'browser', browserInstanceId: 'browser-1' },
+    })
+  })
+
+  it('opens the pane menu from the pane shell keyboard target and queues Refresh pane', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithBrowserPane()
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <Pane
+            tabId="tab-1"
+            paneId="pane-1"
+            isActive={true}
+            isOnlyPane={true}
+            title="Browser"
+            content={{
+              kind: 'browser',
+              browserInstanceId: 'browser-1',
+              url: 'https://example.com',
+              devToolsOpen: false,
+            }}
+            onClose={() => {}}
+            onFocus={() => {}}
+          >
+            <div>Pane body</div>
+          </Pane>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    const paneShell = screen.getByRole('group', { name: 'Pane: Browser' })
+    paneShell.focus()
+    expect(document.activeElement).toBe(paneShell)
+
+    fireEvent.keyDown(document, { key: 'F10', shiftKey: true })
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('menuitem', { name: 'Refresh pane' }))
+
+    expect(store.getState().panes.refreshRequestsByPane['tab-1']?.['pane-1']).toMatchObject({
+      target: { kind: 'browser', browserInstanceId: 'browser-1' },
+    })
   })
 
   it('Rename tab from context menu enters inline rename mode (no prompt)', async () => {

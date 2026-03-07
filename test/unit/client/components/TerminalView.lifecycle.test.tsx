@@ -3,7 +3,7 @@ import { act, render, cleanup, waitFor } from '@testing-library/react'
 import { configureStore } from '@reduxjs/toolkit'
 import { Provider } from 'react-redux'
 import tabsReducer, { setActiveTab } from '@/store/tabsSlice'
-import panesReducer from '@/store/panesSlice'
+import panesReducer, { requestPaneRefresh } from '@/store/panesSlice'
 import settingsReducer, { defaultSettings, updateSettingsLocal } from '@/store/settingsSlice'
 import connectionReducer from '@/store/connectionSlice'
 import turnCompletionReducer from '@/store/turnCompletionSlice'
@@ -1471,24 +1471,26 @@ describe('TerminalView lifecycle updates', () => {
     })
 
     // Simulate session association
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000'
+
     messageHandler!({
       type: 'terminal.session.associated',
       terminalId: 'term-assoc',
-      sessionId: 'session-abc-123',
+      sessionId,
     })
 
     // Verify pane content has resumeSessionId + sessionRef
     const layout = store.getState().panes.layouts[tabId] as { type: 'leaf'; content: any }
-    expect(layout.content.resumeSessionId).toBe('session-abc-123')
+    expect(layout.content.resumeSessionId).toBe(sessionId)
     expect(layout.content.sessionRef).toEqual({
       provider: 'claude',
-      sessionId: 'session-abc-123',
+      sessionId,
       serverInstanceId: 'srv-local',
     })
 
     // Verify tab also has resumeSessionId mirrored
     const tab = store.getState().tabs.tabs.find(t => t.id === tabId)
-    expect(tab?.resumeSessionId).toBe('session-abc-123')
+    expect(tab?.resumeSessionId).toBe(sessionId)
   })
 
   it('clears tab terminalId and sets status to creating on INVALID_TERMINAL_ID reconnect', async () => {
@@ -1678,6 +1680,7 @@ describe('TerminalView lifecycle updates', () => {
       clearSends?: boolean
       requestId?: string
       ackInitialAttach?: boolean
+      refreshOnMount?: boolean
     }) {
       const tabId = 'tab-v2-stream'
       const paneId = 'pane-v2-stream'
@@ -1721,6 +1724,20 @@ describe('TerminalView lifecycle updates', () => {
             layouts: { [tabId]: root },
             activePane: { [tabId]: paneId },
             paneTitles: {},
+            paneTitleSetByUser: {},
+            renameRequestTabId: null,
+            renameRequestPaneId: null,
+            zoomedPane: {},
+            refreshRequestsByPane: opts?.refreshOnMount
+              ? {
+                [tabId]: {
+                  [paneId]: {
+                    requestId: 'refresh-v2-stream',
+                    target: { kind: 'terminal', createRequestId: requestId },
+                  },
+                },
+              }
+              : {},
           },
           settings: { settings: defaultSettings, status: 'loaded' },
           connection: { status: 'connected', error: null },
@@ -2024,6 +2041,57 @@ describe('TerminalView lifecycle updates', () => {
         type: 'terminal.create',
         requestId: second.requestId,
       }))
+    })
+
+    it('claims a pending refresh request on mount by detaching and reattaching once', async () => {
+      const { store, tabId, terminalId } = await renderTerminalHarness({
+        status: 'running',
+        terminalId: 'term-v2-refresh-mount',
+        refreshOnMount: true,
+        clearSends: false,
+      })
+
+      const sends = wsMocks.send.mock.calls.map(([msg]) => msg)
+      const detachIdx = sends.findIndex((msg) => msg?.type === 'terminal.detach' && msg?.terminalId === terminalId)
+      const attachCalls = sends.filter((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === terminalId)
+
+      expect(detachIdx).toBeGreaterThanOrEqual(0)
+      expect(attachCalls).toHaveLength(1)
+      expect(attachCalls[0]).toMatchObject({
+        type: 'terminal.attach',
+        terminalId,
+        sinceSeq: 0,
+      })
+      expect(store.getState().panes.refreshRequestsByPane[tabId]).toBeUndefined()
+    })
+
+    it('refreshes an attached terminal when a matching request arrives after mount', async () => {
+      const { store, tabId, paneId, terminalId } = await renderTerminalHarness({
+        status: 'running',
+        terminalId: 'term-v2-refresh-late',
+      })
+
+      wsMocks.send.mockClear()
+
+      act(() => {
+        store.dispatch(requestPaneRefresh({ tabId, paneId }))
+      })
+
+      await waitFor(() => {
+        const sends = wsMocks.send.mock.calls.map(([msg]) => msg)
+        const detachIdx = sends.findIndex((msg) => msg?.type === 'terminal.detach' && msg?.terminalId === terminalId)
+        const attachIdx = sends.findIndex((msg) => msg?.type === 'terminal.attach' && msg?.terminalId === terminalId)
+
+        expect(detachIdx).toBeGreaterThanOrEqual(0)
+        expect(attachIdx).toBeGreaterThan(detachIdx)
+        expect(sends[attachIdx]).toMatchObject({
+          type: 'terminal.attach',
+          terminalId,
+          sinceSeq: 0,
+        })
+      })
+
+      expect(store.getState().panes.refreshRequestsByPane[tabId]).toBeUndefined()
     })
 
     it('sends sinceSeq=0 when attaching without previously rendered output', async () => {

@@ -1,17 +1,19 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { ArrowLeft, ArrowRight, RotateCcw, X, Wrench, Loader2 } from 'lucide-react'
-import { useAppDispatch } from '@/store/hooks'
-import { updatePaneContent } from '@/store/panesSlice'
+import { useAppDispatch, useAppSelector } from '@/store/hooks'
+import { consumePaneRefreshRequest, updatePaneContent } from '@/store/panesSlice'
 import { cn } from '@/lib/utils'
 import { copyText } from '@/lib/clipboard'
 import { isLoopbackHostname } from '@/lib/url-rewrite'
 import { api } from '@/lib/api'
 import { registerBrowserActions } from '@/lib/pane-action-registry'
 import { ContextIds } from '@/components/context-menu/context-menu-constants'
+import { paneRefreshTargetMatchesContent } from '@/lib/pane-utils'
 
 interface BrowserPaneProps {
   paneId: string
   tabId: string
+  browserInstanceId: string
   url: string
   devToolsOpen: boolean
 }
@@ -134,8 +136,15 @@ function buildForwardedUrl(
   return forwarded.toString()
 }
 
-export default function BrowserPane({ paneId, tabId, url, devToolsOpen }: BrowserPaneProps) {
+export default function BrowserPane({
+  paneId,
+  tabId,
+  browserInstanceId,
+  url,
+  devToolsOpen,
+}: BrowserPaneProps) {
   const dispatch = useAppDispatch()
+  const refreshRequest = useAppSelector((state) => state.panes.refreshRequestsByPane?.[tabId]?.[paneId] ?? null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const [inputUrl, setInputUrl] = useState(url)
@@ -283,23 +292,48 @@ export default function BrowserPane({ paneId, tabId, url, devToolsOpen }: Browse
     }
   }, [dispatch, tabId, paneId, devToolsOpen, history, historyIndex])
 
+  const recoverCurrentPage = useCallback(() => {
+    if (!currentUrl) return
+
+    setLoadError(null)
+    setForwardError(null)
+    setIsLoading(true)
+
+    if (needsPortForward(currentUrl)) {
+      setResolvedSrc(null)
+      setForwardRetryKey((key) => key + 1)
+      return
+    }
+
+    setResolvedSrc(toIframeSrc(currentUrl))
+  }, [currentUrl])
+
   const refresh = useCallback(() => {
+    if (!currentUrl) return
+
     const iframe = iframeRef.current
-    if (!iframe) return
+    if (!iframe) {
+      recoverCurrentPage()
+      return
+    }
 
     // Prefer reloading the current document (handles in-iframe navigations when allowed).
     try {
       iframe.contentWindow?.location.reload()
+      setLoadError(null)
+      setForwardError(null)
       setIsLoading(true)
       return
     } catch {
       // cross-origin or unavailable; fall back to resetting src
     }
 
-    const src = iframe.src
+    const src = iframe.src || resolvedSrc || toIframeSrc(currentUrl)
     iframe.src = src
+    setLoadError(null)
+    setForwardError(null)
     setIsLoading(true)
-  }, [])
+  }, [currentUrl, recoverCurrentPage, resolvedSrc])
 
   const stop = useCallback(() => {
     if (iframeRef.current) {
@@ -329,6 +363,21 @@ export default function BrowserPane({ paneId, tabId, url, devToolsOpen }: Browse
       inputRef.current.focus()
     }
   }, [url])
+
+  useEffect(() => {
+    if (!refreshRequest) return
+
+    const matchesRequest = paneRefreshTargetMatchesContent(refreshRequest.target, {
+      kind: 'browser',
+      browserInstanceId,
+      url,
+      devToolsOpen,
+    })
+    if (!matchesRequest) return
+
+    refresh()
+    dispatch(consumePaneRefreshRequest({ tabId, paneId, requestId: refreshRequest.requestId }))
+  }, [browserInstanceId, devToolsOpen, dispatch, paneId, refresh, refreshRequest, tabId, url])
 
   useEffect(() => {
     return registerBrowserActions(paneId, {
