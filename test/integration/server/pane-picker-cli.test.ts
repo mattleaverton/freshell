@@ -153,6 +153,47 @@ function closeWebSocket(ws: WebSocket, timeoutMs = 500): Promise<void> {
   })
 }
 
+function waitForWsMessage<T = any>(
+  ws: WebSocket,
+  predicate: (msg: any) => boolean,
+  timeoutMs = TEST_TIMEOUT_MS,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup()
+      reject(new Error('Timed out waiting for websocket message'))
+    }, timeoutMs)
+
+    const cleanup = () => {
+      clearTimeout(timeout)
+      ws.off('message', onMessage)
+      ws.off('close', onClose)
+      ws.off('error', onError)
+    }
+
+    const onMessage = (data: WebSocket.RawData) => {
+      const msg = JSON.parse(data.toString())
+      if (!predicate(msg)) return
+      cleanup()
+      resolve(msg as T)
+    }
+
+    const onClose = () => {
+      cleanup()
+      reject(new Error('WebSocket closed before expected message'))
+    }
+
+    const onError = (error: Error) => {
+      cleanup()
+      reject(error)
+    }
+
+    ws.on('message', onMessage)
+    ws.on('close', onClose)
+    ws.on('error', onError)
+  })
+}
+
 describe('Pane Picker CLI Integration', () => {
   describe('GET /api/platform with availableClis', () => {
     let app: Express
@@ -260,14 +301,9 @@ describe('Pane Picker CLI Integration', () => {
     async function connectAndAuth(): Promise<WebSocket> {
       const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
+      const readyPromise = waitForWsMessage(ws, (msg) => msg.type === 'ready')
       ws.send(JSON.stringify({ type: 'hello', token: TEST_AUTH_TOKEN, protocolVersion: WS_PROTOCOL_VERSION }))
-
-      await new Promise<void>((resolve) => {
-        ws.on('message', (data) => {
-          const msg = JSON.parse(data.toString())
-          if (msg.type === 'ready') resolve()
-        })
-      })
+      await readyPromise
       return ws
     }
 
@@ -275,18 +311,16 @@ describe('Pane Picker CLI Integration', () => {
       const ws = await connectAndAuth()
 
       const requestId = 'req-claude-1'
+      const createdPromise = waitForWsMessage(ws, (msg) => {
+        return msg.type === 'terminal.created' && msg.requestId === requestId
+      })
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
         mode: 'claude',
       }))
 
-      const created = await new Promise<any>((resolve) => {
-        ws.on('message', (data) => {
-          const msg = JSON.parse(data.toString())
-          if (msg.type === 'terminal.created' && msg.requestId === requestId) resolve(msg)
-        })
-      })
+      const created = await createdPromise
 
       expect(created.terminalId).toMatch(/^term_/)
       expect(created.requestId).toBe(requestId)
@@ -303,18 +337,16 @@ describe('Pane Picker CLI Integration', () => {
       const ws = await connectAndAuth()
 
       const requestId = 'req-codex-1'
+      const createdPromise = waitForWsMessage(ws, (msg) => {
+        return msg.type === 'terminal.created' && msg.requestId === requestId
+      })
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
         mode: 'codex',
       }))
 
-      const created = await new Promise<any>((resolve) => {
-        ws.on('message', (data) => {
-          const msg = JSON.parse(data.toString())
-          if (msg.type === 'terminal.created' && msg.requestId === requestId) resolve(msg)
-        })
-      })
+      const created = await createdPromise
 
       expect(created.terminalId).toMatch(/^term_/)
       const rec = registry.get(created.terminalId)
@@ -328,6 +360,9 @@ describe('Pane Picker CLI Integration', () => {
       const ws = await connectAndAuth()
 
       const requestId = 'req-claude-cwd'
+      const createdPromise = waitForWsMessage(ws, (msg) => {
+        return msg.type === 'terminal.created' && msg.requestId === requestId
+      })
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
@@ -335,12 +370,7 @@ describe('Pane Picker CLI Integration', () => {
         cwd: '/tmp/test-project',
       }))
 
-      const created = await new Promise<any>((resolve) => {
-        ws.on('message', (data) => {
-          const msg = JSON.parse(data.toString())
-          if (msg.type === 'terminal.created' && msg.requestId === requestId) resolve(msg)
-        })
-      })
+      const created = await createdPromise
 
       const rec = registry.get(created.terminalId)
       expect(rec).not.toBeNull()
@@ -353,6 +383,9 @@ describe('Pane Picker CLI Integration', () => {
       const ws = await connectAndAuth()
 
       const requestId = 'req-claude-recent-dir'
+      const createdPromise = waitForWsMessage(ws, (msg) => {
+        return msg.type === 'terminal.created' && msg.requestId === requestId
+      })
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
@@ -360,12 +393,7 @@ describe('Pane Picker CLI Integration', () => {
         cwd: '/tmp/recent-dir',
       }))
 
-      await new Promise<void>((resolve) => {
-        ws.on('message', (data) => {
-          const msg = JSON.parse(data.toString())
-          if (msg.type === 'terminal.created' && msg.requestId === requestId) resolve()
-        })
-      })
+      await createdPromise
 
       expect(mockPushRecentDirectory).toHaveBeenCalledWith('/tmp/recent-dir')
 
