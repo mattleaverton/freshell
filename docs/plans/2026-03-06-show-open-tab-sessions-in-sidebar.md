@@ -14,6 +14,7 @@
 - The mounted sessions router is `server/sessions-router.ts`. Do not patch `server/routes/sessions.ts`; it is not used by `server/index.ts`.
 - Pagination semantics stay intact. The first page is still the newest 100 sessions; open-tab sessions are hydrated out-of-band and merged into canonical state.
 - Do not use `lastLoadedAt` as the hydration retry gate. `mergeResolvedProjects()` is a local upsert and must not re-arm unresolved open-session requests by itself.
+- Do not drive the network request directly off the same selector that `markOpenTabHydrationRequested()` invalidates. The App orchestration must snapshot the request payload independently so the in-flight state transition does not cancel its own request and strand keys in `inFlight`.
 - No `docs/index.html` update is needed for this change because the UI layout does not change; only sidebar data hydration changes.
 
 ---
@@ -418,9 +419,11 @@ Create `test/unit/client/components/App.open-tab-session-hydration.test.tsx` cov
 - bootstrap loads `/api/sessions?limit=100` without the open session
 - App then calls `POST /api/sessions/resolve` exactly once for the missing open session
 - App dispatches `mergeResolvedProjects()` and the store ends up containing that session
+- the request still settles correctly even though `markOpenTabHydrationRequested()` removes the refs from `selectHydratableOpenSessionRefs` during the same render cycle
 - a zero-result `/api/sessions/resolve` response marks the key unresolved and does **not** immediately repost on rerender or unrelated local state changes
 - a delayed-index case: first resolve returns zero projects, then a later **server-driven** catalog update re-arms the same key and a second resolve merges it successfully
 - a copied remote tab with `sessionRef.serverInstanceId = 'srv-remote'` and local `serverInstanceId = 'srv-local'` never calls `/api/sessions/resolve`
+- the success-path request does not leave keys stuck in `openTabHydration.inFlight` after the promise resolves
 
 Mock heavy children (`TabContent`, `HistoryView`, etc.) but keep the real store and `App`.
 
@@ -435,7 +438,7 @@ npx vitest run test/unit/client/store/selectors/openSessionSelectors.test.ts tes
 
 Expected: FAIL because the selectors/effect and durable request state do not exist yet.
 
-**Step 3: Implement the selectors and hydration effect**
+**Step 3: Implement the selectors and snapshot-based hydration orchestration**
 
 Create `src/store/selectors/openSessionSelectors.ts` with stable memoized selectors built on the new locator helper:
 
@@ -485,22 +488,55 @@ export const selectHydratableOpenSessionRefs = createSelector(
 )
 ```
 
-In `src/App.tsx`, replace the original `lastLoadedAt`-based idea with a request-state-driven effect:
+In `src/App.tsx`, do **not** fire `resolveSessions()` directly from the same effect that reads `selectHydratableOpenSessionRefs`, because dispatching `markOpenTabHydrationRequested()` will immediately remove those refs from the selector and trigger cleanup of that effect.
+
+Instead, add a snapshotted local request state:
+
+```typescript
+type OpenTabHydrationRequest = {
+  requestKey: string
+  requestedKeys: string[]
+  refs: Array<{ provider: CodingCliProviderName; sessionId: string }>
+}
+```
+
+Then use two effects:
+
+1. a **queueing** effect that snapshots the current selector output into local component state and marks Redux `inFlight`
+2. a **runner** effect that performs `resolveSessions()` from the stable local snapshot, so selector changes during the in-flight window do not cancel the request
+
+Sketch:
 
 ```typescript
 const hydratableOpenSessionRefs = useAppSelector(selectHydratableOpenSessionRefs)
+const [activeOpenTabHydrationRequest, setActiveOpenTabHydrationRequest] =
+  useState<OpenTabHydrationRequest | null>(null)
 
 useEffect(() => {
-  if (hydratableOpenSessionRefs.length === 0) return
+  if (activeOpenTabHydrationRequest || hydratableOpenSessionRefs.length === 0) return
 
   const requestedKeys = hydratableOpenSessionRefs
     .map((ref) => `${ref.provider}:${ref.sessionId}`)
     .sort()
+  const requestKey = requestedKeys.join('|')
+
+  const request = {
+    requestKey,
+    requestedKeys,
+    refs: hydratableOpenSessionRefs,
+  }
 
   dispatch(markOpenTabHydrationRequested({ sessionKeys: requestedKeys }))
+  setActiveOpenTabHydrationRequest(request)
+}, [dispatch, hydratableOpenSessionRefs, activeOpenTabHydrationRequest])
+
+useEffect(() => {
+  if (!activeOpenTabHydrationRequest) return
 
   let cancelled = false
-  void resolveSessions(hydratableOpenSessionRefs)
+  const { requestedKeys, refs, requestKey } = activeOpenTabHydrationRequest
+
+  void resolveSessions(refs)
     .then((response) => {
       if (cancelled) return
 
@@ -519,9 +555,15 @@ useEffect(() => {
       log.warn('Failed to resolve open-tab sessions', err)
       dispatch(clearOpenTabHydrationRequest({ sessionKeys: requestedKeys }))
     })
+    .finally(() => {
+      if (cancelled) return
+      setActiveOpenTabHydrationRequest((current) =>
+        current?.requestKey === requestKey ? null : current
+      )
+    })
 
   return () => { cancelled = true }
-}, [dispatch, hydratableOpenSessionRefs])
+}, [dispatch, activeOpenTabHydrationRequest?.requestKey])
 ```
 
 Key guardrails:
@@ -529,6 +571,8 @@ Key guardrails:
 - do not run for copied remote tabs whose explicit `sessionRef.serverInstanceId` points at another server
 - do not guess that a locator with explicit `serverInstanceId` is local before `state.connection.serverInstanceId` is known
 - do not dispatch placeholder sidebar rows before the canonical payload arrives
+- marking keys `inFlight` must not cancel the request that just claimed them
+- the runner effect must settle or clear the exact snapshotted `requestedKeys` even after `selectHydratableOpenSessionRefs` becomes empty
 - a zero-result resolve must park the key on the current `serverCatalogRevision`
 - only a later **server-driven** catalog update should make the unresolved key eligible again; `mergeResolvedProjects()` alone must not do that
 
