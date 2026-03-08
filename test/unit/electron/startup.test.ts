@@ -3,9 +3,16 @@ import { runStartup, type StartupContext, type BrowserWindowLike } from '../../.
 import type { DesktopConfig } from '../../../electron/types.js'
 
 function createMockWindow(): BrowserWindowLike {
+  let visible = false
+  let focused = false
   return {
     loadURL: vi.fn().mockResolvedValue(undefined),
-    show: vi.fn(),
+    show: vi.fn().mockImplementation(() => { visible = true }),
+    hide: vi.fn().mockImplementation(() => { visible = false; focused = false }),
+    focus: vi.fn().mockImplementation(() => { focused = true }),
+    maximize: vi.fn(),
+    isVisible: vi.fn().mockImplementation(() => visible),
+    isFocused: vi.fn().mockImplementation(() => focused),
     on: vi.fn(),
   }
 }
@@ -211,6 +218,68 @@ describe('runStartup', () => {
     expect(ctx.hotkeyManager.register).toHaveBeenCalledWith('CommandOrControl+`', expect.any(Function))
   })
 
+  describe('hotkey quake-style toggle', () => {
+    it('shows and focuses window when hidden', async () => {
+      const mockWindow = createMockWindow()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+      })
+      const result = await runStartup(ctx)
+      expect(result.type).toBe('main')
+
+      // Get the hotkey callback
+      const registerCall = (ctx.hotkeyManager.register as ReturnType<typeof vi.fn>).mock.calls[0]
+      const hotkeyCallback = registerCall[1] as () => void
+
+      // Window starts visible+focused after show() in startup, so hide it first
+      mockWindow.hide()
+      ;(mockWindow.isVisible as ReturnType<typeof vi.fn>).mockReturnValue(false)
+      ;(mockWindow.isFocused as ReturnType<typeof vi.fn>).mockReturnValue(false)
+
+      // Trigger hotkey -- should show + focus
+      hotkeyCallback()
+      expect(mockWindow.show).toHaveBeenCalled()
+      expect(mockWindow.focus).toHaveBeenCalled()
+    })
+
+    it('hides window when visible and focused', async () => {
+      const mockWindow = createMockWindow()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+      })
+      await runStartup(ctx)
+
+      const registerCall = (ctx.hotkeyManager.register as ReturnType<typeof vi.fn>).mock.calls[0]
+      const hotkeyCallback = registerCall[1] as () => void
+
+      // Window is visible and focused
+      ;(mockWindow.isVisible as ReturnType<typeof vi.fn>).mockReturnValue(true)
+      ;(mockWindow.isFocused as ReturnType<typeof vi.fn>).mockReturnValue(true)
+
+      hotkeyCallback()
+      expect(mockWindow.hide).toHaveBeenCalled()
+    })
+
+    it('shows and focuses window when visible but not focused', async () => {
+      const mockWindow = createMockWindow()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+      })
+      await runStartup(ctx)
+
+      const registerCall = (ctx.hotkeyManager.register as ReturnType<typeof vi.fn>).mock.calls[0]
+      const hotkeyCallback = registerCall[1] as () => void
+
+      // Window is visible but NOT focused (e.g. behind another window)
+      ;(mockWindow.isVisible as ReturnType<typeof vi.fn>).mockReturnValue(true)
+      ;(mockWindow.isFocused as ReturnType<typeof vi.fn>).mockReturnValue(false)
+
+      hotkeyCallback()
+      expect(mockWindow.show).toHaveBeenCalled()
+      expect(mockWindow.focus).toHaveBeenCalled()
+    })
+  })
+
   it('creates tray', async () => {
     const ctx = createDefaultContext()
     await runStartup(ctx)
@@ -224,6 +293,34 @@ describe('runStartup', () => {
     expect(ctx.createBrowserWindow).toHaveBeenCalledWith(
       expect.objectContaining({ width: 1200, height: 800 }),
     )
+  })
+
+  it('maximizes window when window state has maximized=true', async () => {
+    const mockWindow = createMockWindow()
+    const ctx = createDefaultContext({
+      windowStatePersistence: {
+        load: vi.fn().mockResolvedValue({ width: 1200, height: 800, maximized: true }),
+        save: vi.fn().mockResolvedValue(undefined),
+      },
+      createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+    })
+
+    await runStartup(ctx)
+    expect(mockWindow.maximize).toHaveBeenCalled()
+  })
+
+  it('does not maximize window when window state has maximized=false', async () => {
+    const mockWindow = createMockWindow()
+    const ctx = createDefaultContext({
+      windowStatePersistence: {
+        load: vi.fn().mockResolvedValue({ width: 1200, height: 800, maximized: false }),
+        save: vi.fn().mockResolvedValue(undefined),
+      },
+      createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+    })
+
+    await runStartup(ctx)
+    expect(mockWindow.maximize).not.toHaveBeenCalled()
   })
 
   it('creates BrowserWindow and loads server URL', async () => {

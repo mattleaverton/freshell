@@ -4,6 +4,7 @@ import os from 'os'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import type { DaemonManager, DaemonPaths, DaemonStatus } from './daemon-manager.js'
+import { resolveTemplatePath } from './template-path.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -13,10 +14,6 @@ const PLIST_FILENAME = `${SERVICE_LABEL}.plist`
 
 function getPlistPath(): string {
   return path.join(os.homedir(), 'Library', 'LaunchAgents', PLIST_FILENAME)
-}
-
-function getTemplatePath(): string {
-  return path.join(__dirname, '..', '..', 'installers', 'launchd', 'com.freshell.server.plist.template')
 }
 
 function execFilePromise(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -33,9 +30,19 @@ function execFilePromise(cmd: string, args: string[]): Promise<{ stdout: string;
 
 export class LaunchdDaemonManager implements DaemonManager {
   readonly platform = 'darwin' as const
+  private readonly resourcesPath?: string
+
+  constructor(resourcesPath?: string) {
+    this.resourcesPath = resourcesPath
+  }
 
   async install(paths: DaemonPaths, port: number): Promise<void> {
-    const template = await fsp.readFile(getTemplatePath(), 'utf-8')
+    const templatePath = resolveTemplatePath(
+      ['launchd', 'com.freshell.server.plist.template'],
+      __dirname,
+      this.resourcesPath,
+    )
+    const template = await fsp.readFile(templatePath, 'utf-8')
 
     const nodePath = [paths.nativeModules, paths.serverNodeModules].join(':')
 

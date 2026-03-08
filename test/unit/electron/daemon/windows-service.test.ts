@@ -34,10 +34,10 @@ const testPaths: DaemonPaths = {
 const TEMPLATE_CONTENT = `<?xml version="1.0"?>
 <Task>
   <Actions><Exec>
-    <Command>{{NODE_BINARY}}</Command>
-    <Arguments>{{SERVER_ENTRY}}</Arguments>
+    <Command>cmd.exe</Command>
+    <Arguments>/c "set "NODE_PATH={{NODE_PATH}}" &amp;&amp; set "NODE_ENV=production" &amp;&amp; set "PORT={{PORT}}" &amp;&amp; set "FRESHELL_CONFIG_DIR={{CONFIG_DIR}}" &amp;&amp; "{{NODE_BINARY}}" "{{SERVER_ENTRY}}""</Arguments>
+    <WorkingDirectory>{{CONFIG_DIR}}</WorkingDirectory>
   </Exec></Actions>
-  <!-- NODE_PATH={{NODE_PATH}} PORT={{PORT}} CONFIG_DIR={{CONFIG_DIR}} LOG_DIR={{LOG_DIR}} -->
 </Task>`
 
 function setupExecFileSuccess(stdout = '') {
@@ -100,6 +100,23 @@ describe('WindowsServiceDaemonManager', () => {
       expect(writtenContent).toContain(
         'C:\\App\\resources\\bundled-node\\native-modules;C:\\App\\resources\\server-node-modules'
       )
+    })
+
+    it('uses cmd.exe wrapper to set environment variables (Task Scheduler has no Environment support)', async () => {
+      setupExecFileSuccess()
+      await manager.install(testPaths, 3001)
+
+      const writtenContent = mockWriteFile.mock.calls[0][1] as string
+      // Command must be cmd.exe, not the node binary directly
+      expect(writtenContent).toContain('<Command>cmd.exe</Command>')
+      // Arguments must contain set commands for NODE_PATH, NODE_ENV, PORT, and FRESHELL_CONFIG_DIR
+      expect(writtenContent).toContain('set "NODE_PATH=')
+      expect(writtenContent).toContain('set "NODE_ENV=production"')
+      expect(writtenContent).toContain('set "PORT=3001"')
+      expect(writtenContent).toContain('set "FRESHELL_CONFIG_DIR=')
+      // The node binary and server entry must appear in the arguments, not as the Command
+      expect(writtenContent).toContain(testPaths.nodeBinary)
+      expect(writtenContent).toContain(testPaths.serverEntry)
     })
 
     it('is idempotent (/F flag overwrites existing task)', async () => {
@@ -178,6 +195,36 @@ describe('WindowsServiceDaemonManager', () => {
       expect(killCall![1]).toContain('42')
       // Ensure it does NOT use /IM node.exe (which would kill ALL node processes)
       expect(killCall![1]).not.toContain('/IM')
+    })
+
+    it('constructs WMIC LIKE clause with correct quoting (% wildcards inside quotes)', async () => {
+      // First install to set the nodeBinaryPath
+      setupExecFileSuccess()
+      await manager.install(testPaths, 3001)
+
+      // Configure wmic to return a PID
+      mockExecFile.mockImplementation((cmd: string, _args: string[], callback: Function) => {
+        if (cmd === 'wmic') {
+          callback(null, 'ProcessId=99\r\n', '')
+        } else {
+          callback(null, '', '')
+        }
+      })
+
+      await manager.stop()
+
+      const wmicCall = mockExecFile.mock.calls.find(
+        (call: any[]) => call[0] === 'wmic'
+      )
+      expect(wmicCall).toBeDefined()
+
+      // The WMIC where clause is the 3rd argument (index 2)
+      const whereClause = wmicCall![1][2] as string
+      // The LIKE pattern must have % wildcards INSIDE the quotes: like '%...%'
+      // NOT like '%...'% (which is a syntax error)
+      expect(whereClause).toMatch(/like '%[^']+%'/)
+      // Ensure it does NOT end with '%  (% outside quotes)
+      expect(whereClause).not.toMatch(/'%$/)
     })
 
     it('falls back to schtasks /End if wmic fails', async () => {

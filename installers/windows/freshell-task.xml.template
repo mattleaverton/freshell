@@ -22,19 +22,13 @@
     <AllowStartOnDemand>true</AllowStartOnDemand>
   </Settings>
   <Actions>
+    <!-- Windows Task Scheduler does not support <Environment> elements.
+         We use cmd.exe /c with inline "set" commands to inject the required
+         environment variables before starting the Node.js server process. -->
     <Exec>
-      <Command>{{NODE_BINARY}}</Command>
-      <Arguments>{{SERVER_ENTRY}}</Arguments>
+      <Command>cmd.exe</Command>
+      <Arguments>/c "set "NODE_PATH={{NODE_PATH}}" &amp;&amp; set "NODE_ENV=production" &amp;&amp; set "PORT={{PORT}}" &amp;&amp; set "FRESHELL_CONFIG_DIR={{CONFIG_DIR}}" &amp;&amp; "{{NODE_BINARY}}" "{{SERVER_ENTRY}}""</Arguments>
       <WorkingDirectory>{{CONFIG_DIR}}</WorkingDirectory>
     </Exec>
   </Actions>
-  <!-- Environment variables are set via the Exec action's environment inheritance.
-       The server spawner and daemon manager set NODE_PATH, PORT, NODE_ENV, and
-       FRESHELL_CONFIG_DIR via the process environment when starting the task.
-       Template placeholders for reference:
-         NODE_PATH={{NODE_PATH}}
-         PORT={{PORT}}
-         CONFIG_DIR={{CONFIG_DIR}}
-         LOG_DIR={{LOG_DIR}}
-  -->
 </Task>

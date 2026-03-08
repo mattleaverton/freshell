@@ -9,6 +9,11 @@ import type { UpdateManager } from './updater.js'
 export interface BrowserWindowLike {
   loadURL(url: string): Promise<void>
   show(): void
+  hide(): void
+  focus(): void
+  maximize(): void
+  isVisible(): boolean
+  isFocused(): boolean
   on(event: string, callback: (...args: any[]) => void): void
 }
 
@@ -137,12 +142,17 @@ export async function runStartup(ctx: StartupContext): Promise<StartupResult> {
   window.show()
 
   if (windowState.maximized) {
-    // Caller handles maximize
+    window.maximize()
   }
 
-  // 4. Register global hotkey
+  // 4. Register global hotkey (quake-style toggle)
   ctx.hotkeyManager.register(desktopConfig.globalHotkey, () => {
-    // Quake-style toggle - caller handles visibility logic
+    if (window.isVisible() && window.isFocused()) {
+      window.hide()
+    } else {
+      window.show()
+      window.focus()
+    }
   })
 
   // 5. Create system tray

@@ -54,6 +54,11 @@ extraResources:
     to: server-node-modules
     filter:
       - "**/*"
+  # Installer templates (daemon service definitions for launchd/systemd/Windows Task Scheduler)
+  - from: installers
+    to: installers
+    filter:
+      - "**/*"
 
 mac:
   category: public.app-category.developer-tools

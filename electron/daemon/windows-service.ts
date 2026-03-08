@@ -4,15 +4,12 @@ import os from 'os'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import type { DaemonManager, DaemonPaths, DaemonStatus } from './daemon-manager.js'
+import { resolveTemplatePath } from './template-path.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 const TASK_NAME = 'Freshell Server'
-
-function getTemplatePath(): string {
-  return path.join(__dirname, '..', '..', 'installers', 'windows', 'freshell-task.xml.template')
-}
 
 function getTaskXmlPath(): string {
   return path.join(os.homedir(), '.freshell', 'freshell-task.xml')
@@ -33,11 +30,21 @@ function execFilePromise(cmd: string, args: string[]): Promise<{ stdout: string;
 export class WindowsServiceDaemonManager implements DaemonManager {
   readonly platform = 'win32' as const
   private nodeBinaryPath?: string
+  private readonly resourcesPath?: string
+
+  constructor(resourcesPath?: string) {
+    this.resourcesPath = resourcesPath
+  }
 
   async install(paths: DaemonPaths, port: number): Promise<void> {
     this.nodeBinaryPath = paths.nodeBinary
 
-    const template = await fsp.readFile(getTemplatePath(), 'utf-8')
+    const templatePath = resolveTemplatePath(
+      ['windows', 'freshell-task.xml.template'],
+      __dirname,
+      this.resourcesPath,
+    )
+    const template = await fsp.readFile(templatePath, 'utf-8')
     const nodePath = [paths.nativeModules, paths.serverNodeModules].join(';')
 
     const content = template
@@ -89,7 +96,7 @@ export class WindowsServiceDaemonManager implements DaemonManager {
     try {
       const { stdout } = await execFilePromise('wmic', [
         'process', 'where',
-        `name='node.exe' and CommandLine like '%${(this.nodeBinaryPath ?? 'freshell').replace(/\\/g, '\\\\')}'%`,
+        `name='node.exe' and CommandLine like '%${(this.nodeBinaryPath ?? 'freshell').replace(/\\/g, '\\\\')}%'`,
         'get', 'ProcessId',
         '/format:list',
       ])
