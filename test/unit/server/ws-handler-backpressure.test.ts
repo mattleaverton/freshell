@@ -302,6 +302,40 @@ describe('WsHandler.sendChunkedSessions drain-aware sending', () => {
     expect(result).toBe(true)
   })
 
+  it('drains before sending when bufferedAmount is already high at start of chunk iteration', async () => {
+    // Reproduces the real crash: on a slow remote connection, each send()
+    // leaves bufferedAmount above DRAIN_THRESHOLD_BYTES (512KB). Without
+    // a pre-send drain check, the buffer accumulates across chunks and
+    // eventually exceeds MAX_WS_BUFFERED_AMOUNT (2MB), killing the connection.
+    const projects = createLargeProjects(100)
+    const chunks = chunkProjects(projects, 500 * 1024)
+    expect(chunks.length).toBeGreaterThanOrEqual(2)
+
+    const ws = createMockWs()
+    // Simulate a slow remote connection: each send leaves bufferedAmount
+    // above the drain threshold (512KB), requiring drain before next send
+    ws.send = vi.fn().mockImplementation(() => {
+      ws.bufferedAmount = 600_000 // above DRAIN_THRESHOLD_BYTES (512KB)
+    })
+
+    const waitForDrainSpy = vi.spyOn(handler as any, 'waitForDrain')
+    waitForDrainSpy.mockImplementation(async () => {
+      // Simulate successful drain: buffer drops below threshold
+      ws.bufferedAmount = 0
+      return true
+    })
+
+    const result = await (handler as any).sendChunkedSessions(ws, projects)
+
+    // Connection must NOT be closed
+    expect(ws.close).not.toHaveBeenCalled()
+    // All chunks should be sent
+    expect(ws.send).toHaveBeenCalledTimes(chunks.length)
+    expect(result).toBe(true)
+    // waitForDrain should be called before sending chunks 2..N
+    expect(waitForDrainSpy).toHaveBeenCalledTimes(chunks.length - 1)
+  })
+
   it('returns false when connection closes mid-send', async () => {
     const projects = createLargeProjects(100)
     const chunks = chunkProjects(projects, 500 * 1024)
@@ -363,6 +397,33 @@ describe('WsHandler.sendChunkedSessions drain-aware sending', () => {
 
     const result = await (handler as any).sendChunkedSessions(ws, projects)
     expect(result).toBe(false)
+  })
+
+  it('returns false without sending another chunk when superseded during the fast-path yield', async () => {
+    const projects = createLargeProjects(100)
+    const chunks = chunkProjects(projects, 500 * 1024)
+    expect(chunks.length).toBeGreaterThanOrEqual(2)
+
+    const ws = createMockWs({ bufferedAmount: 0 })
+    ws.send = vi.fn()
+
+    const originalSetImmediate = global.setImmediate
+    const setImmediateSpy = vi.spyOn(global, 'setImmediate').mockImplementation(((fn: (...args: any[]) => void, ...args: any[]) => {
+      return originalSetImmediate(((...inner: any[]) => {
+        if (ws.send.mock.calls.length === 1) {
+          ws.sessionUpdateGeneration = (ws.sessionUpdateGeneration || 0) + 1
+        }
+        fn(...inner)
+      }) as any, ...args)
+    }) as typeof setImmediate)
+
+    try {
+      const result = await (handler as any).sendChunkedSessions(ws, projects)
+      expect(result).toBe(false)
+      expect(ws.send).toHaveBeenCalledTimes(1)
+    } finally {
+      setImmediateSpy.mockRestore()
+    }
   })
 })
 
@@ -623,10 +684,13 @@ describe('WsHandler integration: chunked handshake snapshot delivery', () => {
       expect(types).toContain('settings.updated')
       expect(types).toContain('sessions.updated')
 
-      // All session projects should have arrived across all chunks
+      // All sessions should have arrived across all chunks (projects may be split)
       const sessionMsgs = messages.filter((m) => m.type === 'sessions.updated')
-      const allProjects = sessionMsgs.flatMap((m) => m.projects)
-      expect(allProjects.length).toBe(20)
+      const allEntries = sessionMsgs.flatMap((m) => m.projects)
+      const uniquePaths = new Set(allEntries.map((p: any) => p.projectPath))
+      expect(uniquePaths.size).toBe(20)
+      const totalSessions = allEntries.reduce((sum: number, p: any) => sum + p.sessions.length, 0)
+      expect(totalSessions).toBe(100) // 20 projects × 5 sessions
 
       ws.terminate()
     } finally {

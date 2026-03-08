@@ -492,8 +492,9 @@ export default function App() {
               chunkedBuffer.push(...projects)
               scheduleChunkedFlush()
             } else {
-              // Append without a prior clear (shouldn't happen, but handle gracefully)
-              dispatch(mergeProjects(projects))
+              // Append after the flush window can still occur on slow links.
+              // Merge like a partial snapshot so split projects keep earlier sessions.
+              dispatch(mergeSnapshotProjects(projects))
               dispatch(markWsSnapshotReceived())
             }
           } else {

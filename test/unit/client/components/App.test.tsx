@@ -833,6 +833,56 @@ describe('App WS message handling', () => {
     vi.useRealTimers()
   })
 
+  it('merges a late append chunk into the same split project after the flush timer', async () => {
+    vi.useFakeTimers()
+    let handler: ((msg: any) => void) | null = null
+    mockOnMessage.mockImplementation((cb: (msg: any) => void) => {
+      handler = cb
+      return () => { handler = null }
+    })
+
+    const store = createTestStore()
+    renderApp(store)
+
+    await vi.waitFor(() => expect(handler).not.toBeNull())
+
+    act(() => {
+      handler!({
+        type: 'sessions.updated',
+        clear: true,
+        projects: [{
+          projectPath: '/split/project',
+          sessions: [
+            { provider: 'claude', sessionId: 's1', updatedAt: 1 },
+            { provider: 'claude', sessionId: 's2', updatedAt: 2 },
+          ],
+        }],
+      })
+    })
+
+    act(() => { vi.advanceTimersByTime(300) })
+
+    expect(store.getState().sessions.projects[0].sessions.map((s: any) => s.sessionId)).toEqual(['s1', 's2'])
+
+    act(() => {
+      handler!({
+        type: 'sessions.updated',
+        append: true,
+        projects: [{
+          projectPath: '/split/project',
+          sessions: [
+            { provider: 'claude', sessionId: 's3', updatedAt: 3 },
+          ],
+        }],
+      })
+    })
+
+    expect(store.getState().sessions.projects).toHaveLength(1)
+    expect(store.getState().sessions.projects[0].sessions.map((s: any) => s.sessionId)).toEqual(['s3', 's1', 's2'])
+
+    vi.useRealTimers()
+  })
+
   it('ignores sessions.patch messages until a WS sessions.updated snapshot is received', async () => {
     let handler: ((msg: any) => void) | null = null
     mockOnMessage.mockImplementation((cb: (msg: any) => void) => {

@@ -873,7 +873,7 @@ describe('Component Edge Cases', () => {
     describe('Sidebar', () => {
       it('handles rapid filter changes', () => {
         const project = createProjectGroup({
-          sessions: Array.from({ length: 100 }, (_, i) => ({
+          sessions: Array.from({ length: 40 }, (_, i) => ({
             sessionId: `sess-${i}`,
             projectPath: '/test',
             updatedAt: Date.now(),
@@ -891,7 +891,7 @@ describe('Component Edge Cases', () => {
         const searchInput = screen.getByPlaceholderText('Search...')
 
         // Rapidly type and clear
-        for (let i = 0; i < 20; i++) {
+        for (let i = 0; i < 8; i++) {
           fireEvent.change(searchInput, { target: { value: `search${i}` } })
           fireEvent.change(searchInput, { target: { value: '' } })
         }

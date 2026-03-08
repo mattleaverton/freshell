@@ -1,5 +1,17 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
+
+// Render Markdown synchronously in this suite so wrapper assertions don't rely
+// on React.lazy timing across the full test run.
+vi.mock('@/components/markdown/LazyMarkdown', async () => {
+  const { MarkdownRenderer } = await import('@/components/markdown/MarkdownRenderer')
+  return {
+    LazyMarkdown: ({ content }: { content: string }) => (
+      <MarkdownRenderer content={content} />
+    ),
+  }
+})
+
 import MarkdownPreview from '../../../../../src/components/panes/MarkdownPreview'
 
 afterEach(() => cleanup())
@@ -8,14 +20,12 @@ describe('MarkdownPreview', () => {
   it('renders markdown as HTML', async () => {
     render(<MarkdownPreview content="# Hello World" />)
 
-    await vi.dynamicImportSettled()
     expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('Hello World')
   })
 
   it('renders links', async () => {
     render(<MarkdownPreview content="[Click here](https://example.com)" />)
 
-    await vi.dynamicImportSettled()
     const link = await screen.findByRole('link', { name: /click here/i })
     expect(link).toHaveAttribute('href', 'https://example.com')
   })
@@ -29,7 +39,6 @@ const x = 1
       />
     )
 
-    await vi.dynamicImportSettled()
     // Syntax highlighting splits code into multiple <span> elements for tokens,
     // so we find the <code> element and check its text content.
     const codeEl = await screen.findByText((_content, element) => {
@@ -72,7 +81,6 @@ const x = 1
       />
     )
 
-    await vi.dynamicImportSettled()
     expect(await screen.findByRole('table')).toBeInTheDocument()
   })
 

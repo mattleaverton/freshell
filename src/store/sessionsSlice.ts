@@ -1,9 +1,16 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit'
 import type { ProjectGroup } from './types'
 
+function sessionKey(s: any): string {
+  return `${s.provider || 'claude'}:${s.sessionId}`
+}
+
 function normalizeProjects(payload: unknown): ProjectGroup[] {
   if (!Array.isArray(payload)) return []
-  const out: ProjectGroup[] = []
+  // Use a Map to merge entries that share a projectPath (happens when the
+  // server splits an oversized project across multiple WebSocket chunks).
+  const merged = new Map<string, ProjectGroup>()
+  const seenSessions = new Map<string, Set<string>>()
   for (const raw of payload as any[]) {
     if (!raw || typeof raw !== 'object') continue
     const projectPath = (raw as any).projectPath
@@ -13,9 +20,23 @@ function normalizeProjects(payload: unknown): ProjectGroup[] {
       ? sessionsRaw.filter((s) => !!s && typeof s === 'object' && !Array.isArray(s))
       : []
     const color = typeof (raw as any).color === 'string' ? (raw as any).color : undefined
-    out.push({ projectPath, sessions, ...(color ? { color } : {}) } as ProjectGroup)
+    const existing = merged.get(projectPath)
+    if (existing) {
+      const seen = seenSessions.get(projectPath)!
+      for (const s of sessions) {
+        const key = sessionKey(s)
+        if (!seen.has(key)) {
+          seen.add(key)
+          existing.sessions.push(s)
+        }
+      }
+      if (color && !existing.color) existing.color = color
+    } else {
+      merged.set(projectPath, { projectPath, sessions, ...(color ? { color } : {}) } as ProjectGroup)
+      seenSessions.set(projectPath, new Set(sessions.map(sessionKey)))
+    }
   }
-  return out
+  return Array.from(merged.values())
 }
 
 function projectNewestUpdatedAt(project: ProjectGroup): number {
@@ -123,13 +144,9 @@ export const sessionsSlice = createSlice({
           continue
         }
         // Build a set of session keys present in the incoming snapshot
-        const incomingKeys = new Set(
-          incomingProject.sessions.map((s: any) => `${s.provider || 'claude'}:${s.sessionId}`)
-        )
+        const incomingKeys = new Set(incomingProject.sessions.map(sessionKey))
         // Keep existing sessions that aren't in the incoming snapshot
-        const retained = existing.sessions.filter(
-          (s: any) => !incomingKeys.has(`${s.provider || 'claude'}:${s.sessionId}`)
-        )
+        const retained = existing.sessions.filter((s: any) => !incomingKeys.has(sessionKey(s)))
         existingMap.set(incomingProject.projectPath, {
           ...incomingProject,
           sessions: [...incomingProject.sessions, ...retained],
@@ -188,8 +205,7 @@ export const sessionsSlice = createSlice({
       const existingKeys = new Set<string>()
       for (const project of state.projects) {
         for (const session of project.sessions) {
-          const s = session as any
-          existingKeys.add(`${s.provider}:${s.sessionId}`)
+          existingKeys.add(sessionKey(session))
         }
       }
       // Merge incoming sessions into existing projects, deduplicating
@@ -198,7 +214,7 @@ export const sessionsSlice = createSlice({
         const existing = projectMap.get(project.projectPath)
         if (existing) {
           for (const session of project.sessions) {
-            const key = `${(session as any).provider}:${(session as any).sessionId}`
+            const key = sessionKey(session)
             if (!existingKeys.has(key)) {
               existing.sessions.push(session)
               existingKeys.add(key)
@@ -207,7 +223,7 @@ export const sessionsSlice = createSlice({
         } else {
           // New project — filter out any globally duplicate sessions
           const filtered = project.sessions.filter((s) => {
-            const key = `${(s as any).provider}:${(s as any).sessionId}`
+            const key = sessionKey(s)
             if (existingKeys.has(key)) return false
             existingKeys.add(key)
             return true

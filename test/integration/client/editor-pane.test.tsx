@@ -23,6 +23,17 @@ vi.mock('@monaco-editor/react', () => {
   }
 })
 
+// Render markdown preview synchronously so integration assertions do not
+// depend on React.lazy timing during the full suite.
+vi.mock('@/components/markdown/LazyMarkdown', async () => {
+  const { MarkdownRenderer } = await import('@/components/markdown/MarkdownRenderer')
+  return {
+    LazyMarkdown: ({ content }: { content: string }) => (
+      <MarkdownRenderer content={content} />
+    ),
+  }
+})
+
 // Mock ws-client to avoid WebSocket connections
 const mockSend = vi.fn()
 vi.mock('@/lib/ws-client', () => ({
