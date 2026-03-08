@@ -4,7 +4,7 @@
 
 **Goal:** Fix the pane right-click menu so it does not immediately reclose, and make the terminal context menu start with an iconized `copy` / `Paste` / `Select all` section.
 
-**Architecture:** Do not assume a new pane-activation product rule. First reproduce the reported close race through the real path: `Pane` / `PaneContainer` interaction, Redux `activePane`, `TerminalView` autofocus, and `ContextMenuProvider` dismiss listeners. Then fix the concrete open-transaction dismiss race in `ContextMenuProvider` while preserving existing pane semantics unless the characterization test proves a deeper change is required. For the menu reorder, keep the change in `buildMenuItems()` and keep `menu-defs.ts` as a `.ts` module by constructing icon nodes with `createElement(...)` instead of JSX.
+**Architecture:** Do not assume a new pane-activation or dismissal rule up front. Start with the shared pane-shell path the user described: inactive pane header / shell, real `Pane` -> `PaneContainer` -> Redux `activePane`, and the four `ContextMenuProvider` dismissal signals (`pointerdown`, `scroll`, `resize`, `blur`). Use a regression harness that records which dismissal signal actually fires when the menu disappears, then fix only that signal or the pane-activation/focus path that produces it. After the shared pane path is stable, add the terminal-body regression and the requested terminal-menu reorder. Keep `menu-defs.ts` as a `.ts` module by constructing icon nodes with `createElement(...)` instead of JSX.
 
 **Tech Stack:** React 18, Redux Toolkit, TypeScript, lucide-react, Vitest, Testing Library, xterm.js test mocks
 
@@ -16,52 +16,22 @@
 - Preserve existing terminal item ids: `terminal-copy`, `terminal-paste`, `terminal-select-all`, `terminal-search`.
 - `copy` must be labeled exactly `copy`.
 - Keep current enable/disable behavior for copy, paste, select all, search, refresh, split, resume, and maintenance items.
-- The bug fix must be proven through the actual `ContextMenuProvider` close path and real `TerminalView` focus behavior, not a local `useState` stand-in.
+- The bug fix must first be proven on the shared pane header / pane shell path, not only on terminal content.
+- Add a terminal-body regression after the shared pane path is characterized, because terminal focus may introduce a second close signal.
 - Tests for the bug should assert only the user-visible requirement: the menu stays open on right-click. They should not lock in whether right-click changes the active pane unless that becomes unavoidable for the final fix.
 - Keep `src/components/context-menu/menu-defs.ts` as `.ts`; do not insert JSX into it.
 - No server, WebSocket protocol, persistence, or `docs/index.html` changes are required.
 
-### Task 1: Characterize And Fix The Immediate-Reclose Race
+### Task 1: Characterize The Shared Pane-Shell Failure And Capture The Real Dismiss Signal
 
-**Why:** The reported failure is an interaction race, not a menu-order issue. The plan needs to prove the bug on the real pane/terminal path before making any behavioral change.
+**Why:** The user reported right-clicking “a pane,” and the shared path is the pane shell in `Pane.tsx`, not terminal content. Before changing production behavior, prove the bug on that shared path and capture which dismissal signal actually fires.
 
 **Files:**
-- Modify: `src/components/context-menu/ContextMenuProvider.tsx`
-- Modify: `test/unit/client/components/ContextMenuProvider.test.tsx`
 - Create: `test/e2e/pane-context-menu-flow.test.tsx`
 
-**Step 1: Write the failing tests**
+**Step 1: Write the failing shared-pane regression with a dismiss-signal probe**
 
-Add a deterministic dismiss-listener characterization to `test/unit/client/components/ContextMenuProvider.test.tsx`:
-
-```tsx
-import { act } from '@testing-library/react'
-
-it('ignores blur from the opening transaction but still closes on a later blur', async () => {
-  const user = userEvent.setup()
-
-  renderWithProvider(
-    <div data-context={ContextIds.Terminal} data-tab-id="tab-1" data-pane-id="pane-1">
-      Shell Pane
-    </div>,
-  )
-
-  await user.pointer({ target: screen.getByText('Shell Pane'), keys: '[MouseRight]' })
-  expect(await screen.findByRole('menu')).toBeInTheDocument()
-
-  fireEvent(window, new Event('blur'))
-  expect(screen.getByRole('menu')).toBeInTheDocument()
-
-  await act(async () => {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-  })
-
-  fireEvent(window, new Event('blur'))
-  expect(screen.queryByRole('menu')).toBeNull()
-})
-```
-
-Create `test/e2e/pane-context-menu-flow.test.tsx` and reproduce the user-visible bug through the real terminal path. Reuse the same xterm mock shape used in `test/unit/client/components/TerminalView.lifecycle.test.tsx` so `TerminalView` mounts, registers actions, and runs its autofocus effect:
+Create `test/e2e/pane-context-menu-flow.test.tsx` with a real `PaneContainer` + `ContextMenuProvider` harness and two browser panes so the test goes through the shared pane shell / header path without introducing xterm focus yet:
 
 ```tsx
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -79,57 +49,13 @@ import { ContextMenuProvider } from '@/components/context-menu/ContextMenuProvid
 import { useAppSelector } from '@/store/hooks'
 import type { PaneNode } from '@/store/paneTypes'
 
-const wsMocks = vi.hoisted(() => ({
-  send: vi.fn(),
-  connect: vi.fn().mockResolvedValue(undefined),
-  onMessage: vi.fn().mockReturnValue(() => {}),
-  onReconnect: vi.fn().mockReturnValue(() => {}),
-  setHelloExtensionProvider: vi.fn(),
-}))
-
-vi.mock('@/lib/ws-client', () => ({
-  getWsClient: () => wsMocks,
-}))
-
-vi.mock('@xterm/xterm', () => {
-  class MockTerminal {
-    options: Record<string, unknown> = {}
-    cols = 80
-    rows = 24
-    open = vi.fn()
-    loadAddon = vi.fn()
-    registerLinkProvider = vi.fn(() => ({ dispose: vi.fn() }))
-    write = vi.fn()
-    writeln = vi.fn()
-    clear = vi.fn()
-    reset = vi.fn()
-    dispose = vi.fn()
-    onData = vi.fn()
-    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }))
-    attachCustomKeyEventHandler = vi.fn()
-    getSelection = vi.fn(() => '')
-    selectAll = vi.fn()
-    focus = vi.fn()
-  }
-
-  return { Terminal: MockTerminal }
-})
-
-vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: class {
-    fit = vi.fn()
-  },
-}))
-
-vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
-
 function PaneContainerFromStore({ tabId }: { tabId: string }) {
   const node = useAppSelector((state) => state.panes.layouts[tabId])
   if (!node) return null
   return <PaneContainer tabId={tabId} node={node} />
 }
 
-function createTerminalSplitLayout(): PaneNode {
+function createBrowserSplitLayout(): PaneNode {
   return {
     type: 'split',
     id: 'split-root',
@@ -140,24 +66,20 @@ function createTerminalSplitLayout(): PaneNode {
         type: 'leaf',
         id: 'pane-1',
         content: {
-          kind: 'terminal',
-          createRequestId: 'req-1',
-          terminalId: 'term-1',
-          status: 'running',
-          mode: 'shell',
-          shell: 'system',
+          kind: 'browser',
+          browserInstanceId: 'browser-1',
+          url: 'https://left.example.com',
+          devToolsOpen: false,
         },
       },
       {
         type: 'leaf',
         id: 'pane-2',
         content: {
-          kind: 'terminal',
-          createRequestId: 'req-2',
-          terminalId: 'term-2',
-          status: 'running',
-          mode: 'shell',
-          shell: 'system',
+          kind: 'browser',
+          browserInstanceId: 'browser-2',
+          url: 'https://right.example.com',
+          devToolsOpen: false,
         },
       },
     ],
@@ -218,7 +140,169 @@ function createStore(layout: PaneNode) {
   })
 }
 
-function renderFlow() {
+function createDismissSignalProbe() {
+  const counts = {
+    pointerdown: 0,
+    scroll: 0,
+    resize: 0,
+    blur: 0,
+  }
+
+  const onPointerDown = () => { counts.pointerdown += 1 }
+  const onScroll = () => { counts.scroll += 1 }
+  const onResize = () => { counts.resize += 1 }
+  const onBlur = () => { counts.blur += 1 }
+
+  document.addEventListener('pointerdown', onPointerDown, true)
+  window.addEventListener('scroll', onScroll, true)
+  window.addEventListener('resize', onResize)
+  window.addEventListener('blur', onBlur)
+
+  return {
+    counts,
+    cleanup() {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onResize)
+      window.removeEventListener('blur', onBlur)
+    },
+  }
+}
+
+function renderBrowserFlow() {
+  return render(
+    <Provider store={createStore(createBrowserSplitLayout())}>
+      <ContextMenuProvider
+        view="terminal"
+        onViewChange={() => {}}
+        onToggleSidebar={() => {}}
+        sidebarCollapsed={false}
+      >
+        <PaneContainerFromStore tabId="tab-1" />
+      </ContextMenuProvider>
+    </Provider>,
+  )
+}
+
+it('keeps the pane header context menu open when right-clicking an inactive pane header', async () => {
+  const user = userEvent.setup()
+  const probe = createDismissSignalProbe()
+
+  try {
+    renderBrowserFlow()
+
+    await user.pointer({ target: screen.getByText('right.example.com'), keys: '[MouseRight]' })
+
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    })
+
+    expect(
+      screen.queryByRole('menu'),
+      `menu closed early; dismiss signals=${JSON.stringify(probe.counts)}`,
+    ).toBeInTheDocument()
+  } finally {
+    probe.cleanup()
+  }
+})
+```
+
+**Step 2: Run the shared-pane regression and read the failing signal**
+
+Run:
+
+```bash
+npx vitest run test/e2e/pane-context-menu-flow.test.tsx --testNamePattern="pane header context menu"
+```
+
+Expected: FAIL if the shared pane-shell path reproduces the bug. Use the assertion message’s `dismiss signals=...` payload as the source of truth for the first signal to investigate.
+
+**Step 3: If the shared path already passes, add the terminal-body regression with the same probe**
+
+Extend the same file with a second reproduction that mounts real `TerminalView` panes using the same xterm mocks from `test/unit/client/components/TerminalView.lifecycle.test.tsx`:
+
+```tsx
+const wsMocks = vi.hoisted(() => ({
+  send: vi.fn(),
+  connect: vi.fn().mockResolvedValue(undefined),
+  onMessage: vi.fn().mockReturnValue(() => {}),
+  onReconnect: vi.fn().mockReturnValue(() => {}),
+  setHelloExtensionProvider: vi.fn(),
+}))
+
+vi.mock('@/lib/ws-client', () => ({
+  getWsClient: () => wsMocks,
+}))
+
+vi.mock('@xterm/xterm', () => {
+  class MockTerminal {
+    options: Record<string, unknown> = {}
+    cols = 80
+    rows = 24
+    open = vi.fn()
+    loadAddon = vi.fn()
+    registerLinkProvider = vi.fn(() => ({ dispose: vi.fn() }))
+    write = vi.fn()
+    writeln = vi.fn()
+    clear = vi.fn()
+    reset = vi.fn()
+    dispose = vi.fn()
+    onData = vi.fn()
+    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }))
+    attachCustomKeyEventHandler = vi.fn()
+    getSelection = vi.fn(() => '')
+    selectAll = vi.fn()
+    focus = vi.fn()
+  }
+
+  return { Terminal: MockTerminal }
+})
+
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: class {
+    fit = vi.fn()
+  },
+}))
+
+vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
+
+function createTerminalSplitLayout(): PaneNode {
+  return {
+    type: 'split',
+    id: 'split-root',
+    direction: 'horizontal',
+    sizes: [50, 50],
+    children: [
+      {
+        type: 'leaf',
+        id: 'pane-1',
+        content: {
+          kind: 'terminal',
+          createRequestId: 'req-1',
+          terminalId: 'term-1',
+          status: 'running',
+          mode: 'shell',
+          shell: 'system',
+        },
+      },
+      {
+        type: 'leaf',
+        id: 'pane-2',
+        content: {
+          kind: 'terminal',
+          createRequestId: 'req-2',
+          terminalId: 'term-2',
+          status: 'running',
+          mode: 'shell',
+          shell: 'system',
+        },
+      },
+    ],
+  }
+}
+
+function renderTerminalFlow() {
   return render(
     <Provider store={createStore(createTerminalSplitLayout())}>
       <ContextMenuProvider
@@ -233,123 +317,74 @@ function renderFlow() {
   )
 }
 
-it('keeps the terminal context menu open when right-clicking an inactive terminal pane', async () => {
+it('keeps the terminal body context menu open when right-clicking an inactive terminal pane', async () => {
   const user = userEvent.setup()
+  const probe = createDismissSignalProbe()
 
-  renderFlow()
+  try {
+    renderTerminalFlow()
 
-  const terminalContainers = await screen.findAllByTestId('terminal-xterm-container')
-  await user.pointer({ target: terminalContainers[1], keys: '[MouseRight]' })
+    const terminalContainers = await screen.findAllByTestId('terminal-xterm-container')
+    await user.pointer({ target: terminalContainers[1], keys: '[MouseRight]' })
 
-  await act(async () => {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-  })
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    })
 
-  expect(screen.getByRole('menu')).toBeInTheDocument()
-  expect(screen.getByRole('menuitem', { name: 'Refresh pane' })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('menu'),
+      `menu closed early; dismiss signals=${JSON.stringify(probe.counts)}`,
+    ).toBeInTheDocument()
+  } finally {
+    probe.cleanup()
+  }
 })
 ```
 
-**Step 2: Run tests to verify they fail**
+Run:
+
+```bash
+npx vitest run test/e2e/pane-context-menu-flow.test.tsx
+```
+
+Expected:
+- If the header test fails, treat the shared pane-shell path as the primary bug and fix that first.
+- If the header test passes but the terminal-body test fails, treat the bug as terminal-specific and use that signal payload to choose the fix.
+
+**Step 4: Implement only the fix that matches the observed dismissal signal**
+
+Use the failing test’s `dismiss signals=...` output to choose the production change before touching app code:
+
+- If `pointerdown` fires on the shared pane-shell path, modify `ContextMenuProvider` to ignore only the opening secondary-click sequence or the specific opening target, not all dismissals for a frame.
+- If `blur` fires on the shared pane-shell path, inspect whether pane activation or a focus transfer is producing it and fix that source before touching unrelated dismissals.
+- If `blur` appears only on the terminal-body path, inspect `TerminalView`’s active-pane autofocus path and suppress only the context-menu-opening focus transfer or the matching blur it produces.
+- If `scroll` or `resize` fires, track down the source of that layout change and fix or suppress only that opening-transition event.
+- If none of the four signals fire and the menu still closes, inspect `ContextMenuProvider` cleanup/unmount paths before editing dismissal listeners.
+
+After the signal is known, add the narrowest possible unit coverage in `test/unit/client/components/ContextMenuProvider.test.tsx` or the relevant component test file. Examples:
+
+- `pointerdown` fix: “opening right-click does not dismiss, but a later outside left-click still does”.
+- shared `blur` fix: “pane-open transition blur does not dismiss, but a later real blur still does”.
+- terminal-focus fix: “activating an inactive terminal while its menu opens does not dismiss the menu”.
+
+Do not apply a global one-frame suppression to `pointerdown`, `scroll`, `resize`, and `blur` together.
+
+**Step 5: Run the focused reproduction again and commit**
 
 Run:
 
 ```bash
-npx vitest run test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/pane-context-menu-flow.test.tsx
-```
-
-Expected: FAIL because `ContextMenuProvider` currently arms its dismiss listeners immediately, so a blur fired during the same open transaction can close the menu before the user can act.
-
-**Step 3: Write minimal implementation**
-
-Update `src/components/context-menu/ContextMenuProvider.tsx` to arm dismiss listeners one animation frame after the menu opens:
-
-```tsx
-const dismissListenersArmedRef = useRef(false)
-const dismissArmFrameRef = useRef<number | null>(null)
-
-const openMenu = useCallback((state: MenuState) => {
-  previousFocusRef.current = document.activeElement as HTMLElement | null
-  dismissListenersArmedRef.current = false
-  if (dismissArmFrameRef.current !== null) {
-    cancelAnimationFrame(dismissArmFrameRef.current)
-    dismissArmFrameRef.current = null
-  }
-  setMenuState(state)
-}, [])
-```
-
-Inside the `useEffect` that currently starts at the `if (!menuState) return` guard:
-
-```tsx
-useEffect(() => {
-  if (!menuState) return
-
-  dismissListenersArmedRef.current = false
-  dismissArmFrameRef.current = requestAnimationFrame(() => {
-    dismissListenersArmedRef.current = true
-    dismissArmFrameRef.current = null
-  })
-
-  const handlePointerDown = (e: MouseEvent) => {
-    if (!dismissListenersArmedRef.current) return
-    const target = e.target as Node
-    if (menuRef.current && menuRef.current.contains(target)) return
-    closeMenu()
-  }
-
-  const handleScroll = () => {
-    if (!dismissListenersArmedRef.current) return
-    closeMenu()
-  }
-
-  const handleResize = () => {
-    if (!dismissListenersArmedRef.current) return
-    closeMenu()
-  }
-
-  const handleBlur = () => {
-    if (!dismissListenersArmedRef.current) return
-    closeMenu()
-  }
-
-  document.addEventListener('pointerdown', handlePointerDown, true)
-  window.addEventListener('scroll', handleScroll, true)
-  window.addEventListener('resize', handleResize)
-  window.addEventListener('blur', handleBlur)
-
-  return () => {
-    if (dismissArmFrameRef.current !== null) {
-      cancelAnimationFrame(dismissArmFrameRef.current)
-      dismissArmFrameRef.current = null
-    }
-    dismissListenersArmedRef.current = false
-    document.removeEventListener('pointerdown', handlePointerDown, true)
-    window.removeEventListener('scroll', handleScroll, true)
-    window.removeEventListener('resize', handleResize)
-    window.removeEventListener('blur', handleBlur)
-  }
-}, [menuState, closeMenu])
-```
-
-Do not start by changing `Pane.tsx`. If the real characterization still fails after this provider-level guard, inspect which close signal is still firing and narrow the fix there before changing pane activation semantics.
-
-**Step 4: Run tests to verify they pass**
-
-Run:
-
-```bash
-npx vitest run test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/pane-context-menu-flow.test.tsx
+npx vitest run test/e2e/pane-context-menu-flow.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx
 ```
 
 Expected: PASS.
 
-**Step 5: Commit**
+Commit:
 
 ```bash
-git add src/components/context-menu/ContextMenuProvider.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/pane-context-menu-flow.test.tsx
-git commit -m "fix(context-menu): prevent immediate dismiss after open"
+git add src/components/context-menu/ContextMenuProvider.tsx src/components/panes/Pane.tsx src/components/TerminalView.tsx test/e2e/pane-context-menu-flow.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx
+git commit -m "fix(context-menu): stop pane menu from reclosing"
 ```
 
 ### Task 2: Reorder Terminal Clipboard Actions And Add Icons
@@ -422,7 +457,7 @@ import { within } from '@testing-library/react'
 it('renders copy, Paste, and Select all as the first iconized section of the terminal menu', async () => {
   const user = userEvent.setup()
 
-  renderFlow()
+  renderTerminalFlow()
 
   const terminalContainers = await screen.findAllByTestId('terminal-xterm-container')
   await user.pointer({ target: terminalContainers[1], keys: '[MouseRight]' })
@@ -564,9 +599,10 @@ Expected: the worktree app is reachable on port `3344`.
 
 **Step 4: Manually verify the behavior**
 
+- Right-click an inactive non-terminal pane header.
+- Confirm the pane context menu stays open instead of flashing closed.
 - Right-click an inactive terminal pane body.
 - Confirm the menu stays open instead of flashing closed.
-- Repeat on the pane header if that path was previously affected.
 - Confirm the first section is `copy`, `Paste`, `Select all`.
 - Confirm each of those three rows renders an icon.
 - Confirm menu actions still target the clicked pane, not some other pane.
