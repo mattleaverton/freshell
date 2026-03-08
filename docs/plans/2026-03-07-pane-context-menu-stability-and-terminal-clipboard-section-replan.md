@@ -4,7 +4,7 @@
 
 **Goal:** Keep pane right-click menus open instead of immediately reclosing, and move terminal `copy` / `Paste` / `Select all` into their own iconized top section with `copy` labeled exactly `copy`.
 
-**Architecture:** Treat this as two contracts. First, lock down the terminal clipboard section at the menu-definition layer plus one rendered DOM smoke so order, label, icons, disabled state, and handler wiring are explicit. Second, characterize the menu-close bug through the real `PaneLayout` routes that exist today: pane shell on browser panes, pane shell on terminal panes, and terminal body on terminal panes. Use the smallest production change that turns a reproduced route green, but keep a real-browser worktree spot-check as an explicit verification gate because the suspected interaction spans native `contextmenu`, capture-phase dismissal, pane activation, and terminal refocus timing.
+**Architecture:** Treat this as two contracts. First, lock down the terminal clipboard section at the menu-definition layer plus one rendered DOM smoke so order, label, icons, disabled state, and handler wiring are explicit. Second, characterize the menu-close bug through the real `PaneLayout` routes that exist today: pane shell on browser panes, pane shell on terminal panes, and terminal body on terminal panes. Use the smallest production change that turns a reproduced automated route green. Keep any live-browser spot-check outside the execution path as an optional human follow-up with corrected worktree startup commands; the implementation subagent's acceptance gate must stay fully automatable.
 
 **Tech Stack:** React 18, TypeScript, Redux Toolkit, lucide-react, Vitest, Testing Library, Vite dev server, xterm.js mocks
 
@@ -17,7 +17,7 @@
 - Preserve existing terminal action ids: `terminal-copy`, `terminal-paste`, `terminal-select-all`, `terminal-search`.
 - `ContextMenu` already renders `item.icon`, so the clipboard-icon change should stay in `menu-defs.ts` unless a failing rendered test proves otherwise.
 - Terminal-body coverage must target a descendant appended inside `data-testid="terminal-xterm-container"` by the test xterm mock. Right-clicking only the wrapper div does not count as terminal-body coverage.
-- Automated tests are the primary regression proof, but they are not the only proof. If jsdom stays green while the real browser still flashes the menu closed, follow the browser evidence and refine the automated harness before changing production code.
+- Automated tests are the required regression proof for trycycle execution. If the first jsdom route matrix stays green, do not pivot to a mandatory browser-only check; instead tighten the automated harness with code-grounded diagnostics until a faithful route goes red. A live-browser check may be documented separately, but it is not an execution gate.
 
 ### Task 1: Lock Down The Terminal Clipboard Section Contract
 
@@ -417,45 +417,24 @@ npx vitest run test/e2e/pane-context-menu-stability.test.tsx --reporter=dot
 
 Expected: ideally at least one route fails on current code by closing the menu before the post-open settle window ends.
 
-**Step 3: If the suite stays green, reproduce in a real browser from the worktree before touching production code**
+**Step 3: If the suite stays green, tighten the automated repro before touching production code**
 
-If Step 2 does not go red, do not guess the cause from jsdom alone. Start an isolated worktree dev server on unique ports:
+If Step 2 does not go red, do not guess and do not switch to a mandatory manual browser step. Stay inside `test/e2e/pane-context-menu-stability.test.tsx` and, if needed, `test/unit/client/components/ContextMenuProvider.test.tsx`, and make the automated harness more faithful to the current code paths:
 
-```bash
-PORT=3344 VITE_PORT=3345 npm run dev:server > /tmp/freshell-3344-server.log 2>&1 & echo $! > /tmp/freshell-3344-server.pid
-PORT=3344 VITE_PORT=3345 npm run dev:client -- --host 127.0.0.1 > /tmp/freshell-3345-client.log 2>&1 & echo $! > /tmp/freshell-3345-client.pid
-```
+- Keep each inactive-pane case honest: assert `store.getState().panes.activePane['tab-1'] === 'pane-1'` before the right-click and target `pane-2`.
+- Add temporary diagnostics around the most likely failing route only:
+  - Record `store.getState().panes.activePane['tab-1']` before and after the right-click to see whether the route activates the pane on secondary click.
+  - Compare `terminalInstances[index].focus.mock.calls.length` before and after the right-click to see whether terminal refocus is involved.
+  - If needed, extend `waitForMenuToSettle()` by one more animation frame or add a `waitFor(...)` around disappearance so the test can observe a flash-close, not just the final steady state.
+- If the top-level route matrix still stays green, add one narrower characterization test at the actual suspected seam before touching production code:
+  - `src/components/panes/Pane.tsx`: whether non-primary `onMouseDown` on an inactive pane triggers activation.
+  - `src/components/context-menu/ContextMenuProvider.tsx`: whether the capture-phase `pointerdown` close path processes the same secondary-button interaction that opened the menu.
+  - `src/components/TerminalView.tsx`: whether the active-pane `requestAnimationFrame(() => term.focus())` runs immediately after a terminal-body context-menu open.
+- Remove the temporary diagnostics once one faithful, user-visible menu-open assertion is red.
 
-Verify both PIDs belong to this worktree before using them:
+If you exhaust these automated refinements and still cannot make a real route fail under test, stop and report a blocker instead of applying speculative production fixes.
 
-```bash
-ps -fp "$(cat /tmp/freshell-3344-server.pid)"
-ps -fp "$(cat /tmp/freshell-3345-client.pid)"
-```
-
-Then open `http://127.0.0.1:3345` and manually identify which real route still flashes closed:
-
-1. Right-click the default terminal pane shell.
-2. If that stays open, split once and try the inactive terminal pane shell.
-3. Right-click inside the terminal body itself, not just the pane chrome.
-
-If the browser shows a failing route that Step 2 missed, go back to `test/e2e/pane-context-menu-stability.test.tsx` and sharpen the harness around that exact route before touching production code. Use temporary diagnostics only as needed:
-
-- Record `store.getState().panes.activePane['tab-1']` before and after the right-click to see whether the route activates the pane on secondary click.
-- Compare `terminalInstances[index].focus.mock.calls.length` before and after the right-click to see whether terminal refocus is involved.
-- Remove those diagnostics once one faithful, user-visible menu-open assertion is red.
-
-Stop only the worktree processes you started:
-
-```bash
-ps -fp "$(cat /tmp/freshell-3344-server.pid)"
-ps -fp "$(cat /tmp/freshell-3345-client.pid)"
-kill "$(cat /tmp/freshell-3344-server.pid)"
-kill "$(cat /tmp/freshell-3345-client.pid)"
-rm -f /tmp/freshell-3344-server.pid /tmp/freshell-3345-client.pid
-```
-
-Expected state after this step: there is at least one failing automated regression that matches the real browser route closely enough to justify a production fix.
+Expected state after this step: there is at least one failing automated regression tied to a concrete repo seam, and the plan never requires browser access to keep moving.
 
 **Step 4: Implement only the smallest fix justified by the red route**
 
@@ -543,30 +522,31 @@ npm run verify
 
 Expected: PASS for build plus the full test suite. Because this is a worktree, the build output is isolated and safe to generate here.
 
-**Step 5: Run the approved real-browser worktree spot-check**
+## Optional Human Spot-Check
 
-Start an isolated dev server again on unique ports:
+This section is not part of the `trycycle-executing` contract. It is a user-owned follow-up for anyone who wants one live browser sanity check after the automated gates pass.
+
+Do not use `npm run dev:server` for a custom backend port here; `package.json` hardcodes `PORT=3002` in that script. Start the worktree app on isolated ports with commands that actually honor `PORT` and `VITE_PORT`:
 
 ```bash
-PORT=3344 VITE_PORT=3345 npm run dev:server > /tmp/freshell-3344-server.log 2>&1 & echo $! > /tmp/freshell-3344-server.pid
+PORT=3344 VITE_PORT=3345 npx tsx watch server/index.ts > /tmp/freshell-3344-server.log 2>&1 & echo $! > /tmp/freshell-3344-server.pid
 PORT=3344 VITE_PORT=3345 npm run dev:client -- --host 127.0.0.1 > /tmp/freshell-3345-client.log 2>&1 & echo $! > /tmp/freshell-3345-client.pid
 ```
 
-Verify the PIDs belong to this worktree:
+Verify the PIDs belong to this worktree before using them:
 
 ```bash
 ps -fp "$(cat /tmp/freshell-3344-server.pid)"
 ps -fp "$(cat /tmp/freshell-3345-client.pid)"
 ```
 
-Open `http://127.0.0.1:3345` and confirm all of the following in the real browser:
+Then open `http://127.0.0.1:3345` and confirm:
 
 1. Right-click inside a terminal body and confirm the menu stays open.
 2. The first terminal menu section is `copy`, `Paste`, `Select all`, in that order, with an icon on each item.
 3. Create or use an inactive pane and right-click its pane shell; the menu should not flash open and immediately close.
-4. If the failing automated route from Task 2 involved a specific surface beyond those checks, spot-check that exact surface once in the browser too.
 
-Then stop only those verified worktree processes:
+Stop only those verified worktree processes when finished:
 
 ```bash
 ps -fp "$(cat /tmp/freshell-3344-server.pid)"
@@ -575,5 +555,3 @@ kill "$(cat /tmp/freshell-3344-server.pid)"
 kill "$(cat /tmp/freshell-3345-client.pid)"
 rm -f /tmp/freshell-3344-server.pid /tmp/freshell-3345-client.pid
 ```
-
-Expected: the real browser matches the automated result on the route that was originally failing, and the clipboard section matches the requested UI exactly.
