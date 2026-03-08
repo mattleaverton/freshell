@@ -8,11 +8,11 @@
 // Run:   electron dist/electron/electron/entry.js
 //        (or via electron-builder's packaged app)
 
-import { app, BrowserWindow, globalShortcut, Tray, Menu, nativeImage } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage } from 'electron'
 import path from 'path'
 import os from 'os'
 
-import { readDesktopConfig } from './desktop-config.js'
+import { readDesktopConfig, patchDesktopConfig } from './desktop-config.js'
 import { getDefaultDesktopConfig } from './desktop-config.js'
 import { createDaemonManager } from './daemon/create-daemon-manager.js'
 import { createServerSpawner } from './server-spawner.js'
@@ -132,6 +132,32 @@ async function main(): Promise<void> {
     },
   }
 
+  // Remove any previously registered IPC handlers (main() is called again
+  // after the wizard closes, so we need to avoid duplicate handler errors).
+  ipcMain.removeHandler('complete-setup')
+  ipcMain.removeHandler('get-server-mode')
+  ipcMain.removeHandler('get-server-status')
+  ipcMain.removeHandler('set-global-hotkey')
+  ipcMain.removeHandler('install-update')
+
+  // Register the complete-setup handler before runStartup so it is available
+  // when the wizard renderer calls it via the preload API.
+  ipcMain.handle('complete-setup', async (_event, config: {
+    serverMode: string
+    port: number
+    remoteUrl: string
+    remoteToken: string
+    globalHotkey: string
+  }) => {
+    await patchDesktopConfig({
+      serverMode: config.serverMode as 'daemon' | 'app-bound' | 'remote',
+      remoteUrl: config.remoteUrl || undefined,
+      remoteToken: config.remoteToken || undefined,
+      globalHotkey: config.globalHotkey,
+      setupCompleted: true,
+    })
+  })
+
   // Run startup sequence
   const result = await runStartup(ctx)
 
@@ -149,6 +175,33 @@ async function main(): Promise<void> {
     })
     return
   }
+
+  // Register IPC handlers for the main window's renderer process
+  ipcMain.handle('get-server-mode', () => desktopConfig.serverMode)
+
+  ipcMain.handle('get-server-status', async () => ({
+    running: serverSpawner.isRunning(),
+    mode: desktopConfig.serverMode,
+  }))
+
+  ipcMain.handle('set-global-hotkey', (_event, accelerator: string) => {
+    return hotkeyManager.update(accelerator, () => {
+      // Toggle the main window visibility when the hotkey is pressed
+      const wins = BrowserWindow.getAllWindows()
+      if (wins.length > 0) {
+        if (wins[0].isVisible()) {
+          wins[0].hide()
+        } else {
+          wins[0].show()
+          wins[0].focus()
+        }
+      }
+    })
+  })
+
+  ipcMain.handle('install-update', () => {
+    updateManager.installAndRestart()
+  })
 
   // Build the application menu
   buildAppMenu(Menu as any, {

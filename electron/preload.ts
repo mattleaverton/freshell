@@ -3,6 +3,14 @@
 // For testability, the API shape is exported as a type and the actual
 // registration is done via the registerPreloadApi function.
 
+export interface WizardSetupConfig {
+  serverMode: string
+  port: number
+  remoteUrl: string
+  remoteToken: string
+  globalHotkey: string
+}
+
 export interface FreshellDesktopApi {
   platform: string
   isElectron: boolean
@@ -12,6 +20,7 @@ export interface FreshellDesktopApi {
   onUpdateAvailable: (callback: () => void) => void
   onUpdateDownloaded: (callback: () => void) => void
   installUpdate: () => Promise<void>
+  completeSetup: (config: WizardSetupConfig) => Promise<void>
 }
 
 export interface ContextBridgeApi {
@@ -36,6 +45,7 @@ export function registerPreloadApi(
     onUpdateAvailable: (callback: () => void) => ipcRenderer.on('update-available', callback),
     onUpdateDownloaded: (callback: () => void) => ipcRenderer.on('update-downloaded', callback),
     installUpdate: () => ipcRenderer.invoke('install-update'),
+    completeSetup: (config: WizardSetupConfig) => ipcRenderer.invoke('complete-setup', config),
   }
 
   contextBridge.exposeInMainWorld('freshellDesktop', api)

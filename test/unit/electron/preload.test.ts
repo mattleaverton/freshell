@@ -34,6 +34,7 @@ describe('Preload API', () => {
   it('has exactly the expected keys', () => {
     const keys = Object.keys(exposedApi).sort()
     expect(keys).toEqual([
+      'completeSetup',
       'getServerMode',
       'getServerStatus',
       'installUpdate',
@@ -56,6 +57,7 @@ describe('Preload API', () => {
     expect(typeof exposedApi.onUpdateAvailable).toBe('function')
     expect(typeof exposedApi.onUpdateDownloaded).toBe('function')
     expect(typeof exposedApi.installUpdate).toBe('function')
+    expect(typeof exposedApi.completeSetup).toBe('function')
   })
 
   it('getServerMode invokes correct IPC channel', () => {
@@ -72,5 +74,17 @@ describe('Preload API', () => {
     const callback = vi.fn()
     exposedApi.onUpdateAvailable(callback)
     expect(mockIpcRenderer.on).toHaveBeenCalledWith('update-available', callback)
+  })
+
+  it('completeSetup invokes correct IPC channel with config', () => {
+    const config = {
+      serverMode: 'daemon' as const,
+      port: 3001,
+      remoteUrl: '',
+      remoteToken: '',
+      globalHotkey: 'CommandOrControl+`',
+    }
+    exposedApi.completeSetup(config)
+    expect(mockIpcRenderer.invoke).toHaveBeenCalledWith('complete-setup', config)
   })
 })
