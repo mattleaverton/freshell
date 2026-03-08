@@ -8,7 +8,7 @@
 
 ## Overview
 
-This plan implements an Electron desktop shell around the existing Freshell web app. The Electron layer is a **thin native wrapper** -- the server code, web UI, and WebSocket protocol are completely unchanged. The new code lives in `electron/` (main process) and `installers/` (OS service definitions). The server gains one new endpoint (`/api/server-info`), and the config schema gains one new optional key (`desktop`).
+This plan implements an Electron desktop shell around the existing Freshell web app. The Electron layer is a **thin native wrapper** -- the server code, web UI, and WebSocket protocol are completely unchanged. The new code lives in `electron/` (main process) and `installers/` (OS service definitions). The server gains one new endpoint (`/api/server-info`). Desktop-specific configuration lives in a separate file (`~/.freshell/desktop.json`) to avoid cross-process config contention with the server's `config.json`.
 
 All work follows Red-Green-Refactor TDD. Every module has unit tests with mocked Electron/OS APIs. Integration and E2E tests cover the `/api/server-info` endpoint and the setup wizard flow.
 
@@ -47,50 +47,28 @@ export type DesktopConfig = z.infer<typeof DesktopConfigSchema>
 
 **File:** `electron/desktop-config.ts`
 
-A standalone module (no Electron imports) that reads/writes the `desktop` key from `~/.freshell/config.json` using the same atomic-write pattern as `server/config-store.ts`. This module is used by both the Electron main process and by tests.
+A standalone module (no Electron imports) that reads/writes `~/.freshell/desktop.json` -- a **separate file** from the server's `~/.freshell/config.json`. This module is used by both the Electron main process and by tests.
 
 Methods:
-- `readDesktopConfig(): Promise<DesktopConfig | null>` -- returns null if key is absent
-- `writeDesktopConfig(config: DesktopConfig): Promise<void>` -- merges into existing config.json
+- `readDesktopConfig(): Promise<DesktopConfig | null>` -- returns null if file doesn't exist
+- `writeDesktopConfig(config: DesktopConfig): Promise<void>` -- atomic write (temp file + rename)
 - `patchDesktopConfig(patch: Partial<DesktopConfig>): Promise<DesktopConfig>` -- read-modify-write with mutex
 - `getDefaultDesktopConfig(): DesktopConfig` -- returns defaults (serverMode: 'app-bound', etc.)
 
-**Key design decision:** This module does NOT import from `server/config-store.ts`. The Electron process and the server process are separate Node runtimes; they share the config file but not memory. The desktop-config module reads/writes `~/.freshell/config.json` directly with atomic writes, just like the server does. The server's existing `UserConfig` type gains an optional `desktop?: DesktopConfig` key but never reads or writes it -- only the Electron layer does.
+**Key design decision -- separate config file:** The desktop config lives in `~/.freshell/desktop.json`, completely separate from the server's `~/.freshell/config.json`. This eliminates a data loss race condition that would occur with a shared file:
+
+The server's `ConfigStore` caches `config.json` in memory on first read and never re-reads from disk. All subsequent server writes serialize the cached version. If both Electron and the server shared one file via read-modify-write, the server's stale cache would overwrite Electron's changes whenever the server next wrote. For example: Electron changes the hotkey -> server changes terminal font size -> server's cached version (with the old hotkey) overwrites the file, silently losing the hotkey change.
+
+By using a separate file, each process owns its file exclusively. No cross-process locking or cache invalidation is needed. The server never reads or writes `desktop.json`; the Electron layer never reads or writes `config.json`.
 
 **Tests:** `test/unit/electron/desktop-config.test.ts`
-- Reads config when `desktop` key is present
-- Returns null when `desktop` key is absent
-- Writes config without clobbering existing keys (settings, sessionOverrides, etc.)
-- Patch merges correctly
+- Reads config from `desktop.json` when file exists
+- Returns null when file doesn't exist
+- Writes config atomically (temp file + rename)
+- Patch merges correctly (read-modify-write)
 - Validates against schema (rejects invalid serverMode, etc.)
-- Atomic write uses temp file + rename pattern
-
-### 1.2 Extend UserConfig type (backward compatible)
-
-**File:** `server/config-store.ts` (edit)
-
-Add optional `desktop` field to `UserConfig`:
-
-```typescript
-import type { DesktopConfig } from '../electron/types.js'
-
-export type UserConfig = {
-  version: 1
-  settings: AppSettings
-  sessionOverrides: Record<string, SessionOverride>
-  terminalOverrides: Record<string, TerminalOverride>
-  projectColors: Record<string, string>
-  recentDirectories?: string[]
-  desktop?: DesktopConfig  // <-- new, optional
-}
-```
-
-The `load()` method in `ConfigStore` already spreads the existing config and adds defaults only for keys it owns. The `desktop` key passes through untouched. The `saveInternal()` method serializes the full `UserConfig` which will include `desktop` if present.
-
-**Tests:** `test/unit/server/config-store.test.ts` (extend)
-- Existing tests continue to pass (desktop key is optional)
-- Round-trip: write config with desktop key, read it back, verify it's preserved
-- Config without desktop key works identically to today
+- Does NOT touch `config.json` (verify it's unchanged after writes)
+- Concurrent patches are serialized by mutex (no lost updates)
 
 ### 1.3 New `/api/server-info` endpoint
 
@@ -134,6 +112,8 @@ Mount the router: `app.use('/api/server-info', createServerInfoRouter({ appVersi
 
 **File:** `tsconfig.electron.json` (new)
 
+This config handles only the Electron main process code (non-renderer). The setup wizard renderer is built by Vite (see Phase 4), not by `tsc`.
+
 ```json
 {
   "compilerOptions": {
@@ -150,9 +130,15 @@ Mount the router: `app.use('/api/server-info', createServerInfoRouter({ appVersi
   },
   "include": [
     "electron/**/*"
+  ],
+  "exclude": [
+    "electron/setup-wizard/**/*.tsx",
+    "electron/setup-wizard/index.html"
   ]
 }
 ```
+
+Note: `.tsx` files in `electron/setup-wizard/` are excluded because they are React renderer code that `tsc` with `NodeNext` module resolution cannot handle (no JSX transform, no bundling). These files are built by the dedicated Vite wizard build (see Section 4.4).
 
 ### 1.5 Vitest configuration for Electron tests
 
@@ -160,19 +146,51 @@ Mount the router: `app.use('/api/server-info', createServerInfoRouter({ appVersi
 
 ```typescript
 import { defineConfig } from 'vitest/config'
+import react from '@vitejs/plugin-react'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
+  plugins: [react()],
   test: {
     environment: 'node',
-    include: ['test/unit/electron/**/*.test.ts'],
+    include: [
+      'test/unit/electron/**/*.test.ts',
+      'test/unit/electron/**/*.test.tsx',
+    ],
     exclude: ['docs/plans/**'],
     testTimeout: 30000,
     hookTimeout: 30000,
     alias: {
-      '@electron': './electron',
+      '@electron': path.resolve(__dirname, './electron'),
     },
   },
 })
+```
+
+Note: The `react()` plugin and `.test.tsx` pattern are included because the setup wizard tests (`wizard.test.tsx`) use JSX and need React transform support.
+
+**File:** `vitest.config.ts` (edit -- critical)
+
+Add `'test/unit/electron/**'` to the `exclude` array. Without this, the main vitest config (which uses `environment: 'jsdom'`) would also pick up the electron tests, causing either duplicate runs or failures from the wrong test environment:
+
+```typescript
+exclude: [
+  '**/node_modules/**',
+  '**/.worktrees/**',
+  '**/.claude/worktrees/**',
+  'docs/plans/**',
+  // Server tests run under vitest.server.config.ts (node environment)
+  'test/server/**',
+  'test/unit/server/**',
+  'test/integration/server/**',
+  'test/integration/session-repair.test.ts',
+  'test/integration/session-search-e2e.test.ts',
+  // Electron tests run under vitest.electron.config.ts (node environment)
+  'test/unit/electron/**',
+],
 ```
 
 **File:** `package.json` (edit)
@@ -305,29 +323,37 @@ Template XML for the scheduled task.
 
 **File:** `electron/daemon/create-daemon-manager.ts`
 
+The project uses `"type": "module"` (ESM). `require()` is not available in ES modules. The factory uses dynamic `import()` instead:
+
 ```typescript
 import type { DaemonManager } from './daemon-manager.js'
 
-export function createDaemonManager(): DaemonManager {
+export async function createDaemonManager(): Promise<DaemonManager> {
   switch (process.platform) {
-    case 'darwin':
-      const { LaunchdDaemonManager } = require('./launchd.js')
+    case 'darwin': {
+      const { LaunchdDaemonManager } = await import('./launchd.js')
       return new LaunchdDaemonManager()
-    case 'linux':
-      const { SystemdDaemonManager } = require('./systemd.js')
+    }
+    case 'linux': {
+      const { SystemdDaemonManager } = await import('./systemd.js')
       return new SystemdDaemonManager()
-    case 'win32':
-      const { WindowsServiceDaemonManager } = require('./windows-service.js')
+    }
+    case 'win32': {
+      const { WindowsServiceDaemonManager } = await import('./windows-service.js')
       return new WindowsServiceDaemonManager()
+    }
     default:
       throw new Error(`Unsupported platform: ${process.platform}`)
   }
 }
 ```
 
+Note: The function is now `async` because dynamic `import()` returns a promise. All callers (startup.ts, main.ts) are already async, so this is a natural fit.
+
 **Tests:** `test/unit/electron/daemon/create-daemon-manager.test.ts`
 - Returns correct implementation for each platform (mock process.platform)
 - Throws for unsupported platform
+- Awaits the async factory correctly
 
 ---
 
@@ -647,21 +673,55 @@ export function createWizardWindow(): Electron.BrowserWindow
 ```
 
 - Fixed size (640x500), not resizable, centered
-- Loads `electron/setup-wizard/index.html`
+- In production: loads `dist/wizard/index.html` (the Vite-built wizard bundle)
+- In development: loads `http://localhost:5174` (the wizard Vite dev server)
 - No menu bar
 - Communicates results back via IPC
+- Uses the same preload script as the main window (for IPC access)
 
 ### 4.2 Wizard HTML entry
 
 **File:** `electron/setup-wizard/index.html`
 
-Minimal HTML shell that loads the wizard React app. In development, loads from Vite; in production, loads the bundled wizard JS.
+Minimal HTML shell that serves as the Vite entry point for the wizard:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Freshell Setup</title>
+</head>
+<body>
+  <div id="wizard-root"></div>
+  <script type="module" src="./main.tsx"></script>
+</body>
+</html>
+```
 
 ### 4.3 Wizard React app
 
+**File:** `electron/setup-wizard/main.tsx`
+
+Entry point that mounts the wizard:
+
+```typescript
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import { Wizard } from './wizard.js'
+import './wizard.css'
+
+createRoot(document.getElementById('wizard-root')!).render(<Wizard />)
+```
+
+**File:** `electron/setup-wizard/wizard.css`
+
+Tailwind CSS entry (imports `@tailwind base/components/utilities`). Processed by PostCSS via Vite.
+
 **File:** `electron/setup-wizard/wizard.tsx`
 
-React app with the same stack as the main Freshell UI (React, Tailwind) but self-contained. Multi-step form:
+React multi-step form component. Uses the same stack as the main Freshell UI (React, Tailwind) but self-contained -- no Redux, no server connection.
 
 **Step 1: Welcome**
 - Freshell branding/logo
@@ -681,21 +741,88 @@ React app with the same stack as the main Freshell UI (React, Tailwind) but self
 **Step 4: Global Hotkey**
 - Current shortcut display (default `Ctrl+\``)
 - "Record new shortcut" button that captures the next key combo
-- Conflict detection: try registering, if fails show warning
+- Conflict detection: try registering via IPC, if fails show warning
 
 **Step 5: Complete**
 - Summary of choices
 - "Launch Freshell" button
-- Writes config via IPC, sets `setupCompleted: true`
+- Writes config via IPC (`window.freshellDesktop.completeSetup(config)`), sets `setupCompleted: true`
+
+### 4.4 Wizard Vite build configuration
+
+**File:** `vite.wizard.config.ts` (new, at repo root)
+
+The wizard is a separate Vite application. It must be bundled by Vite (not `tsc`) because:
+1. React JSX requires a transform (`tsc` with `NodeNext` module resolution does not bundle)
+2. Tailwind CSS requires PostCSS processing
+3. `tsc` produces individual `.js` files with bare imports that a BrowserWindow cannot resolve
+
+```typescript
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+export default defineConfig({
+  plugins: [react()],
+  root: path.resolve(__dirname, 'electron/setup-wizard'),
+  base: './',  // relative paths for file:// protocol in production
+  build: {
+    outDir: path.resolve(__dirname, 'dist/wizard'),
+    emptyOutDir: true,
+    sourcemap: true,
+  },
+  server: {
+    port: 5174,  // separate from main app's 5173
+  },
+  resolve: {
+    alias: {
+      '@electron': path.resolve(__dirname, './electron'),
+    },
+  },
+})
+```
+
+The wizard Tailwind config reuses the project's existing `tailwind.config.js` and `postcss.config.js` (Vite auto-detects PostCSS config from the project root).
+
+**File:** `package.json` (edit -- additional scripts)
+
+```json
+{
+  "build:wizard": "vite build --config vite.wizard.config.ts",
+  "dev:wizard": "vite --config vite.wizard.config.ts"
+}
+```
+
+The `electron:build` script is updated to include the wizard build:
+```json
+{
+  "electron:build": "npm run build && npm run build:electron && npm run build:wizard && electron-builder"
+}
+```
+
+The `electron:dev` script starts the wizard dev server alongside:
+```json
+{
+  "electron:dev": "npm run build:electron && concurrently -n wizard,electron \"vite --config vite.wizard.config.ts\" \"electron .\""
+}
+```
+
+### 4.5 Wizard tests
 
 **Tests:** `test/unit/electron/setup-wizard/wizard.test.tsx`
+
+These tests run under `vitest.electron.config.ts` which includes the `react()` plugin for JSX transform. The test environment is `jsdom` (overridden per-file with `// @vitest-environment jsdom` directive) since the wizard component renders DOM elements.
+
 - Renders each step
 - Step navigation (next/back)
 - Server mode selection updates state
 - Port validation (number, range 1024-65535)
 - Remote URL validation
-- Hotkey recording
-- Completion writes config via IPC
+- Hotkey recording (mocked IPC)
+- Completion calls IPC with correct config shape
 - Keyboard navigation works (Enter for next, Escape for back)
 
 ---
@@ -719,6 +846,7 @@ files:
   - dist/electron/**
   - dist/server/**
   - dist/client/**
+  - dist/wizard/**
   - node_modules/**
   - package.json
 
@@ -769,9 +897,11 @@ Add to devDependencies:
 Add scripts:
 ```json
 {
-  "electron:dev": "npm run build:electron && electron .",
-  "electron:build": "npm run build && npm run build:electron && electron-builder",
+  "electron:dev": "npm run build:electron && concurrently -n wizard,electron \"vite --config vite.wizard.config.ts\" \"electron .\"",
+  "electron:build": "npm run build && npm run build:electron && npm run build:wizard && electron-builder",
   "build:electron": "tsc -p tsconfig.electron.json",
+  "build:wizard": "vite build --config vite.wizard.config.ts",
+  "dev:wizard": "vite --config vite.wizard.config.ts",
   "test:electron": "vitest run --config vitest.electron.config.ts"
 }
 ```
@@ -933,12 +1063,12 @@ These tests require `electron` to be installed and may be slow. They are marked 
 | File | Purpose |
 |------|---------|
 | `electron/types.ts` | DesktopConfig interface and Zod schema |
-| `electron/desktop-config.ts` | Read/write desktop config from ~/.freshell/config.json |
+| `electron/desktop-config.ts` | Read/write desktop config from ~/.freshell/desktop.json |
 | `electron/daemon/daemon-manager.ts` | Abstract DaemonManager interface |
 | `electron/daemon/launchd.ts` | macOS launchd implementation |
 | `electron/daemon/systemd.ts` | Linux systemd implementation |
 | `electron/daemon/windows-service.ts` | Windows scheduled task implementation |
-| `electron/daemon/create-daemon-manager.ts` | Platform factory |
+| `electron/daemon/create-daemon-manager.ts` | Platform factory (async, uses dynamic import()) |
 | `electron/server-spawner.ts` | App-bound mode server lifecycle |
 | `electron/window-state.ts` | Window position/size persistence |
 | `electron/hotkey.ts` | Global hotkey registration |
@@ -949,13 +1079,16 @@ These tests require `electron` to be installed and may be slow. They are marked 
 | `electron/main.ts` | Electron main process entry |
 | `electron/preload.ts` | Context bridge for renderer |
 | `electron/setup-wizard/wizard-window.ts` | Wizard BrowserWindow creation |
-| `electron/setup-wizard/index.html` | Wizard HTML entry |
+| `electron/setup-wizard/index.html` | Wizard Vite HTML entry |
+| `electron/setup-wizard/main.tsx` | Wizard React mount point |
 | `electron/setup-wizard/wizard.tsx` | Wizard React multi-step form |
+| `electron/setup-wizard/wizard.css` | Wizard Tailwind CSS entry |
+| `vite.wizard.config.ts` | Vite config for wizard build (JSX + Tailwind + bundling) |
 | `server/server-info-router.ts` | /api/server-info endpoint |
 | `installers/launchd/com.freshell.server.plist.template` | macOS plist template |
 | `installers/systemd/freshell.service.template` | Linux unit file template |
 | `installers/windows/freshell-task.xml.template` | Windows task template |
-| `tsconfig.electron.json` | TypeScript config for electron/ |
+| `tsconfig.electron.json` | TypeScript config for electron main process (excludes .tsx) |
 | `vitest.electron.config.ts` | Vitest config for electron tests |
 | `electron-builder.yml` | electron-builder packaging config |
 | `scripts/prepare-bundled-node.ts` | Bundled Node.js download script |
@@ -988,11 +1121,10 @@ These tests require `electron` to be installed and may be slow. They are marked 
 
 | File | Change |
 |------|--------|
-| `server/config-store.ts` | Add optional `desktop?: DesktopConfig` to `UserConfig` type |
 | `server/index.ts` | Mount `/api/server-info` router, capture `startedAt` timestamp |
 | `package.json` | Add electron/electron-builder/electron-updater deps, add scripts, add `main` field |
-| `.gitignore` | Add `bundled-node/`, `release/` |
-| `test/unit/server/config-store.test.ts` | Add round-trip test for desktop key preservation |
+| `vitest.config.ts` | Add `test/unit/electron/**` to exclude array (prevent jsdom runner picking up electron tests) |
+| `.gitignore` | Add `bundled-node/`, `release/`, `dist/wizard/` |
 
 ---
 
@@ -1014,7 +1146,7 @@ Within each phase, the order is file-by-file as listed.
 
 ## Key Design Decisions
 
-1. **Separate config access**: The Electron layer reads/writes `~/.freshell/config.json` independently from the server. No shared in-memory state. Both use atomic writes. This is safe because they write different keys (`desktop` vs `settings`).
+1. **Separate config file (`desktop.json`)**: The desktop config lives in `~/.freshell/desktop.json`, completely separate from the server's `~/.freshell/config.json`. This prevents a data loss race condition: the server's `ConfigStore` caches `config.json` in memory on first read and never re-reads from disk, so if both processes shared one file, the server's stale cache would silently overwrite Electron's changes on its next write. With separate files, each process owns its file exclusively. No cross-process locking or cache invalidation is needed.
 
 2. **Windows "daemon" via Scheduled Tasks**: Rather than pulling in `node-windows` (heavy native dependency), we use `schtasks` which is built into every Windows installation. This provides "run at logon" and "restart on failure" behavior without native compilation headaches.
 
@@ -1023,13 +1155,17 @@ Within each phase, the order is file-by-file as listed.
    - node-pty is compiled against this specific Node version, avoiding ABI mismatches
    - The Electron Node.js is completely separate from the server Node.js
 
-4. **Setup wizard as a separate BrowserWindow**: Not a route in the main app. This means the wizard works without any server running, which is essential for the first-run experience.
+4. **Setup wizard as a separate BrowserWindow with its own Vite build**: The wizard is not a route in the main app -- it works without any server running, which is essential for the first-run experience. It has a dedicated Vite config (`vite.wizard.config.ts`) that produces a self-contained bundle (`dist/wizard/`) with React JSX transform and Tailwind CSS processing. The `tsconfig.electron.json` excludes `.tsx` files; they are handled exclusively by Vite.
 
-5. **Quake-style toggle**: The global hotkey toggles window visibility. Implementation is in the hotkey callback, not in a separate module, because the logic is simple (show+focus if hidden, hide if focused).
+5. **Dynamic `import()` in platform factory**: The project uses `"type": "module"` (ESM) throughout. The daemon manager factory uses `await import()` instead of `require()` (which is unavailable in ESM). The factory function is `async`, which fits naturally since all callers are already async.
 
-6. **electron-builder over electron-forge**: electron-builder is the more mature option with better cross-platform support, native module rebuilding, and auto-update integration. It also produces the exact output formats we want (DMG, NSIS, AppImage+deb).
+6. **Three separate vitest configs**: Client tests (`vitest.config.ts`, jsdom), server tests (`vitest.server.config.ts`, node), and electron tests (`vitest.electron.config.ts`, node). Each config's `exclude` array prevents other configs from picking up its tests, avoiding duplicate runs or wrong-environment failures.
 
-7. **No changes to existing server code beyond the /api/server-info endpoint**: The Electron layer is a pure consumer of the existing HTTP/WS API. This maintains the architectural invariant that the server doesn't know Electron exists.
+7. **Quake-style toggle**: The global hotkey toggles window visibility. Implementation is in the hotkey callback, not in a separate module, because the logic is simple (show+focus if hidden, hide if focused).
+
+8. **electron-builder over electron-forge**: electron-builder is the more mature option with better cross-platform support, native module rebuilding, and auto-update integration. It also produces the exact output formats we want (DMG, NSIS, AppImage+deb).
+
+9. **No changes to existing server code beyond the /api/server-info endpoint**: The Electron layer is a pure consumer of the existing HTTP/WS API. This maintains the architectural invariant that the server doesn't know Electron exists.
 
 ---
 
@@ -1041,4 +1177,4 @@ Within each phase, the order is file-by-file as listed.
 
 3. **Auto-update without code signing**: Without code signing, macOS will show "unidentified developer" warnings and Gatekeeper may block the app. Windows will show SmartScreen warnings. This is explicitly deferred to post-v1 per the design doc.
 
-4. **Config file contention**: Both Electron and server write to `~/.freshell/config.json`. Since they write different keys and both use atomic writes (temp file + rename), the risk of corruption is minimal. The worst case is a lost write, which is the same risk that exists today with concurrent server restarts.
+4. **Wizard build complexity**: The wizard requires a separate Vite build (`vite.wizard.config.ts`) in addition to the main client build and the `tsc` electron build. This adds a third build step but is unavoidable -- React JSX + Tailwind CSS cannot be processed by `tsc` alone, and the wizard must work without a running server (so it cannot be served by the existing Vite dev server).
