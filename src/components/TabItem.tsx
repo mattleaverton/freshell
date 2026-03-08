@@ -3,6 +3,7 @@ import { useRef, useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import { getTerminalStatusDotClassName, getTerminalStatusIconClassName } from '@/lib/terminal-status-indicator'
 import PaneIcon from '@/components/icons/PaneIcon'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import type { Tab, TabAttentionStyle, TerminalStatus } from '@/store/types'
 import type { PaneContent } from '@/store/paneTypes'
 import type { MouseEvent, KeyboardEvent } from 'react'
@@ -84,7 +85,7 @@ export default function TabItem({
     )
   }
 
-  return (
+  const tabContent = (
     <div
       className={cn(
         'group relative flex items-center gap-2 h-8 px-3 rounded-t-md border-x border-t border-muted-foreground/45 text-sm cursor-pointer transition-colors',
@@ -159,5 +160,22 @@ export default function TabItem({
         <X className="h-3 w-3" />
       </button>
     </div>
+  )
+
+  // Suppress tooltip during rename and drag — the Tooltip's hover
+  // events would interfere with the rename input and DnD overlay.
+  if (isRenaming || isDragging) {
+    return tabContent
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {tabContent}
+      </TooltipTrigger>
+      <TooltipContent side="bottom">
+        {tab.title}
+      </TooltipContent>
+    </Tooltip>
   )
 }

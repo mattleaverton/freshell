@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import TabItem from '@/components/TabItem'
 import type { Tab } from '@/store/types'
 
@@ -189,6 +189,72 @@ describe('TabItem', () => {
     render(<TabItem {...defaultProps} isActive={false} />)
     const el = getTabElement()
     expect(el?.className).not.toContain('mt-1')
+  })
+
+  describe('tooltip', () => {
+    it('shows full title in tooltip on hover', async () => {
+      render(<TabItem {...defaultProps} tab={createTab({ title: 'My Long Tab Name' })} />)
+
+      const tabEl = screen.getByRole('button', { name: 'My Long Tab Name' })
+      fireEvent.mouseEnter(tabEl)
+
+      const tooltip = await screen.findByRole('tooltip')
+      expect(tooltip).toHaveTextContent('My Long Tab Name')
+    })
+
+    it('hides tooltip on mouse leave', async () => {
+      render(<TabItem {...defaultProps} tab={createTab({ title: 'My Long Tab Name' })} />)
+
+      const tabEl = screen.getByRole('button', { name: 'My Long Tab Name' })
+      fireEvent.mouseEnter(tabEl)
+
+      // Wait for tooltip to appear
+      await screen.findByRole('tooltip')
+
+      fireEvent.mouseLeave(tabEl)
+
+      // Tooltip should be removed
+      await waitFor(() => {
+        expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+      })
+    })
+
+    it('does not show tooltip during rename mode', async () => {
+      render(
+        <TabItem
+          {...defaultProps}
+          tab={createTab({ title: 'Renaming Tab' })}
+          isRenaming={true}
+          renameValue="Renaming Tab"
+        />
+      )
+
+      const tabEl = screen.getByRole('button', { name: 'Renaming Tab' })
+      fireEvent.mouseEnter(tabEl)
+
+      // Give React a chance to flush — tooltip should never appear
+      await waitFor(() => {
+        expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+      })
+    })
+
+    it('does not show tooltip during drag', async () => {
+      render(
+        <TabItem
+          {...defaultProps}
+          tab={createTab({ title: 'Dragging Tab' })}
+          isDragging={true}
+        />
+      )
+
+      const tabEl = screen.getByRole('button', { name: 'Dragging Tab' })
+      fireEvent.mouseEnter(tabEl)
+
+      // Give React a chance to flush — tooltip should never appear
+      await waitFor(() => {
+        expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+      })
+    })
   })
 
   describe('XSS sanitization', () => {
