@@ -219,11 +219,17 @@ export interface DaemonStatus {
 }
 
 export interface DaemonPaths {
-  nodeBinary: string      // bundled Node.js binary path
-  serverEntry: string     // bundled server/index.js path
+  nodeBinary: string      // bundled Node.js binary: {resourcesPath}/bundled-node/bin/node
+  serverEntry: string     // server entry point: {resourcesPath}/server/index.js
+  serverNodeModules: string // server deps: {resourcesPath}/server-node-modules
+  nativeModules: string   // recompiled native modules: {resourcesPath}/bundled-node/native-modules
   configDir: string       // ~/.freshell
   logDir: string          // ~/.freshell/logs
 }
+
+// All paths above are real filesystem paths from extraResources.
+// They are NOT inside the ASAR archive. The bundled Node.js binary
+// is a vanilla Node.js process and cannot read from ASAR.
 
 export interface DaemonManager {
   readonly platform: 'darwin' | 'linux' | 'win32'
@@ -263,7 +269,7 @@ Manages `~/Library/LaunchAgents/com.freshell.server.plist`.
 
 **File:** `installers/launchd/com.freshell.server.plist.template`
 
-Template plist with `{{NODE_BINARY}}`, `{{SERVER_ENTRY}}`, `{{PORT}}`, `{{CONFIG_DIR}}`, `{{LOG_DIR}}` placeholders.
+Template plist with `{{NODE_BINARY}}`, `{{SERVER_ENTRY}}`, `{{NODE_PATH}}`, `{{PORT}}`, `{{CONFIG_DIR}}`, `{{LOG_DIR}}` placeholders. The `{{NODE_PATH}}` placeholder is critical -- it must include both the native-modules and server-node-modules directories from `extraResources` so the spawned Node.js process can find all server dependencies on the real filesystem (not inside the ASAR archive).
 
 **Tests:** `test/unit/electron/daemon/launchd.test.ts`
 - Mock `child_process.execFile` and `fs` operations
@@ -289,7 +295,7 @@ Manages `~/.config/systemd/user/freshell.service`.
 
 **File:** `installers/systemd/freshell.service.template`
 
-Template systemd unit with `{{NODE_BINARY}}`, `{{SERVER_ENTRY}}`, `{{PORT}}`, `{{CONFIG_DIR}}`, `{{LOG_DIR}}` placeholders.
+Template systemd unit with `{{NODE_BINARY}}`, `{{SERVER_ENTRY}}`, `{{NODE_PATH}}`, `{{PORT}}`, `{{CONFIG_DIR}}`, `{{LOG_DIR}}` placeholders. Uses `Environment=NODE_PATH={{NODE_PATH}}` directive to set the module resolution path.
 
 **Tests:** `test/unit/electron/daemon/systemd.test.ts`
 - Same pattern as launchd tests with systemd-specific command mocking
@@ -311,6 +317,8 @@ Uses a lightweight approach: creates a Windows Scheduled Task with `schtasks` (r
 - `isInstalled()`: `schtasks /Query /TN "Freshell Server"`
 
 **File:** `installers/windows/freshell-task.xml.template`
+
+All three platform templates include the `NODE_PATH` environment variable pointing to `{resourcesPath}/bundled-node/native-modules` and `{resourcesPath}/server-node-modules`.
 
 Template XML for the scheduled task.
 
@@ -908,22 +916,52 @@ directories:
   output: release
   buildResources: assets/electron
 
+# --- ASAR vs extraResources split ---
+#
+# The ASAR archive (files) contains ONLY code that runs inside Electron's
+# patched Node.js, which can transparently read from ASAR:
+#   - dist/electron/** (main process code)
+#   - dist/wizard/**  (wizard renderer bundle)
+#
+# Everything the standalone bundled Node.js binary needs is placed in
+# extraResources, which lives on the REAL filesystem. A vanilla Node.js
+# process cannot read from ASAR archives -- it would get ENOENT/MODULE_NOT_FOUND.
+# This includes:
+#   - dist/server/** (the Freshell server code)
+#   - dist/client/** (static web assets served by Express)
+#   - server-node-modules/** (pruned runtime dependencies for the server)
+#   - bundled-node/bin/** (the standalone Node.js binary)
+#   - bundled-node/native-modules/** (recompiled node-pty)
+
 files:
   - dist/electron/**
-  - dist/server/**
-  - dist/client/**
   - dist/wizard/**
-  - node_modules/**
-  - "!node_modules/node-pty/build/**"
   - package.json
 
 extraResources:
+  # The standalone Node.js binary
   - from: bundled-node/${os}/${arch}
     to: bundled-node/bin
     filter:
       - "**/*"
+  # Recompiled native modules (node-pty against bundled Node ABI)
   - from: bundled-node/native-modules
     to: bundled-node/native-modules
+    filter:
+      - "**/*"
+  # The Freshell server (runs under bundled Node, NOT Electron)
+  - from: dist/server
+    to: server
+    filter:
+      - "**/*"
+  # Static client assets (served by Express in production)
+  - from: dist/client
+    to: client
+    filter:
+      - "**/*"
+  # Pruned server runtime dependencies (see Section 5.3, Step 4)
+  - from: server-node-modules
+    to: server-node-modules
     filter:
       - "**/*"
 
@@ -954,6 +992,8 @@ publish:
 
 electronVersion: "33"  # or latest stable at implementation time
 ```
+
+**ASAR/filesystem split rationale:** electron-builder packs all `files` entries into `app.asar` by default. Electron's patched `fs` module can read from ASAR transparently, but the standalone bundled Node.js binary (used by daemon and app-bound modes) is a vanilla Node.js process without ASAR support. If `dist/server/`, `dist/client/`, or `node_modules/` were inside the ASAR, the spawned server process would crash with `ENOENT` or `MODULE_NOT_FOUND` when trying to `import` its dependencies. Placing them in `extraResources` ensures they exist as real files on disk.
 
 ### 5.2 Package.json additions
 
@@ -1078,60 +1118,64 @@ cpSync(
 )
 ```
 
-#### Runtime resolution: how the server finds the recompiled node-pty
+#### Step 4: Prune and stage server node_modules
 
-The server's `import ... from 'node-pty'` must resolve to the recompiled native module, not to the copy in `node_modules/` (which was compiled against the development machine's system Node or Electron's Node).
+The server's runtime dependencies (express, ws, node-pty, etc.) must be available on the real filesystem for the bundled Node.js to import them. They cannot live inside the ASAR archive (see Section 5.1 rationale).
 
-The server spawner (Section 3.1) sets the `NODE_PATH` environment variable when spawning the server process:
+The preparation script creates a pruned copy of `node_modules/` containing only the server's runtime dependencies (not devDependencies like `vitest`, `electron`, `typescript`, etc.):
+
+```typescript
+// Create a clean server-node-modules directory
+mkdirSync('server-node-modules', { recursive: true })
+
+// Use npm to produce a production-only install
+// This is done by copying package.json and running npm ci --omit=dev in a temp dir,
+// then copying the resulting node_modules to server-node-modules/
+execSync('npm ci --omit=dev --prefix server-node-modules-staging', { stdio: 'inherit' })
+cpSync('server-node-modules-staging/node_modules', 'server-node-modules', { recursive: true })
+
+// Remove node-pty's native binary from the pruned node_modules
+// (it was compiled against the dev machine's Node, not the bundled one)
+// The correctly-compiled version is in bundled-node/native-modules/
+rmSync('server-node-modules/node-pty/build', { recursive: true, force: true })
+```
+
+electron-builder packages this as `extraResources/server-node-modules/` (see Section 5.1).
+
+#### Runtime resolution: how the server finds its dependencies and the recompiled node-pty
+
+At runtime, the server process needs to find two sets of modules:
+1. **Standard npm dependencies** (express, ws, zod, etc.) -- in `{resourcesPath}/server-node-modules/`
+2. **Recompiled node-pty** (with correct ABI) -- in `{resourcesPath}/bundled-node/native-modules/`
+
+The server spawner (Section 3.1) sets `NODE_PATH` to include both directories, with native-modules first (so the recompiled node-pty takes precedence over any copy in server-node-modules):
 
 ```typescript
 // In server-spawner.ts, production mode spawn:
-const nativeModulesPath = path.join(app.getPath('userData'), '..', 'bundled-node', 'native-modules')
-// electron-builder extraResources places bundled-node/ in the app's resources directory
 const resourcesPath = process.resourcesPath  // Electron's resources dir
 const nativeModulesDir = path.join(resourcesPath, 'bundled-node', 'native-modules')
+const serverNodeModulesDir = path.join(resourcesPath, 'server-node-modules')
+const serverEntry = path.join(resourcesPath, 'server', 'index.js')
+const nodeBinary = path.join(resourcesPath, 'bundled-node', 'bin', 'node')
 
 child_process.spawn(nodeBinary, [serverEntry], {
   env: {
     ...processEnv,
-    NODE_PATH: nativeModulesDir,  // node-pty resolves from here FIRST
+    // native-modules first, so recompiled node-pty wins over server-node-modules copy
+    NODE_PATH: [nativeModulesDir, serverNodeModulesDir].join(path.delimiter),
     PORT: String(port),
     NODE_ENV: 'production',
   },
 })
 ```
 
-`NODE_PATH` prepends to Node's module resolution. When the server does `import ... from 'node-pty'`, Node checks `NODE_PATH` directories before `node_modules/`. Since `bundled-node/native-modules/node-pty/` contains the complete package (JS files + correctly-compiled `pty.node`), the import succeeds with the right ABI.
+`NODE_PATH` prepends to Node's module resolution. When the server does `import express from 'express'`, Node checks `NODE_PATH` directories before looking for a local `node_modules/`. Since all server dependencies are in one of the two `NODE_PATH` entries, all imports resolve correctly.
 
-#### electron-builder packaging
-
-The `electron-builder.yml` `extraResources` section (Section 5.1) already packages `bundled-node/` into the app's resources:
-
-```yaml
-extraResources:
-  - from: bundled-node/${os}/${arch}
-    to: bundled-node
-    filter:
-      - "**/*"
-```
-
-This is extended to also package the native modules:
-
-```yaml
-extraResources:
-  - from: bundled-node/${os}/${arch}
-    to: bundled-node/bin
-    filter:
-      - "**/*"
-  - from: bundled-node/native-modules
-    to: bundled-node/native-modules
-    filter:
-      - "**/*"
-```
+The same path construction is used by daemon mode -- the OS service definition (plist/unit file/task XML) includes the `NODE_PATH` environment variable pointing to the same `extraResources` locations.
 
 #### Build script integration
 
-The `electron:build` script is updated to include the preparation step:
+The `electron:build` script includes the preparation step:
 
 ```json
 {
@@ -1364,7 +1408,7 @@ These tests require `electron` to be installed and may be slow. They are marked 
 | `package.json` | Add electron/electron-builder/electron-updater deps, add scripts, add `main` field |
 | `vitest.config.ts` | Add `test/unit/electron/**` to exclude array (prevent jsdom runner picking up electron tests) |
 | `src/index.css` | Extract `:root`/`.dark` CSS variable blocks into `src/theme-variables.css`, replace with `@import` |
-| `.gitignore` | Add `bundled-node/`, `release/`, `dist/wizard/` |
+| `.gitignore` | Add `bundled-node/`, `server-node-modules/`, `release/`, `dist/wizard/` |
 
 ---
 
@@ -1390,23 +1434,25 @@ Within each phase, the order is file-by-file as listed.
 
 2. **Windows "daemon" via Scheduled Tasks**: Rather than pulling in `node-windows` (heavy native dependency), we use `schtasks` which is built into every Windows installation. This provides "run at logon" and "restart on failure" behavior without native compilation headaches.
 
-3. **Bundled Node.js with fully-specified native module pipeline**: The daemon and app-bound modes run the server via a standalone Node.js binary bundled in the app's resources. The pipeline is: (1) download Node.js binary from `nodejs.org/dist/`, (2) download the Node.js headers tarball separately (the binary tarball does not include headers), (3) run `node-gyp rebuild --target={version} --nodedir={headers-dir}` in node-pty's directory, (4) stage the recompiled package in `bundled-node/native-modules/`, (5) at runtime, set `NODE_PATH` to the staged directory so the server's `import 'node-pty'` resolves the correctly-compiled binary. `@electron/rebuild` is NOT used -- it compiles against Electron's Node ABI, which would crash when loaded by the standalone bundled Node. The bundled Node version is pinned in `scripts/bundled-node-version.json` as the single source of truth. This means:
+3. **ASAR/filesystem split**: electron-builder packs `files` entries into `app.asar` by default. Only Electron's patched `fs` module can read from ASAR; the standalone bundled Node.js binary is a vanilla Node.js process and would crash with `ENOENT`/`MODULE_NOT_FOUND` if the server code, client assets, or npm dependencies were inside the ASAR. Therefore: only the Electron main process code (`dist/electron/`) and wizard bundle (`dist/wizard/`) go into the ASAR (`files`). Everything the server needs goes into `extraResources` (real filesystem): `dist/server/`, `dist/client/`, `server-node-modules/` (pruned production deps), `bundled-node/bin/` (Node binary), and `bundled-node/native-modules/` (recompiled node-pty). The server spawner constructs all paths relative to `process.resourcesPath`.
+
+4. **Bundled Node.js with fully-specified native module pipeline**: The daemon and app-bound modes run the server via a standalone Node.js binary bundled in the app's resources. The pipeline is: (1) download Node.js binary from `nodejs.org/dist/`, (2) download the Node.js headers tarball separately (the binary tarball does not include headers), (3) run `node-gyp rebuild --target={version} --nodedir={headers-dir}` in node-pty's directory, (4) stage the recompiled package in `bundled-node/native-modules/`, (5) prune and stage server runtime `node_modules` into `server-node-modules/`, (6) at runtime, set `NODE_PATH` to both `native-modules` and `server-node-modules` so all server imports resolve correctly from the real filesystem. `@electron/rebuild` is NOT used -- it compiles against Electron's Node ABI, which would crash when loaded by the standalone bundled Node. The bundled Node version is pinned in `scripts/bundled-node-version.json` as the single source of truth. This means:
    - No system Node.js dependency for end users
    - node-pty is compiled against the exact Node ABI it will run under
    - The Electron Node.js is completely separate from the server Node.js
    - The compilation target is explicit and reproducible across platforms
 
-4. **Setup wizard as a separate BrowserWindow with its own Vite build**: The wizard is not a route in the main app -- it works without any server running, which is essential for the first-run experience. It has a dedicated Vite config (`vite.wizard.config.ts`) that produces a self-contained bundle (`dist/wizard/`) with React JSX transform and Tailwind CSS processing. CSS theme variables (`:root`/`.dark` custom properties) are extracted into `src/theme-variables.css` and imported by both the main app's CSS and the wizard's CSS, ensuring semantic Tailwind colors (e.g., `bg-background`, `text-foreground`) render correctly in both contexts. The `tsconfig.electron.json` excludes `.tsx` files; they are handled exclusively by Vite.
+5. **Setup wizard as a separate BrowserWindow with its own Vite build**: The wizard is not a route in the main app -- it works without any server running, which is essential for the first-run experience. It has a dedicated Vite config (`vite.wizard.config.ts`) that produces a self-contained bundle (`dist/wizard/`) with React JSX transform and Tailwind CSS processing. CSS theme variables (`:root`/`.dark` custom properties) are extracted into `src/theme-variables.css` and imported by both the main app's CSS and the wizard's CSS, ensuring semantic Tailwind colors (e.g., `bg-background`, `text-foreground`) render correctly in both contexts. The `tsconfig.electron.json` excludes `.tsx` files; they are handled exclusively by Vite.
 
-5. **Dynamic `import()` in platform factory**: The project uses `"type": "module"` (ESM) throughout. The daemon manager factory uses `await import()` instead of `require()` (which is unavailable in ESM). The factory function is `async`, which fits naturally since all callers are already async.
+6. **Dynamic `import()` in platform factory**: The project uses `"type": "module"` (ESM) throughout. The daemon manager factory uses `await import()` instead of `require()` (which is unavailable in ESM). The factory function is `async`, which fits naturally since all callers are already async.
 
-6. **Three separate vitest configs**: Client tests (`vitest.config.ts`, jsdom), server tests (`vitest.server.config.ts`, node), and electron tests (`vitest.electron.config.ts`, node). Each config's `exclude` array prevents other configs from picking up its tests, avoiding duplicate runs or wrong-environment failures.
+7. **Three separate vitest configs**: Client tests (`vitest.config.ts`, jsdom), server tests (`vitest.server.config.ts`, node), and electron tests (`vitest.electron.config.ts`, node). Each config's `exclude` array prevents other configs from picking up its tests, avoiding duplicate runs or wrong-environment failures.
 
-7. **Quake-style toggle**: The global hotkey toggles window visibility. Implementation is in the hotkey callback, not in a separate module, because the logic is simple (show+focus if hidden, hide if focused).
+8. **Quake-style toggle**: The global hotkey toggles window visibility. Implementation is in the hotkey callback, not in a separate module, because the logic is simple (show+focus if hidden, hide if focused).
 
-8. **electron-builder over electron-forge**: electron-builder is the more mature option with better cross-platform support, native module rebuilding, and auto-update integration. It also produces the exact output formats we want (DMG, NSIS, AppImage+deb).
+9. **electron-builder over electron-forge**: electron-builder is the more mature option with better cross-platform support, native module rebuilding, and auto-update integration. It also produces the exact output formats we want (DMG, NSIS, AppImage+deb).
 
-9. **No changes to existing server code beyond the /api/server-info endpoint**: The Electron layer is a pure consumer of the existing HTTP/WS API. This maintains the architectural invariant that the server doesn't know Electron exists.
+10. **No changes to existing server code beyond the /api/server-info endpoint**: The Electron layer is a pure consumer of the existing HTTP/WS API. This maintains the architectural invariant that the server doesn't know Electron exists.
 
 ---
 
