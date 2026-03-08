@@ -363,12 +363,15 @@ Note: The function is now `async` because dynamic `import()` returns a promise. 
 
 **File:** `electron/server-spawner.ts`
 
-Manages spawning the bundled Freshell server as a child process for app-bound mode:
+Manages spawning the Freshell server as a child process for app-bound mode. Supports two spawn modes:
 
 ```typescript
+export type ServerSpawnMode =
+  | { mode: 'production'; nodeBinary: string; serverEntry: string }
+  | { mode: 'dev'; tsxPath: string; serverSourceEntry: string }
+
 export interface ServerSpawnerOptions {
-  nodeBinary: string
-  serverEntry: string
+  spawn: ServerSpawnMode
   port: number
   envFile: string      // path to .env
   configDir: string    // ~/.freshell
@@ -390,14 +393,16 @@ export interface ServerSpawner {
 ```
 
 Implementation:
-- `start()` spawns `child_process.spawn(nodeBinary, [serverEntry])` with env vars from the .env file plus `PORT`, `NODE_ENV=production`
-- Polls `http://localhost:{port}/api/health` with exponential backoff (100ms, 200ms, 400ms, ..., max 30s)
+- In **production mode**: `start()` spawns `child_process.spawn(nodeBinary, [serverEntry])` with `NODE_ENV=production`
+- In **dev mode**: `start()` spawns `child_process.spawn(tsxPath, [serverSourceEntry])` -- this runs the TypeScript server source directly via `tsx`, the same way `npm run dev:server` does. No build step required.
+- Both modes: Polls `http://localhost:{port}/api/health` with exponential backoff (100ms, 200ms, 400ms, ..., max 30s)
 - Pipes stdout/stderr to `~/.freshell/logs/server.log`
 - `stop()` sends SIGTERM, waits 5s, then SIGKILL if still alive
 
 **Tests:** `test/unit/electron/server-spawner.test.ts`
 - Mock `child_process.spawn` and `http.get`
-- `start()` spawns process with correct args and env
+- Production mode: spawns `nodeBinary serverEntry` with NODE_ENV=production
+- Dev mode: spawns `tsx server/index.ts` without NODE_ENV=production
 - `start()` polls health endpoint and resolves on success
 - `start()` rejects if health check times out
 - `stop()` sends SIGTERM, then SIGKILL after timeout
@@ -572,6 +577,7 @@ export interface StartupContext {
   hotkeyManager: HotkeyManager
   windowStatePersistence: WindowStatePersistence
   updateManager: UpdateManager
+  isDev: boolean  // true when running via electron:dev
 }
 
 export async function runStartup(ctx: StartupContext): Promise<{
@@ -581,13 +587,13 @@ export async function runStartup(ctx: StartupContext): Promise<{
 ```
 
 Sequence:
-1. Read desktop config from `~/.freshell/config.json`
+1. Read desktop config from `~/.freshell/desktop.json`
 2. If `!setupCompleted`, return early with signal to show wizard (not the main window)
 3. Based on `serverMode`:
    - `daemon`: Check `daemonManager.status()`. If not running, `daemonManager.start()`. If not installed, throw with message to re-run setup.
-   - `app-bound`: `serverSpawner.start(...)`. Wait for health check.
+   - `app-bound`: Call `serverSpawner.start(...)`. In **dev mode** (`ctx.isDev`), pass `{ mode: 'dev', tsxPath: 'npx tsx', serverSourceEntry: 'server/index.ts' }`. In production, pass `{ mode: 'production', nodeBinary, serverEntry }`. Both paths wait for health check.
    - `remote`: Validate connectivity via fetch to `remoteUrl + '/api/health'`
-4. Determine `serverUrl` based on mode
+4. Determine `serverUrl` based on mode. In dev mode with app-bound, also point the BrowserWindow at the Vite dev server (`http://localhost:5173`) instead of the Express server directly (matching how `npm run dev` works).
 5. Load window state, create BrowserWindow, load serverUrl
 6. Register global hotkey
 7. Create system tray
@@ -599,7 +605,8 @@ Sequence:
 - Setup incomplete -> returns wizard signal
 - Daemon mode: starts daemon if not running
 - Daemon mode: throws if not installed
-- App-bound mode: spawns server, waits for health
+- App-bound mode (production): spawns server with bundled node + built entry
+- App-bound mode (dev): spawns server with tsx + source entry
 - Remote mode: validates connectivity
 - Registers hotkey with configured accelerator
 - Creates tray
@@ -715,9 +722,44 @@ import './wizard.css'
 createRoot(document.getElementById('wizard-root')!).render(<Wizard />)
 ```
 
+**File:** `src/theme-variables.css` (new -- extracted from `src/index.css`)
+
+The CSS custom properties (`:root` light mode and `.dark` dark mode variable definitions) that back the Tailwind semantic colors (`--background`, `--foreground`, `--border`, `--primary`, etc.) are extracted into a standalone file. Both the main app's `src/index.css` and the wizard's `wizard.css` import it.
+
+```css
+/* src/theme-variables.css */
+:root {
+  --background: 0 0% 100%;
+  --foreground: 240 10% 10%;
+  --card: 0 0% 98%;
+  /* ... all existing :root variables ... */
+}
+.dark {
+  --background: 240 10% 4%;
+  --foreground: 0 0% 98%;
+  /* ... all existing .dark variables ... */
+}
+```
+
+**File:** `src/index.css` (edit)
+
+Replace the inline `:root { ... }` and `.dark { ... }` blocks with:
+```css
+@import './theme-variables.css';
+```
+
+The rest of `src/index.css` (element styles, utility classes) stays unchanged.
+
 **File:** `electron/setup-wizard/wizard.css`
 
-Tailwind CSS entry (imports `@tailwind base/components/utilities`). Processed by PostCSS via Vite.
+```css
+@import '../../src/theme-variables.css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+```
+
+By importing `theme-variables.css`, the wizard has access to the same CSS custom properties that the Tailwind semantic colors reference (e.g., `bg-background` resolves to `hsl(var(--background))` which is now defined). Without this import, all semantic color utilities would render as `hsl()` with undefined variables, producing invisible or transparent elements.
 
 **File:** `electron/setup-wizard/wizard.tsx`
 
@@ -869,6 +911,7 @@ directories:
 files:
   - dist/electron/**
   - dist/server/**
+  - dist/server-native/**
   - dist/client/**
   - dist/wizard/**
   - node_modules/**
@@ -916,12 +959,13 @@ Add to devDependencies:
 - `electron` (latest stable, e.g. `^33.0.0`)
 - `electron-builder` (latest stable)
 - `electron-updater` (latest stable)
-- `@electron/rebuild` (for native modules like node-pty)
+
+Note: `@electron/rebuild` is explicitly NOT used. See Section 5.3 and Key Design Decision 3 for the native module rebuild strategy.
 
 Add scripts:
 ```json
 {
-  "electron:dev": "npm run build:electron && concurrently -n wizard,electron \"vite --config vite.wizard.config.ts\" \"electron .\"",
+  "electron:dev": "npm run build:electron && cross-env ELECTRON_DEV=1 concurrently -n client,wizard,electron \"vite\" \"vite --config vite.wizard.config.ts\" \"electron .\"",
   "electron:build": "npm run build && npm run build:electron && npm run build:wizard && electron-builder",
   "build:electron": "tsc -p tsconfig.electron.json",
   "build:wizard": "vite build --config vite.wizard.config.ts",
@@ -930,6 +974,20 @@ Add scripts:
 }
 ```
 
+**Dev mode workflow (`electron:dev`):**
+
+The dev script sets `ELECTRON_DEV=1` and starts three processes concurrently:
+1. **Vite client dev server** (port 5173) -- serves the main Freshell web UI with HMR
+2. **Vite wizard dev server** (port 5174) -- serves the setup wizard with HMR
+3. **Electron** -- the main process, which detects `ELECTRON_DEV=1` and:
+   - Uses `tsx` to run the server source directly (`server/index.ts`) instead of requiring a bundled Node.js binary and built server artifacts
+   - Points the main BrowserWindow at `http://localhost:5173` (the Vite dev server) for full HMR support
+   - Points the wizard BrowserWindow at `http://localhost:5174`
+
+This means `electron:dev` requires no prior build step (beyond the fast `tsc` for the electron main process itself). No bundled Node.js binary is needed. No `npm run build` is needed. The dev experience matches the existing `npm run dev` workflow but with Electron chrome around it.
+
+The `electron/main.ts` entry point detects dev mode via `process.env.ELECTRON_DEV === '1'` and passes `isDev: true` to `runStartup()`. The server spawner then uses the dev-mode spawn path (Section 3.1).
+
 Add main field:
 ```json
 {
@@ -937,7 +995,7 @@ Add main field:
 }
 ```
 
-### 5.3 Bundled Node.js preparation
+### 5.3 Bundled Node.js and native module preparation
 
 **File:** `scripts/prepare-bundled-node.ts` (new)
 
@@ -945,9 +1003,39 @@ Script that downloads the standalone Node.js binary for the current (or specifie
 
 The bundled Node.js is used by both daemon and app-bound modes to run the Freshell server independently of Electron's Node.js.
 
+**Critical: node-pty must be compiled against the bundled Node.js, NOT Electron's Node.js.** The server runs in a separate process using the bundled standalone Node.js binary. If node-pty were compiled against Electron's Node ABI (as `@electron/rebuild` would do), it would crash at runtime with `NODE_MODULE_VERSION` mismatch when loaded by the bundled Node.js.
+
+The `prepare-bundled-node.ts` script handles this in a second step after downloading the Node.js binary:
+
+```typescript
+// After downloading bundled Node.js to bundled-node/{os}/{arch}/node:
+// 1. Run node-gyp rebuild using the BUNDLED node binary as the target
+//    This compiles node-pty.node against the bundled Node's ABI
+// 2. Copy the resulting .node binary into a known location for packaging
+
+const bundledNodePath = `bundled-node/${os}/${arch}/node`
+const nodePtyDir = 'node_modules/node-pty'
+
+// Use the bundled Node's headers and ABI version for compilation
+execSync(
+  `node-gyp rebuild --target=${bundledNodeVersion} --nodedir=${bundledNodeDir}`,
+  { cwd: nodePtyDir }
+)
+
+// Copy the rebuilt native module to dist/server for packaging
+copySync(
+  `${nodePtyDir}/build/Release/pty.node`,
+  `dist/server-native/pty.node`
+)
+```
+
+The electron-builder config (Section 5.1) includes `dist/server-native/` in the `files` list so the correctly-compiled native module is packaged alongside the server code.
+
+At runtime, the server's node-pty import resolves to this pre-compiled binary (via a `NODE_PATH` or `--require` override in the spawn options, or by copying the binary into the server's `node_modules` during packaging).
+
 **File:** `.gitignore` (edit)
 
-Add `bundled-node/` to .gitignore.
+Add `bundled-node/`, `dist/server-native/` to .gitignore.
 
 ### 5.4 Icons and assets
 
@@ -1108,7 +1196,8 @@ These tests require `electron` to be installed and may be slow. They are marked 
 | `electron/setup-wizard/index.html` | Wizard Vite HTML entry |
 | `electron/setup-wizard/main.tsx` | Wizard React mount point |
 | `electron/setup-wizard/wizard.tsx` | Wizard React multi-step form |
-| `electron/setup-wizard/wizard.css` | Wizard Tailwind CSS entry |
+| `electron/setup-wizard/wizard.css` | Wizard Tailwind CSS entry (imports shared theme-variables.css) |
+| `src/theme-variables.css` | Shared CSS custom property definitions (extracted from src/index.css) |
 | `vite.wizard.config.ts` | Vite config for wizard build (JSX + Tailwind + bundling) |
 | `tailwind.config.wizard.js` | Wizard-specific Tailwind config (scans electron/setup-wizard/ for classes) |
 | `server/server-info-router.ts` | /api/server-info endpoint |
@@ -1151,7 +1240,8 @@ These tests require `electron` to be installed and may be slow. They are marked 
 | `server/index.ts` | Mount `/api/server-info` router, capture `startedAt` timestamp |
 | `package.json` | Add electron/electron-builder/electron-updater deps, add scripts, add `main` field |
 | `vitest.config.ts` | Add `test/unit/electron/**` to exclude array (prevent jsdom runner picking up electron tests) |
-| `.gitignore` | Add `bundled-node/`, `release/`, `dist/wizard/` |
+| `src/index.css` | Extract `:root`/`.dark` CSS variable blocks into `src/theme-variables.css`, replace with `@import` |
+| `.gitignore` | Add `bundled-node/`, `release/`, `dist/wizard/`, `dist/server-native/` |
 
 ---
 
@@ -1177,12 +1267,12 @@ Within each phase, the order is file-by-file as listed.
 
 2. **Windows "daemon" via Scheduled Tasks**: Rather than pulling in `node-windows` (heavy native dependency), we use `schtasks` which is built into every Windows installation. This provides "run at logon" and "restart on failure" behavior without native compilation headaches.
 
-3. **Bundled Node.js**: The daemon and app-bound modes run the server via a standalone Node.js binary bundled in the app's resources. This means:
+3. **Bundled Node.js with native module rebuild**: The daemon and app-bound modes run the server via a standalone Node.js binary bundled in the app's resources. Native modules (specifically `node-pty`) are compiled against this bundled Node.js version using `node-gyp rebuild` with the bundled Node's headers -- NOT via `@electron/rebuild`, which would compile against Electron's Node ABI and crash at runtime with `NODE_MODULE_VERSION` mismatch. This means:
    - No system Node.js dependency for end users
-   - node-pty is compiled against this specific Node version, avoiding ABI mismatches
+   - node-pty is compiled against the exact Node version it will run under
    - The Electron Node.js is completely separate from the server Node.js
 
-4. **Setup wizard as a separate BrowserWindow with its own Vite build**: The wizard is not a route in the main app -- it works without any server running, which is essential for the first-run experience. It has a dedicated Vite config (`vite.wizard.config.ts`) that produces a self-contained bundle (`dist/wizard/`) with React JSX transform and Tailwind CSS processing. The `tsconfig.electron.json` excludes `.tsx` files; they are handled exclusively by Vite.
+4. **Setup wizard as a separate BrowserWindow with its own Vite build**: The wizard is not a route in the main app -- it works without any server running, which is essential for the first-run experience. It has a dedicated Vite config (`vite.wizard.config.ts`) that produces a self-contained bundle (`dist/wizard/`) with React JSX transform and Tailwind CSS processing. CSS theme variables (`:root`/`.dark` custom properties) are extracted into `src/theme-variables.css` and imported by both the main app's CSS and the wizard's CSS, ensuring semantic Tailwind colors (e.g., `bg-background`, `text-foreground`) render correctly in both contexts. The `tsconfig.electron.json` excludes `.tsx` files; they are handled exclusively by Vite.
 
 5. **Dynamic `import()` in platform factory**: The project uses `"type": "module"` (ESM) throughout. The daemon manager factory uses `await import()` instead of `require()` (which is unavailable in ESM). The factory function is `async`, which fits naturally since all callers are already async.
 
@@ -1198,7 +1288,7 @@ Within each phase, the order is file-by-file as listed.
 
 ## Risk Assessment
 
-1. **node-pty native compilation**: node-pty needs to be compiled against the bundled Node.js version, not Electron's Node.js. This is handled by `@electron/rebuild` configuration and by running the server in a separate Node.js process.
+1. **node-pty native compilation**: node-pty must be compiled against the bundled standalone Node.js ABI, not Electron's Node ABI. The `prepare-bundled-node.ts` script handles this by running `node-gyp rebuild` with the bundled Node's headers and version as the target. If this step produces a binary for the wrong ABI, the server will crash on startup with `NODE_MODULE_VERSION` mismatch. This is tested by the CI build matrix (which runs a real build on each platform) but is inherently fragile -- any upgrade to the bundled Node.js version requires re-running this step.
 
 2. **Cross-platform daemon reliability**: Each platform's daemon implementation is relatively simple (write a config file, run a CLI command) but edge cases exist (permissions, systemd user sessions not running without login, etc.). The unit tests mock OS calls; real OS testing is deferred to manual QA.
 
