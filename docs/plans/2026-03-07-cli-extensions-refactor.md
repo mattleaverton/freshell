@@ -9,7 +9,7 @@
 This refactoring creates extension folders (e.g., `extensions/claude-code/freshell.json`) for each CLI, then **removes** the hardcoded registrations and replaces them with dynamic derivation from the extension registry. After this refactoring:
 - `CODING_CLI_COMMANDS` becomes a `Map<string, CodingCliCommandSpec>` built from extension manifests at startup
 - `CLI_COMMANDS` in `platform.ts` is replaced by a function parameter from the extension registry
-- WS protocol validation of provider names and terminal modes becomes dynamic in `server/ws-handler.ts` (the shared module stays immutable)
+- `CodingCliProviderSchema` in `shared/ws-protocol.ts` widens to `z.string().min(1)` (one-line change); `WsHandler` adds dynamic `refine()` validation for the two messages that spawn processes
 - `CODING_CLI_PROVIDER_CONFIGS` and `CODING_CLI_PROVIDER_LABELS` on the frontend are derived from the extension entries in Redux
 - Adding a new CLI (e.g., Aider) means dropping a folder in `extensions/` -- zero code changes
 
@@ -42,24 +42,44 @@ The user explicitly said "In the refactoring, you'll move those there" -- meanin
 
 1. **`CODING_CLI_COMMANDS`** in `server/terminal-registry.ts` changes from a hardcoded `Record` to a dynamic `Map<string, CodingCliCommandSpec>` built at server startup from the extension registry
 2. **`CLI_COMMANDS`** in `server/platform.ts` is removed; `detectAvailableClis()` derives its CLI list from an argument populated by the extension registry
-3. WS protocol validation of provider names and terminal modes is built dynamically inside `server/ws-handler.ts` at construction time; the shared module `shared/ws-protocol.ts` keeps its existing static `const` exports and `import type` contract with the client unchanged
+3. `CodingCliProviderSchema` in `shared/ws-protocol.ts` widens from `z.enum([...])` to `z.string().min(1)` -- a single-line change. All schemas that embed it automatically accept any provider string. `WsHandler` still validates `terminal.create` and `codingcli.create` dynamically (via `z.string().refine()`) against registered extensions
 4. **`CODING_CLI_PROVIDER_CONFIGS`**, **`CODING_CLI_PROVIDER_LABELS`**, and **`CODING_CLI_PROVIDERS`** in `src/lib/coding-cli-utils.ts` are replaced by derivation from the Redux `extensions.entries` state
 
 ### Type strategy: `TerminalMode` becomes `'shell' | string`
 
 Since `CODING_CLI_COMMANDS` will be a dynamic `Map<string, CodingCliCommandSpec>` (not a static `Record<Exclude<TerminalMode, 'shell'>, ...>`), there is no static record type to protect. `TerminalMode` widens to `'shell' | string`. No dual-type system (`TerminalModeOrExtension`) is needed.
 
-On the frontend, `TabMode` (currently `'shell' | CodingCliProviderName`) also widens to `'shell' | string`. `CodingCliProviderName` becomes `string`.
+On the frontend, `TabMode` (currently `'shell' | CodingCliProviderName`) also widens to `'shell' | string`. `CodingCliProviderName` becomes `string` -- both from the shared module (where `z.string().min(1)` infers to `string`) and from the frontend's own redefinition in `coding-cli-types.ts`.
 
-### WS protocol validation: server-side dynamic schemas, shared module stays immutable
+### WS protocol validation: widen `CodingCliProviderSchema` to `z.string().min(1)`
 
 The `shared/ws-protocol.ts` module is imported by both server and client. The client uses `import type` exclusively (verified: `src/lib/coding-cli-types.ts`, `src/lib/ws-client.ts`, `src/store/types.ts`, `src/store/paneTypes.ts` all use `import type`). The server imports runtime Zod schemas.
 
-**Problem with mutable `let` schemas:** Zod schemas capture inner schemas at construction time. `TerminalMetaListResponseSchema` (line 79 of `shared/ws-protocol.ts`) uses `z.array(TerminalMetaRecordSchema)`. `TerminalMetaUpdatedSchema` (line 85) also uses `TerminalMetaRecordSchema`. Even if we reassigned `TerminalMetaRecordSchema`, these outer schemas would still hold the old reference. Rebuilding ALL of them creates a fragile cascade where any new schema that uses a dynamic schema must also be rebuilt.
+**Problem:** `CodingCliProviderSchema` is embedded in many schemas that are used at runtime on the server -- not just `TerminalCreateSchema` and `CodingCliCreateSchema`. The full list of schemas that embed it:
 
-**Solution:** Keep `shared/ws-protocol.ts` completely immutable with `const` exports. The existing static schemas serve as the type source (client) and as the baseline (server). The server's `WsHandler` builds its own dynamic validation schemas internally during construction, where the `extensionManager` is already available. This is already the pattern: `WsHandler` builds its own `ClientMessageSchema` at module level (line 238 of `ws-handler.ts`); we move that to the constructor and add dynamic provider/mode validation.
+1. `SessionLocatorSchema` (line 40): `provider: CodingCliProviderSchema` -- imported by `sessions-router.ts` and `server/agent-api/layout-schema.ts`
+2. `TerminalMetaRecordSchema` (line 63): `provider: CodingCliProviderSchema.optional()`
+3. `TerminalMetaListResponseSchema` (line 79): captures `TerminalMetaRecordSchema` at module load
+4. `TerminalMetaUpdatedSchema` (line 85): captures `TerminalMetaRecordSchema` at module load
+5. `UiLayoutSyncSchema` (line 221): uses `SessionLocatorSchema` via `fallbackSessionRef`
+6. `TerminalCreateSchema` (line 167): `mode` field
+7. `CodingCliCreateSchema` (line 249): `provider` field
 
-The `CodingCliProviderSchema` export in `shared/ws-protocol.ts` stays as a static `z.enum(...)`. The `CodingCliProviderName` type stays as the narrow union for backward compat. Server code that needs the wider type uses `string` directly. The ws-handler uses its own dynamic schema for validation, not the shared one.
+Rebuilding all 7 schemas dynamically in `WsHandler` would be fragile -- any new schema that uses `CodingCliProviderSchema` would silently break. And some of these schemas are used outside `WsHandler` (e.g., `sessions-router.ts` imports `CodingCliProviderSchema` directly, `layout-schema.ts` imports `SessionLocatorSchema`).
+
+**Solution:** Widen `CodingCliProviderSchema` to `z.string().min(1)` in `shared/ws-protocol.ts`. This is a single-line change that eliminates the entire cascade. `CodingCliProviderName` widens to `string` (inferred from `z.string().min(1)`), which is already what the plan does on the frontend (Task 7). The client only uses `import type` so there is no bundle impact. All schemas that embed `CodingCliProviderSchema` automatically accept any non-empty string.
+
+Server-side validation for the two security-sensitive messages (`terminal.create` mode and `codingcli.create` provider) is still done dynamically in the `WsHandler` constructor via `z.string().refine()` against the extension-derived set. This is the right level of strictness: structural schemas accept any provider string (so metadata, session locators, and layout sync work for any extension), while the two messages that actually spawn processes validate against registered extensions.
+
+```typescript
+// shared/ws-protocol.ts -- the ONLY change to this file:
+// BEFORE:
+export const CodingCliProviderSchema = z.enum(['claude', 'codex', 'opencode', 'gemini', 'kimi'])
+// AFTER:
+export const CodingCliProviderSchema = z.string().min(1)
+```
+
+`CodingCliProviderName` is still `z.infer<typeof CodingCliProviderSchema>`, which now infers to `string`. This is consistent with the frontend widening in Task 7.
 
 ### `server/ws-schemas.ts` is dead code -- verified and deleted
 
@@ -594,18 +614,37 @@ git commit -m "feat: derive CLI availability detection from extension registry"
 
 ---
 
-### Task 6: Build dynamic WS validation schemas in `ws-handler.ts` and delete `ws-schemas.ts`
+### Task 6: Widen `CodingCliProviderSchema`, build dynamic `terminal.create`/`codingcli.create` validation, and delete `ws-schemas.ts`
 
-The `CodingCliProviderSchema` in `shared/ws-protocol.ts` is a static `z.enum(...)`. New CLI extensions added via manifests would be rejected by `TerminalCreateSchema.mode`, `CodingCliCreateSchema.provider`, and the `CodingCliProviderSchema.safeParse()` calls in the ws-handler. The server needs dynamic validation.
-
-**Key design:** The `shared/ws-protocol.ts` module stays **completely immutable** -- all exports remain `const`. The static schemas continue to serve as the type source for the client (which only uses `import type`) and as structural templates. The `WsHandler` constructs its own dynamic validation schemas in its constructor, where the `extensionManager` is already available. This avoids mutable module-level state, Zod's eager schema capture problem (inner schemas baked in at module-load time), and the risk of code evaluating schemas before initialization.
+`CodingCliProviderSchema` is embedded in 7 schemas used at runtime on the server. Widening it to `z.string().min(1)` in `shared/ws-protocol.ts` is a single-line change that eliminates the entire cascade. The two messages that actually spawn processes (`terminal.create` and `codingcli.create`) still get dynamic validation in `WsHandler` via `z.string().refine()`.
 
 **Files:**
-- Modify: `server/ws-handler.ts` -- build all validation schemas dynamically in the constructor
+- Modify: `shared/ws-protocol.ts` -- widen `CodingCliProviderSchema` to `z.string().min(1)` (one-line change)
+- Modify: `server/ws-handler.ts` -- build dynamic `terminal.create` and `codingcli.create` schemas in constructor
 - Delete: `server/ws-schemas.ts` -- dead code (verified: zero imports across the repo)
-- `shared/ws-protocol.ts` -- **NO CHANGES** (immutable)
 
-**Step 1: Delete `server/ws-schemas.ts`**
+**Step 1: Widen `CodingCliProviderSchema` in `shared/ws-protocol.ts`**
+
+```typescript
+// BEFORE (line 36):
+export const CodingCliProviderSchema = z.enum(['claude', 'codex', 'opencode', 'gemini', 'kimi'])
+
+// AFTER:
+export const CodingCliProviderSchema = z.string().min(1)
+```
+
+This single change fixes all 7 schemas that embed `CodingCliProviderSchema`:
+1. `SessionLocatorSchema` (line 40) -- used by `sessions-router.ts` and `server/agent-api/layout-schema.ts`
+2. `TerminalMetaRecordSchema` (line 63)
+3. `TerminalMetaListResponseSchema` (line 79) -- captures `TerminalMetaRecordSchema`
+4. `TerminalMetaUpdatedSchema` (line 85) -- captures `TerminalMetaRecordSchema`
+5. `UiLayoutSyncSchema` (line 221) -- uses `SessionLocatorSchema` via `fallbackSessionRef`
+6. `TerminalCreateSchema` (line 167) -- `mode` field (still gets additional `refine()` in WsHandler)
+7. `CodingCliCreateSchema` (line 249) -- `provider` field (still gets additional `refine()` in WsHandler)
+
+`CodingCliProviderName` remains `z.infer<typeof CodingCliProviderSchema>`, which now infers to `string`. This is consistent with the frontend widening in Task 7. The client only uses `import type` from this module, so there is no bundle impact.
+
+**Step 2: Delete `server/ws-schemas.ts`**
 
 ```bash
 git rm server/ws-schemas.ts
@@ -613,11 +652,9 @@ git rm server/ws-schemas.ts
 
 This file is dead code. Verified by grepping for `from.*ws-schemas` across the entire repo -- zero matches.
 
-**Step 2: In `server/ws-handler.ts`, build `ClientMessageSchema` dynamically in the constructor**
+**Step 3: In `server/ws-handler.ts`, build dynamic `terminal.create` and `codingcli.create` schemas in the constructor**
 
-Currently, `ClientMessageSchema` is a module-level `const` (line 238) that uses `TerminalCreateSchema` and `CodingCliCreateSchema` imported from `shared/ws-protocol.ts`. These schemas have hardcoded `z.enum(...)` validation for mode and provider.
-
-Move the schema construction to the `WsHandler` constructor. Build a dynamic `TerminalCreateSchema` and `CodingCliCreateSchema` that accept extension-registered modes/providers:
+The static `TerminalCreateSchema` and `CodingCliCreateSchema` from `shared/ws-protocol.ts` now accept any non-empty string for mode/provider (because `CodingCliProviderSchema` was widened). But we still want the server to reject unknown modes/providers when spawning processes. Build dynamic replacements in the `WsHandler` constructor with `z.string().refine()`:
 
 ```typescript
 class WsHandler {
@@ -648,7 +685,9 @@ class WsHandler {
     const allModes = new Set(['shell', ...extensionModes])
     this.codingCliProviderSet = new Set(extensionModes)
 
-    // Build dynamic schemas for validation
+    // Build dynamic schemas for the two process-spawning messages.
+    // All other schemas (SessionLocatorSchema, TerminalMetaRecordSchema, etc.)
+    // already accept any string via the widened CodingCliProviderSchema.
     const dynamicTerminalCreateSchema = z.object({
       type: z.literal('terminal.create'),
       requestId: z.string().min(1),
@@ -693,7 +732,7 @@ class WsHandler {
       TerminalKillSchema,
       TerminalListSchema,
       TerminalMetaListSchema,
-      UiLayoutSyncSchema,
+      UiLayoutSyncSchema,           // already accepts any string via widened CodingCliProviderSchema
       dynamicCodingCliCreateSchema,  // replaces static CodingCliCreateSchema
       CodingCliInputSchema,
       CodingCliKillSchema,
@@ -712,50 +751,34 @@ class WsHandler {
   }
 ```
 
-**Step 3: Replace `CodingCliProviderSchema.safeParse()` calls with dynamic validation**
+Note that `UiLayoutSyncSchema` uses `SessionLocatorSchema`, which uses the widened `CodingCliProviderSchema`. It stays in the discriminated union as-is -- no dynamic replacement needed. Same for all other schemas that embed `CodingCliProviderSchema`.
 
-The ws-handler uses `CodingCliProviderSchema.safeParse()` directly at lines 135 and 164 (in `normalizeUiSessionLocator` and `extractSessionLocatorsFromUiContent`). These are currently module-level functions. They need to become instance methods on `WsHandler` (or accept the provider set as a parameter) to access the dynamic set:
+**Step 4: Replace `CodingCliProviderSchema.safeParse()` calls with the widened schema**
+
+The ws-handler uses `CodingCliProviderSchema.safeParse()` at lines 135 and 164 (in `normalizeUiSessionLocator` and `extractSessionLocatorsFromUiContent`). Since `CodingCliProviderSchema` is now `z.string().min(1)`, these calls will accept any non-empty string, which is correct -- session locators and metadata should work for any registered provider, not just the 5 hardcoded ones. No code change needed for these calls; they continue to work as-is.
+
+However, these functions also serve a validation role (rejecting obviously invalid data). The widened schema still validates that the value is a non-empty string, which is sufficient. If stricter validation is desired (only accept registered providers), the functions can use `this.codingCliProviderSet.has()` instead:
 
 ```typescript
-// Add instance method:
-private isValidProvider(value: unknown): value is string {
-  return typeof value === 'string' && this.codingCliProviderSet.has(value)
-}
-
-// In normalizeUiSessionLocator (now an instance method):
-private normalizeUiSessionLocator(value: unknown): SidebarSessionLocator | undefined {
-  if (!value || typeof value !== 'object') return undefined
-  const candidate = value as { provider?: unknown; sessionId?: unknown; serverInstanceId?: unknown }
-  if (!this.isValidProvider(candidate.provider) || !isNonEmptyString(candidate.sessionId)) return undefined
-  return {
-    provider: candidate.provider,
-    sessionId: candidate.sessionId,
-    ...(isNonEmptyString(candidate.serverInstanceId) ? { serverInstanceId: candidate.serverInstanceId } : {}),
-  }
-}
-
-// In extractSessionLocatorsFromUiContent (now an instance method):
-private extractSessionLocatorsFromUiContent(content: Record<string, unknown>): SidebarSessionLocator[] {
-  // ...
-  if (!this.isValidProvider(content.mode) || !isNonEmptyString(content.resumeSessionId)) {
-    return locators
-  }
-  // ...
-}
+// Optional: If we want session locator normalization to reject unknown providers,
+// convert to instance methods. Otherwise, the widened CodingCliProviderSchema
+// (z.string().min(1)) is sufficient -- it validates structure, not registration.
+// The recommendation is to keep these as-is since session locators may reference
+// providers from other server instances.
 ```
 
-**Step 4: Update the parse call**
+**Step 5: Update the parse call**
 
 Change line 1086 from `ClientMessageSchema.safeParse(msg)` to `this.clientMessageSchema.safeParse(msg)`.
 
-Remove `TerminalCreateSchema`, `CodingCliCreateSchema`, and `CodingCliProviderSchema` from the imports at line 27-60 since they're no longer used (they're rebuilt dynamically). Keep the other static schema imports (HelloSchema, PingSchema, TerminalAttachSchema, etc.) as they don't need dynamic behavior.
+Remove `TerminalCreateSchema` and `CodingCliCreateSchema` from the imports at line 27-60 since they're replaced by dynamic versions. Keep `CodingCliProviderSchema` import if it's still used (for `safeParse` calls in session locator functions). Keep all other static schema imports as they don't need dynamic behavior.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
 git rm server/ws-schemas.ts
-git add server/ws-handler.ts
-git commit -m "feat: build dynamic WS validation schemas in WsHandler, delete dead ws-schemas.ts"
+git add shared/ws-protocol.ts server/ws-handler.ts
+git commit -m "feat: widen CodingCliProviderSchema to z.string().min(1), build dynamic spawn validation in WsHandler, delete dead ws-schemas.ts"
 ```
 
 ---
@@ -1268,7 +1291,7 @@ git commit -m "fix: update tests for CLI extensions refactor"
 
 2. **`TerminalMode` becomes `'shell' | string`.** Since `CODING_CLI_COMMANDS` is now a dynamic `Map`, there is no static `Record` type to protect. No dual-type system (`TerminalModeOrExtension`) is needed. On the frontend, `TabMode` and `CodingCliProviderName` also widen to `string`.
 
-3. **`shared/ws-protocol.ts` stays completely immutable.** All exports remain `const`. The static Zod schemas serve as the type source for the client (which only uses `import type`) and as structural templates. The server's `WsHandler` builds its own dynamic validation schemas in its constructor, where the `extensionManager` is available. This avoids mutable module-level state, Zod's eager schema capture problem (inner schemas baked in at module-load time), and the risk of code evaluating schemas before initialization.
+3. **`CodingCliProviderSchema` widens to `z.string().min(1)`.** This is a single-line change in `shared/ws-protocol.ts` that eliminates the entire cascade of dynamic schema rebuilding. All 7 schemas that embed `CodingCliProviderSchema` (including `SessionLocatorSchema`, `TerminalMetaRecordSchema`, `UiLayoutSyncSchema`, etc.) automatically accept any non-empty string. `CodingCliProviderName` infers to `string`, consistent with frontend widening. The two messages that spawn processes (`terminal.create` and `codingcli.create`) still get dynamic `refine()` validation in `WsHandler` against registered extensions.
 
 4. **`server/ws-schemas.ts` is dead code and is deleted.** Verified: zero imports across the entire repo. It was a stale copy of ws-handler schemas with its own hardcoded `CodingCliProviderSchema` and `ClientMessageSchema`.
 
