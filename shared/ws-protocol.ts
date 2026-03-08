@@ -514,6 +514,7 @@ export type SessionsUpdatedMessage = {
   projects: unknown[]
   clear?: true
   append?: true
+  authoritative?: true
   totalSessions?: number
   oldestIncludedTimestamp?: number
   oldestIncludedSessionId?: string

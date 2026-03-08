@@ -921,6 +921,7 @@ export class WsHandler {
     state: ClientState,
     projects: ProjectGroup[],
     options: {
+      authoritative?: boolean
       forceClear?: boolean
       limit?: number
       before?: number
@@ -929,6 +930,7 @@ export class WsHandler {
   ): Promise<boolean> {
     const paginated = this.paginateSidebarProjects(projects, state, options)
     const allSent = await this.sendChunkedSessions(ws, paginated.projects, {
+      authoritative: options.authoritative,
       totalSessions: paginated.totalSessions,
       oldestIncludedTimestamp: paginated.oldestIncludedTimestamp,
       oldestIncludedSessionId: paginated.oldestIncludedSessionId,
@@ -944,7 +946,10 @@ export class WsHandler {
       const snapshot = await this.handshakeSnapshotProvider()
       const projects = snapshot.projects ?? []
       if (state.supportsSessionsPaginationV1) {
-        await this.sendSidebarSessionsSnapshot(ws, state, projects, { forceClear: true })
+        await this.sendSidebarSessionsSnapshot(ws, state, projects, {
+          authoritative: true,
+          forceClear: true,
+        })
       } else {
         const allSent = await this.sendChunkedSessions(ws, projects, undefined, true)
         state.sessionsSnapshotSent = allSent
@@ -989,6 +994,7 @@ export class WsHandler {
     ws: LiveWebSocket,
     projects: ProjectGroup[],
     paginationMeta?: {
+      authoritative?: boolean
       totalSessions: number
       oldestIncludedTimestamp: number
       oldestIncludedSessionId: string
@@ -1034,6 +1040,7 @@ export class WsHandler {
         projects: ProjectGroup[]
         clear?: true
         append?: true
+        authoritative?: true
         totalSessions?: number
         oldestIncludedTimestamp?: number
         oldestIncludedSessionId?: string

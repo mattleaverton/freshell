@@ -402,4 +402,129 @@ describe('open tab session sidebar visibility (e2e)', () => {
       expect(screen.getByText('Older Open Session')).toBeInTheDocument()
     })
   })
+
+  it('removes a force-included older session when a later personalized refresh no longer includes it', async () => {
+    fetchSidebarSessionsSnapshot.mockResolvedValueOnce({
+      projects: [{
+        projectPath: '/recent',
+        sessions: [{
+          provider: 'codex',
+          sessionId: 'recent-session',
+          projectPath: '/recent',
+          updatedAt: 10,
+          title: 'Recent Session',
+        }],
+      }],
+      totalSessions: 100,
+      oldestIncludedTimestamp: 10,
+      oldestIncludedSessionId: 'codex:recent-session',
+      hasMore: true,
+    })
+
+    const store = createStore()
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('Recent Session')).toBeInTheDocument()
+    })
+
+    act(() => {
+      broadcastWs({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-local',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(store.getState().connection.serverInstanceId).toBe('srv-local')
+    })
+
+    await act(async () => {
+      await store.dispatch(openSessionTab({ provider: 'codex', sessionId: 'older-open' }) as any)
+    })
+
+    await waitFor(() => {
+      expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'ui.layout.sync',
+        tabs: expect.arrayContaining([
+          expect.objectContaining({
+            fallbackSessionRef: {
+              provider: 'codex',
+              sessionId: 'older-open',
+            },
+          }),
+        ]),
+      }))
+    })
+
+    act(() => {
+      broadcastWs({
+        type: 'sessions.updated',
+        clear: true,
+        projects: [
+          {
+            projectPath: '/recent',
+            sessions: [{
+              provider: 'codex',
+              sessionId: 'recent-session',
+              projectPath: '/recent',
+              updatedAt: 10,
+              title: 'Recent Session',
+            }],
+          },
+          {
+            projectPath: '/older',
+            sessions: [{
+              provider: 'codex',
+              sessionId: 'older-open',
+              projectPath: '/older',
+              updatedAt: 1,
+              title: 'Older Open Session',
+            }],
+          },
+        ],
+        totalSessions: 101,
+        oldestIncludedTimestamp: 10,
+        oldestIncludedSessionId: 'codex:recent-session',
+        hasMore: true,
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Older Open Session')).toBeInTheDocument()
+    })
+
+    act(() => {
+      broadcastWs({
+        type: 'sessions.updated',
+        clear: true,
+        authoritative: true,
+        projects: [{
+          projectPath: '/recent',
+          sessions: [{
+            provider: 'codex',
+            sessionId: 'recent-session',
+            projectPath: '/recent',
+            updatedAt: 10,
+            title: 'Recent Session',
+          }],
+        }],
+        totalSessions: 100,
+        oldestIncludedTimestamp: 10,
+        oldestIncludedSessionId: 'codex:recent-session',
+        hasMore: true,
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByText('Older Open Session')).not.toBeInTheDocument()
+    })
+  })
 })

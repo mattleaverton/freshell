@@ -191,6 +191,7 @@ describe('ws sidebar snapshot refresh', () => {
       const initialIds = flattenSessions(initialSessions.projects)
       expect(initialIds).not.toContain(targetSessionId)
       expect(initialIds).not.toContain(foreignSessionId)
+      expect(initialSessions.authoritative).toBeUndefined()
 
       const refreshPromise = waitForMessage(
         ws,
@@ -255,6 +256,7 @@ describe('ws sidebar snapshot refresh', () => {
       expect(refreshedIds).toContain(targetSessionId)
       expect(refreshedIds.filter((sessionId) => sessionId === targetSessionId)).toHaveLength(1)
       expect(refreshedIds).not.toContain(foreignSessionId)
+      expect(refreshedSessions.authoritative).toBe(true)
       expect(refreshedSessions.hasMore).toBe(true)
 
       ws.send(JSON.stringify({
@@ -322,6 +324,7 @@ describe('ws sidebar snapshot refresh', () => {
       const broadcastedIds = flattenSessions(broadcastedSessions.projects)
       expect(broadcastedIds).toContain(targetSessionId)
       expect(broadcastedIds).not.toContain(foreignSessionId)
+      expect(broadcastedSessions.authoritative).toBeUndefined()
     } finally {
       await closeWs()
     }

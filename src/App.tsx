@@ -400,6 +400,7 @@ export default function App() {
     let snapshotGeneration = 0
     let activePaginationGeneration = -1
     let pendingPaginationMeta: {
+      authoritative?: boolean
       totalSessions: number
       oldestIncludedTimestamp: number
       oldestIncludedSessionId: string
@@ -418,8 +419,9 @@ export default function App() {
       if (chunkedBuffer) {
         // When the snapshot is paginated (hasMore), merge with existing state
         // to preserve older sessions the user already loaded via scroll pagination.
-        // Full snapshots (no hasMore) replace entirely for correctness.
-        if (pendingPaginationMeta?.hasMore) {
+        // Personalized refreshes can mark the paginated snapshot authoritative,
+        // which means the new snapshot should fully replace the visible window.
+        if (pendingPaginationMeta?.hasMore && !pendingPaginationMeta.authoritative) {
           dispatch(mergeSnapshotProjects(chunkedBuffer))
         } else {
           dispatch(setProjects(chunkedBuffer))
@@ -532,6 +534,7 @@ export default function App() {
           // Extract optional pagination metadata from first/single chunk
           const hasPaginationMeta = typeof msg.totalSessions === 'number'
           const paginationMeta = hasPaginationMeta ? {
+            authoritative: msg.authoritative === true,
             totalSessions: msg.totalSessions as number,
             oldestIncludedTimestamp: msg.oldestIncludedTimestamp as number,
             oldestIncludedSessionId: msg.oldestIncludedSessionId as string,
@@ -560,7 +563,7 @@ export default function App() {
             snapshotGeneration++
             if (chunkedBuffer) flushChunkedBuffer()
             // When paginated, merge to preserve older sessions loaded via scroll.
-            if (paginationMeta?.hasMore) {
+            if (paginationMeta?.hasMore && !paginationMeta.authoritative) {
               dispatch(mergeSnapshotProjects(projects))
             } else {
               dispatch(setProjects(projects))
