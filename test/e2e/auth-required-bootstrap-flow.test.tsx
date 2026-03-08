@@ -8,6 +8,9 @@ import tabsReducer from '@/store/tabsSlice'
 import connectionReducer from '@/store/connectionSlice'
 import sessionsReducer from '@/store/sessionsSlice'
 import panesReducer from '@/store/panesSlice'
+import tabRegistryReducer from '@/store/tabRegistrySlice'
+import terminalMetaReducer from '@/store/terminalMetaSlice'
+import extensionsReducer from '@/store/extensionsSlice'
 import { networkReducer } from '@/store/networkSlice'
 
 const mockSend = vi.fn()
@@ -15,6 +18,11 @@ const mockOnMessage = vi.fn(() => () => {})
 const mockOnReconnect = vi.fn(() => () => {})
 const mockConnect = vi.fn().mockResolvedValue(undefined)
 const mockApiGet = vi.fn().mockResolvedValue({})
+const fetchSidebarSessionsSnapshot = vi.fn()
+const wsState = {
+  isReady: false,
+  serverInstanceId: undefined as string | undefined,
+}
 
 vi.mock('@/lib/ws-client', () => ({
   getWsClient: () => ({
@@ -23,6 +31,15 @@ vi.mock('@/lib/ws-client', () => ({
     onReconnect: mockOnReconnect,
     connect: mockConnect,
     setHelloExtensionProvider: vi.fn(),
+    get isReady() {
+      return wsState.isReady
+    },
+    get serverInstanceId() {
+      return wsState.serverInstanceId
+    },
+    get state() {
+      return wsState.isReady ? 'ready' : 'connected'
+    },
   }),
 }))
 
@@ -32,6 +49,7 @@ vi.mock('@/lib/api', () => ({
     patch: vi.fn().mockResolvedValue({}),
     post: vi.fn().mockResolvedValue({}),
   },
+  fetchSidebarSessionsSnapshot: (options?: unknown) => fetchSidebarSessionsSnapshot(options),
   isApiUnauthorizedError: (err: any) => !!err && typeof err === 'object' && err.status === 401,
 }))
 
@@ -72,7 +90,10 @@ function createStore() {
       connection: connectionReducer,
       sessions: sessionsReducer,
       panes: panesReducer,
+      tabRegistry: tabRegistryReducer,
+      terminalMeta: terminalMetaReducer,
       network: networkReducer,
+      extensions: extensionsReducer,
     },
     middleware: (getDefault) =>
       getDefault({
@@ -102,17 +123,36 @@ function createStore() {
         lastError: undefined,
         platform: null,
         availableClis: {},
+        serverInstanceId: undefined,
       },
       panes: {
         layouts: {},
         activePane: {},
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
       },
+      tabRegistry: {
+        deviceId: 'device-test',
+        deviceLabel: 'device-test',
+        deviceAliases: {},
+        localOpen: [],
+        remoteOpen: [],
+        closed: [],
+        localClosed: {},
+        searchRangeDays: 30,
+        loading: false,
+      },
+      terminalMeta: { byTerminalId: {} },
       network: {
         status: null,
         loading: false,
         configuring: false,
         error: null,
       },
+      extensions: { entries: [] },
     },
   })
 }
@@ -121,6 +161,10 @@ describe('auth required bootstrap flow (e2e)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
+    fetchSidebarSessionsSnapshot.mockReset()
+    fetchSidebarSessionsSnapshot.mockResolvedValue([])
+    wsState.isReady = false
+    wsState.serverInstanceId = undefined
 
     mockApiGet.mockImplementation((url: string) => {
       if (url === '/api/settings') {

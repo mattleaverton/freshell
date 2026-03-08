@@ -8,6 +8,9 @@ import tabsReducer from '@/store/tabsSlice'
 import connectionReducer from '@/store/connectionSlice'
 import sessionsReducer from '@/store/sessionsSlice'
 import panesReducer from '@/store/panesSlice'
+import tabRegistryReducer from '@/store/tabRegistrySlice'
+import terminalMetaReducer from '@/store/terminalMetaSlice'
+import extensionsReducer from '@/store/extensionsSlice'
 import { networkReducer, setNetworkStatus, type NetworkStatusResponse } from '@/store/networkSlice'
 
 // Ensure DOM is clean even if another test file forgot cleanup.
@@ -20,6 +23,10 @@ const mockSend = vi.fn()
 const mockOnMessage = vi.fn(() => () => {})
 const mockOnReconnect = vi.fn(() => () => {})
 const mockConnect = vi.fn().mockResolvedValue(undefined)
+const wsState = {
+  isReady: false,
+  serverInstanceId: undefined as string | undefined,
+}
 
 vi.mock('@/lib/ws-client', () => ({
   getWsClient: () => ({
@@ -28,17 +35,29 @@ vi.mock('@/lib/ws-client', () => ({
     onReconnect: mockOnReconnect,
     connect: mockConnect,
     setHelloExtensionProvider: vi.fn(),
+    get isReady() {
+      return wsState.isReady
+    },
+    get serverInstanceId() {
+      return wsState.serverInstanceId
+    },
+    get state() {
+      return wsState.isReady ? 'ready' : 'connected'
+    },
   }),
 }))
 
 // Mock the api module
 const mockApiGet = vi.fn().mockResolvedValue({})
+const fetchSidebarSessionsSnapshot = vi.fn()
 vi.mock('@/lib/api', () => ({
   api: {
     get: (url: string) => mockApiGet(url),
     patch: vi.fn().mockResolvedValue({}),
     post: vi.fn().mockResolvedValue({}),
   },
+  fetchSidebarSessionsSnapshot: (options?: unknown) => fetchSidebarSessionsSnapshot(options),
+  isApiUnauthorizedError: (err: any) => !!err && typeof err === 'object' && err.status === 401,
 }))
 
 const mockGenerateQr = vi.fn().mockReturnValue({ size: 21 })
@@ -131,7 +150,10 @@ function createTestStore() {
       connection: connectionReducer,
       sessions: sessionsReducer,
       panes: panesReducer,
+      tabRegistry: tabRegistryReducer,
+      terminalMeta: terminalMetaReducer,
       network: networkReducer,
+      extensions: extensionsReducer,
     },
     middleware: (getDefault) =>
       getDefault({
@@ -159,17 +181,38 @@ function createTestStore() {
       connection: {
         status: 'ready' as const,
         lastError: undefined,
+        platform: null,
+        availableClis: {},
+        serverInstanceId: undefined,
       },
       panes: {
         layouts: {},
         activePane: {},
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
       },
+      tabRegistry: {
+        deviceId: 'device-test',
+        deviceLabel: 'device-test',
+        deviceAliases: {},
+        localOpen: [],
+        remoteOpen: [],
+        closed: [],
+        localClosed: {},
+        searchRangeDays: 30,
+        loading: false,
+      },
+      terminalMeta: { byTerminalId: {} },
       network: {
         status: null,
         loading: false,
         configuring: false,
         error: null,
       },
+      extensions: { entries: [] },
     },
   })
 }
@@ -221,6 +264,10 @@ describe('App Component - Share Button', () => {
     vi.clearAllMocks()
     localStorage.clear()
     localStorage.setItem('freshell.auth-token', 'test-token-abc123')
+    fetchSidebarSessionsSnapshot.mockReset()
+    fetchSidebarSessionsSnapshot.mockResolvedValue([])
+    wsState.isReady = false
+    wsState.serverInstanceId = undefined
     mockApiGet.mockImplementation((url: string) => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
@@ -454,6 +501,10 @@ describe('App Component - Share Button', () => {
 describe('App Component - Version Status', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    fetchSidebarSessionsSnapshot.mockReset()
+    fetchSidebarSessionsSnapshot.mockResolvedValue([])
+    wsState.isReady = false
+    wsState.serverInstanceId = undefined
     mockApiGet.mockImplementation((url: string) => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
@@ -601,6 +652,10 @@ describe('App Bootstrap', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
+    fetchSidebarSessionsSnapshot.mockReset()
+    fetchSidebarSessionsSnapshot.mockResolvedValue([])
+    wsState.isReady = false
+    wsState.serverInstanceId = undefined
     const sessionStorageMock: Record<string, string> = {
       'auth-token': 'test-token-abc123',
     }
@@ -648,7 +703,7 @@ describe('App Bootstrap', () => {
     })
 
     await waitFor(() => {
-      const sessionsCalls = mockApiGet.mock.calls.filter(([url]) => typeof url === 'string' && url.startsWith('/api/sessions'))
+      const sessionsCalls = fetchSidebarSessionsSnapshot.mock.calls
       const settingsCalls = mockApiGet.mock.calls.filter(([url]) => url === '/api/settings')
       expect(sessionsCalls.length).toBe(1)
       expect(settingsCalls.length).toBe(1)
@@ -658,7 +713,7 @@ describe('App Bootstrap', () => {
     await Promise.resolve()
     await Promise.resolve()
 
-    const sessionsCalls = mockApiGet.mock.calls.filter(([url]) => typeof url === 'string' && url.startsWith('/api/sessions'))
+    const sessionsCalls = fetchSidebarSessionsSnapshot.mock.calls
     const settingsCalls = mockApiGet.mock.calls.filter(([url]) => url === '/api/settings')
     expect(sessionsCalls.length).toBe(1)
     expect(settingsCalls.length).toBe(1)
@@ -975,7 +1030,10 @@ describe('Tab Switching Keyboard Shortcuts', () => {
         connection: connectionReducer,
         sessions: sessionsReducer,
         panes: panesReducer,
+        tabRegistry: tabRegistryReducer,
+        terminalMeta: terminalMetaReducer,
         network: networkReducer,
+        extensions: extensionsReducer,
       },
       middleware: (getDefault) =>
         getDefault({
@@ -1003,17 +1061,38 @@ describe('Tab Switching Keyboard Shortcuts', () => {
         connection: {
           status: 'ready' as const,
           lastError: undefined,
+          platform: null,
+          availableClis: {},
+          serverInstanceId: undefined,
         },
         panes: {
           layouts: {},
           activePane: {},
+          paneTitles: {},
+          paneTitleSetByUser: {},
+          renameRequestTabId: null,
+          renameRequestPaneId: null,
+          zoomedPane: {},
         },
+        tabRegistry: {
+          deviceId: 'device-test',
+          deviceLabel: 'device-test',
+          deviceAliases: {},
+          localOpen: [],
+          remoteOpen: [],
+          closed: [],
+          localClosed: {},
+          searchRangeDays: 30,
+          loading: false,
+        },
+        terminalMeta: { byTerminalId: {} },
         network: {
           status: null,
           loading: false,
           configuring: false,
           error: null,
         },
+        extensions: { entries: [] },
       },
     })
   }
@@ -1021,6 +1100,10 @@ describe('Tab Switching Keyboard Shortcuts', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
+    fetchSidebarSessionsSnapshot.mockReset()
+    fetchSidebarSessionsSnapshot.mockResolvedValue([])
+    wsState.isReady = false
+    wsState.serverInstanceId = undefined
     const sessionStorageMock: Record<string, string> = {
       'auth-token': 'test-token',
     }
