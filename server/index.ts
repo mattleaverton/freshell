@@ -154,7 +154,8 @@ async function main() {
   const extensionManager = new ExtensionManager()
   const userExtDir = path.join(os.homedir(), '.freshell', 'extensions')
   const localExtDir = path.join(process.cwd(), '.freshell', 'extensions')
-  extensionManager.scan([userExtDir, localExtDir])
+  const builtinExtDir = path.join(process.cwd(), 'extensions')
+  extensionManager.scan([userExtDir, localExtDir, builtinExtDir])
 
   const server = http.createServer(app)
   const wsHandler = new WsHandler(
