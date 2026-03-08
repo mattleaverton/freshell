@@ -41,7 +41,7 @@ import { SdkBridge } from './sdk-bridge.js'
 import { createClientLogsRouter } from './client-logs.js'
 import { createStartupState } from './startup-state.js'
 import { getPerfConfig, initPerfLogging, setPerfLoggingEnabled, withPerfSpan } from './perf-logger.js'
-import { detectPlatform, detectAvailableClis, detectHostName } from './platform.js'
+import { detectPlatform, detectAvailableClis, detectHostName, type CliDetectionSpec } from './platform.js'
 import { resolveVisitPort } from './startup-url.js'
 import { NetworkManager } from './network-manager.js'
 import { getNetworkHost } from './get-network-host.js'
@@ -176,6 +176,20 @@ async function main() {
     cliCommandsMap.set(ext.manifest.name, spec)
   }
   registerCodingCliCommands(cliCommandsMap)
+
+  // Build CLI detection specs from extension manifests
+  const cliDetectionSpecs: CliDetectionSpec[] = extensionManager.getAll()
+    .filter(e => e.manifest.category === 'cli' && e.manifest.cli)
+    .map(e => ({
+      name: e.manifest.name,
+      envVar: e.manifest.cli!.envVar || '',
+      defaultCmd: e.manifest.cli!.command,
+    }))
+
+  // Collect all CLI extension names for settings validation
+  const allCliNames = extensionManager.getAll()
+    .filter(e => e.manifest.category === 'cli')
+    .map(e => e.manifest.name)
 
   const server = http.createServer(app)
   const wsHandler = new WsHandler(
@@ -319,7 +333,7 @@ async function main() {
 
   app.use('/api', createPlatformRouter({
     detectPlatform,
-    detectAvailableClis,
+    detectAvailableClis: () => detectAvailableClis(cliDetectionSpecs),
     detectHostName,
     checkForUpdate,
     appVersion: APP_VERSION,
