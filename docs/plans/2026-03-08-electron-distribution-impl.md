@@ -782,10 +782,34 @@ export default defineConfig({
       '@electron': path.resolve(__dirname, './electron'),
     },
   },
+  css: {
+    postcss: {
+      plugins: [
+        (await import('tailwindcss')).default({
+          config: path.resolve(__dirname, 'tailwind.config.wizard.js'),
+        }),
+        (await import('autoprefixer')).default,
+      ],
+    },
+  },
 })
 ```
 
-The wizard Tailwind config reuses the project's existing `tailwind.config.js` and `postcss.config.js` (Vite auto-detects PostCSS config from the project root).
+**Critical: Wizard-specific Tailwind config.** The project's existing `tailwind.config.js` has `content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}']`, which does not include the wizard's files in `electron/setup-wizard/`. If the wizard reused that config, Tailwind's JIT compiler would scan zero wizard files and produce zero utility classes, resulting in a completely unstyled wizard.
+
+**File:** `tailwind.config.wizard.js` (new, at repo root)
+
+```javascript
+import baseConfig from './tailwind.config.js'
+
+/** @type {import('tailwindcss').Config} */
+export default {
+  ...baseConfig,
+  content: ['./electron/setup-wizard/**/*.{ts,tsx,html}'],
+}
+```
+
+This inherits the project's theme (colors, fonts, spacing, plugins) so the wizard looks consistent with the main app, but scans only the wizard files for class usage. The `postcss.config.js` at the project root is NOT used by the wizard build -- instead, the PostCSS plugins are configured inline in the wizard Vite config to point at the wizard-specific Tailwind config.
 
 **File:** `package.json` (edit -- additional scripts)
 
@@ -980,7 +1004,7 @@ jobs:
 
 **File:** `.github/workflows/electron-release.yml` (new)
 
-On tag push (`v*`), builds and uploads to GitHub Releases:
+On tag push (`v*`), builds and uploads to GitHub Releases. Uses `npm run electron:build` which includes all build steps (client, server, electron main process, wizard, and electron-builder packaging):
 
 ```yaml
 name: Electron Release
@@ -997,13 +1021,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - run: npm ci
-      - run: npm run build
-      - run: npm run build:electron
-      - run: npx electron-builder --publish always
+      - run: npm run electron:build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
+
+Note: The release workflow calls `npm run electron:build` (which expands to `npm run build && npm run build:electron && npm run build:wizard && electron-builder`) rather than sequencing individual build steps. This ensures the release always includes every build artifact. If a new build step is added in the future (e.g. for a new renderer), only `electron:build` needs updating -- not every workflow that calls it.
 
 ---
 
@@ -1084,6 +1110,7 @@ These tests require `electron` to be installed and may be slow. They are marked 
 | `electron/setup-wizard/wizard.tsx` | Wizard React multi-step form |
 | `electron/setup-wizard/wizard.css` | Wizard Tailwind CSS entry |
 | `vite.wizard.config.ts` | Vite config for wizard build (JSX + Tailwind + bundling) |
+| `tailwind.config.wizard.js` | Wizard-specific Tailwind config (scans electron/setup-wizard/ for classes) |
 | `server/server-info-router.ts` | /api/server-info endpoint |
 | `installers/launchd/com.freshell.server.plist.template` | macOS plist template |
 | `installers/systemd/freshell.service.template` | Linux unit file template |
