@@ -29,6 +29,10 @@ const isDev = process.env.ELECTRON_DEV === '1'
 const configDir = path.join(os.homedir(), '.freshell')
 
 async function main(): Promise<void> {
+  // Wait for Electron to be ready before creating any BrowserWindow or using
+  // Electron APIs that require the app to be initialized.
+  await app.whenReady()
+
   // Read desktop config (or use defaults for first run)
   const desktopConfig = (await readDesktopConfig()) ?? getDefaultDesktopConfig()
   const port = 3001

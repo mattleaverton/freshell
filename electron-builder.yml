@@ -54,6 +54,11 @@ extraResources:
     to: server-node-modules
     filter:
       - "**/*"
+  # Tray icons (needed at runtime for system tray)
+  - from: assets/electron
+    to: assets
+    filter:
+      - "tray-icon*"
   # Installer templates (daemon service definitions for launchd/systemd/Windows Task Scheduler)
   - from: installers
     to: installers
