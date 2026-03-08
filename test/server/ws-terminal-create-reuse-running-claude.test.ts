@@ -81,6 +81,38 @@ function collectMessages(ws: WebSocket, durationMs: number): Promise<any[]> {
   })
 }
 
+function closeWebSocket(ws: WebSocket, timeoutMs = 1_000): Promise<void> {
+  return new Promise((resolve) => {
+    if (ws.readyState === WebSocket.CLOSED) {
+      resolve()
+      return
+    }
+
+    const cleanup = () => {
+      clearTimeout(timeout)
+      ws.off('close', onClose)
+      ws.off('error', onClose)
+    }
+
+    const onClose = () => {
+      cleanup()
+      resolve()
+    }
+
+    const timeout = setTimeout(() => {
+      cleanup()
+      resolve()
+    }, timeoutMs)
+
+    ws.on('close', onClose)
+    ws.on('error', onClose)
+
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close()
+    }
+  })
+}
+
 class FakeBuffer {
   snapshot() {
     return ''
@@ -164,6 +196,7 @@ describe('terminal.create reuse running claude terminal', () => {
     process.env.AUTH_TOKEN = 'testtoken-testtoken'
     process.env.HELLO_TIMEOUT_MS = '100'
 
+    vi.resetModules()
     const { WsHandler } = await import('../../server/ws-handler')
     server = http.createServer((_req, res) => {
       res.statusCode = 404
@@ -192,8 +225,9 @@ describe('terminal.create reuse running claude terminal', () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
+      const readyPromise = waitForMessage(ws, (m) => m.type === 'ready')
       ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await readyPromise
 
       const requestId = 'reuse-1'
       const createdPromise = waitForMessage(ws, (m) => m.type === 'terminal.created' && m.requestId === requestId)
@@ -215,6 +249,10 @@ describe('terminal.create reuse running claude terminal', () => {
       await listUpdatedPromise
 
       expect(registry.attachCalls).toHaveLength(0)
+      const attachReadyPromise = waitForMessage(
+        ws,
+        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'reuse-1-attach',
+      )
       ws.send(JSON.stringify({
         type: 'terminal.attach',
         terminalId: created.terminalId,
@@ -223,17 +261,14 @@ describe('terminal.create reuse running claude terminal', () => {
         rows: 40,
         attachRequestId: 'reuse-1-attach',
       }))
-      const ready = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'reuse-1-attach',
-      )
+      const ready = await attachReadyPromise
 
       expect(ready.type).toBe('terminal.attach.ready')
       expect(registry.attachCalls).toHaveLength(1)
       expect(registry.attachCalls[0]?.opts?.suppressOutput).toBe(true)
       expect(snapshotSpy).not.toHaveBeenCalled()
     } finally {
-      ws.close()
+      await closeWebSocket(ws)
     }
   })
 
@@ -241,22 +276,28 @@ describe('terminal.create reuse running claude terminal', () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
+      const readyPromise = waitForMessage(ws, (m) => m.type === 'ready')
       ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await readyPromise
 
+      const createdPromise = waitForMessage(
+        ws,
+        (m) => m.type === 'terminal.created' && m.requestId === 'reuse-split-existingAfterConfig',
+      )
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId: 'reuse-split-existingAfterConfig',
         mode: 'claude',
         resumeSessionId: VALID_SESSION_ID,
       }))
-      const created = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.created' && m.requestId === 'reuse-split-existingAfterConfig',
-      )
+      const created = await createdPromise
       const preAttachMsgs = await collectMessages(ws, 150)
       expect(preAttachMsgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
 
+      const attachReadyPromise = waitForMessage(
+        ws,
+        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'reuse-split-existingAfterConfig-attach',
+      )
       ws.send(JSON.stringify({
         type: 'terminal.attach',
         terminalId: created.terminalId,
@@ -265,13 +306,10 @@ describe('terminal.create reuse running claude terminal', () => {
         rows: 40,
         attachRequestId: 'reuse-split-existingAfterConfig-attach',
       }))
-      const ready = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'reuse-split-existingAfterConfig-attach',
-      )
+      const ready = await attachReadyPromise
       expect(ready.terminalId).toBe(created.terminalId)
     } finally {
-      ws.close()
+      await closeWebSocket(ws)
     }
   })
 
@@ -279,31 +317,37 @@ describe('terminal.create reuse running claude terminal', () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
+      const readyPromise = waitForMessage(ws, (m) => m.type === 'ready')
       ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await readyPromise
 
-      ws.send(JSON.stringify({
-        type: 'terminal.create',
-        requestId: 'reuse-claude-dup-split',
-        mode: 'claude',
-        resumeSessionId: VALID_SESSION_ID,
-      }))
-      ws.send(JSON.stringify({
-        type: 'terminal.create',
-        requestId: 'reuse-claude-dup-split',
-        mode: 'claude',
-        resumeSessionId: VALID_SESSION_ID,
-      }))
-
-      const created = await waitForMessage(
+      const createdPromise = waitForMessage(
         ws,
         (m) => m.type === 'terminal.created' && m.requestId === 'reuse-claude-dup-split',
       )
+      ws.send(JSON.stringify({
+        type: 'terminal.create',
+        requestId: 'reuse-claude-dup-split',
+        mode: 'claude',
+        resumeSessionId: VALID_SESSION_ID,
+      }))
+      ws.send(JSON.stringify({
+        type: 'terminal.create',
+        requestId: 'reuse-claude-dup-split',
+        mode: 'claude',
+        resumeSessionId: VALID_SESSION_ID,
+      }))
+
+      const created = await createdPromise
       const msgs = await collectMessages(ws, 200)
       const createdCount = msgs.filter((m) => m.type === 'terminal.created' && m.requestId === 'reuse-claude-dup-split').length + 1
       expect(createdCount).toBe(1)
       expect(msgs.some((m) => m.type === 'terminal.attach.ready' && m.terminalId === created.terminalId)).toBe(false)
 
+      const attachReadyPromise = waitForMessage(
+        ws,
+        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'reuse-claude-dup-split-attach',
+      )
       ws.send(JSON.stringify({
         type: 'terminal.attach',
         terminalId: created.terminalId,
@@ -312,13 +356,10 @@ describe('terminal.create reuse running claude terminal', () => {
         rows: 40,
         attachRequestId: 'reuse-claude-dup-split-attach',
       }))
-      const ready = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.attach.ready' && m.attachRequestId === 'reuse-claude-dup-split-attach',
-      )
+      const ready = await attachReadyPromise
       expect(ready.terminalId).toBe(created.terminalId)
     } finally {
-      ws.close()
+      await closeWebSocket(ws)
     }
   })
 })
