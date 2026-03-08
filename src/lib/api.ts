@@ -1,6 +1,7 @@
 import type { CodingCliProviderName } from './coding-cli-types'
 import { getClientPerfConfig, isClientPerfLoggingEnabled, logClientPerf } from '@/lib/perf-logger'
 import { getAuthToken } from '@/lib/auth'
+import { sanitizeSessionLocators } from '@/lib/session-utils'
 import type { SessionLocator } from '@/store/paneTypes'
 
 export type ApiError = {
@@ -185,13 +186,14 @@ export async function fetchSidebarSessionsSnapshot(options: {
     beforeId,
     openSessions = [],
   } = options
+  const sanitizedOpenSessions = sanitizeSessionLocators(openSessions)
 
-  if (openSessions.length > 0) {
+  if (sanitizedOpenSessions.length > 0) {
     return api.post('/api/sessions/query', {
       limit,
       ...(before !== undefined ? { before } : {}),
       ...(beforeId !== undefined ? { beforeId } : {}),
-      openSessions,
+      openSessions: sanitizedOpenSessions,
     })
   }
 

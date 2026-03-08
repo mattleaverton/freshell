@@ -192,6 +192,33 @@ describe('fetchSidebarSessionsSnapshot()', () => {
       }),
     )
   })
+
+  it('filters invalid open sessions before POSTing the personalized snapshot query', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ projects: [] })),
+    })
+
+    await fetchSidebarSessionsSnapshot({
+      openSessions: [
+        { provider: 'foo', sessionId: '' } as any,
+        { provider: 'codex', sessionId: 'older-open', serverInstanceId: '' } as any,
+      ],
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/sessions/query',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          limit: 100,
+          openSessions: [
+            { provider: 'codex', sessionId: 'older-open' },
+          ],
+        }),
+      }),
+    )
+  })
 })
 
 describe('api error mapping', () => {

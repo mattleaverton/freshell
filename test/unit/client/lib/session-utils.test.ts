@@ -226,6 +226,50 @@ describe('collectSessionLocatorsFromTabs', () => {
       { provider: 'codex', sessionId: 'tab-only' },
     ])
   })
+
+  it('drops invalid providers and empty locator fields from persisted pane and tab state', () => {
+    const tabs = [
+      { id: 'tab-invalid-explicit' },
+      { id: 'tab-empty-server' },
+      { id: 'tab-invalid-provider-fallback', mode: 'codex', codingCliProvider: 'foo', resumeSessionId: 'bad-provider' },
+      { id: 'tab-empty-session-fallback', mode: 'codex', resumeSessionId: '' },
+      { id: 'tab-valid-fallback', mode: 'codex', resumeSessionId: 'tab-valid' },
+    ] as unknown as RootState['tabs']['tabs']
+
+    const panes = {
+      layouts: {
+        'tab-invalid-explicit': leaf('pane-invalid-explicit', terminalContent('codex', 'resume-valid', {
+          provider: 'foo',
+          sessionId: '',
+          serverInstanceId: '',
+        } as unknown as SessionLocator)),
+        'tab-empty-server': leaf('pane-empty-server', {
+          kind: 'terminal',
+          mode: 'codex',
+          status: 'running',
+          createRequestId: 'req-empty-server',
+          sessionRef: {
+            provider: 'codex',
+            sessionId: 'explicit-valid',
+            serverInstanceId: '',
+          } as unknown as SessionLocator,
+        }),
+      },
+      activePane: {},
+    } as RootState['panes']
+
+    expect(collectSessionLocatorsFromTabs(tabs, panes)).toEqual([
+      { provider: 'codex', sessionId: 'resume-valid' },
+      { provider: 'codex', sessionId: 'explicit-valid' },
+      { provider: 'codex', sessionId: 'tab-valid' },
+    ])
+
+    expect(collectSessionRefsFromTabs(tabs, panes)).toEqual([
+      { provider: 'codex', sessionId: 'resume-valid' },
+      { provider: 'codex', sessionId: 'explicit-valid' },
+      { provider: 'codex', sessionId: 'tab-valid' },
+    ])
+  })
 })
 
 describe('findTabIdForSession', () => {

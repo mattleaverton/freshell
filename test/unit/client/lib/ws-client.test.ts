@@ -314,6 +314,28 @@ describe('WsClient.connect', () => {
     ])
   })
 
+  it('filters invalid sidebarOpenSessions before sending hello', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.setHelloExtensionProvider(() => ({
+      sidebarOpenSessions: [
+        { provider: 'foo', sessionId: '' } as any,
+        { provider: 'codex', sessionId: 'older-open', serverInstanceId: '' } as any,
+      ],
+    }))
+
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+    MockWebSocket.instances[0]._open()
+
+    const hello = JSON.parse(MockWebSocket.instances[0].sent[0])
+    expect(hello.sidebarOpenSessions).toEqual([
+      { provider: 'codex', sessionId: 'older-open' },
+    ])
+
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+  })
+
   it('treats HELLO_TIMEOUT as transient and schedules reconnect', async () => {
     const setTimeoutSpy = vi.spyOn(window, 'setTimeout')
 

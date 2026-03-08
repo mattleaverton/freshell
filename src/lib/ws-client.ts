@@ -5,6 +5,7 @@ import {
   markTerminalOutputSeen,
 } from '@/lib/perf-logger'
 import { getAuthToken } from '@/lib/auth'
+import { sanitizeSessionLocators } from '@/lib/session-utils'
 import type { ServerMessage, SessionLocator } from '@shared/ws-protocol'
 import { createLogger } from '@/lib/client-logger'
 
@@ -171,12 +172,18 @@ export class WsClient {
         // Send hello with token in message body (not URL).
         const token = getAuthToken()
         const extensions = this.helloExtensionProvider?.() || {}
+        const helloExtensions = {
+          ...extensions,
+          ...(extensions.sidebarOpenSessions !== undefined
+            ? { sidebarOpenSessions: sanitizeSessionLocators(extensions.sidebarOpenSessions) }
+            : {}),
+        }
         this.ws?.send(JSON.stringify({
           type: 'hello',
           token,
           protocolVersion: WS_PROTOCOL_VERSION,
           capabilities: { sessionsPatchV1: true, sessionsPaginationV1: true, uiScreenshotV1: true },
-          ...extensions,
+          ...helloExtensions,
         }))
       }
 
