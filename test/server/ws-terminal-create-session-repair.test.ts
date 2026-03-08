@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import http from 'http'
 import WebSocket from 'ws'
 import { EventEmitter } from 'events'
@@ -268,8 +268,14 @@ describe('terminal.create session repair wait', () => {
   let port: number
   let sessionRepairService: FakeSessionRepairService
   let registry: FakeRegistry
+  let originalNodeEnv: string | undefined
+  let originalAuthToken: string | undefined
+  let originalHelloTimeoutMs: string | undefined
 
-  beforeAll(async () => {
+  beforeEach(async () => {
+    originalNodeEnv = process.env.NODE_ENV
+    originalAuthToken = process.env.AUTH_TOKEN
+    originalHelloTimeoutMs = process.env.HELLO_TIMEOUT_MS
     process.env.NODE_ENV = 'test'
     process.env.AUTH_TOKEN = 'testtoken-testtoken'
     process.env.HELLO_TIMEOUT_MS = '100'
@@ -287,9 +293,6 @@ describe('terminal.create session repair wait', () => {
 
     const info = await listen(server)
     port = info.port
-  }, HOOK_TIMEOUT_MS)
-
-  beforeEach(() => {
     vi.mocked(configStore.snapshot).mockReset()
     vi.mocked(configStore.snapshot).mockResolvedValue(DEFAULT_CONFIG_SNAPSHOT)
     sessionRepairService.waitForSessionCalls = []
@@ -301,11 +304,28 @@ describe('terminal.create session repair wait', () => {
     registry.lastCreateOpts = null
     registry.createCallCount = 0
     registry.forceAttachFailure = false
-  })
+  }, HOOK_TIMEOUT_MS)
 
-  afterAll(async () => {
-    if (!server) return
-    await new Promise<void>((resolve) => server.close(() => resolve()))
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      server = undefined
+    }
+    if (originalNodeEnv === undefined) {
+      delete process.env.NODE_ENV
+    } else {
+      process.env.NODE_ENV = originalNodeEnv
+    }
+    if (originalAuthToken === undefined) {
+      delete process.env.AUTH_TOKEN
+    } else {
+      process.env.AUTH_TOKEN = originalAuthToken
+    }
+    if (originalHelloTimeoutMs === undefined) {
+      delete process.env.HELLO_TIMEOUT_MS
+    } else {
+      process.env.HELLO_TIMEOUT_MS = originalHelloTimeoutMs
+    }
   }, HOOK_TIMEOUT_MS)
 
   it('blocks terminal.create until session repair completes', async () => {

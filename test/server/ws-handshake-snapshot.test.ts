@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import http from 'http'
 import WebSocket from 'ws'
 import { WS_PROTOCOL_VERSION } from '../../shared/ws-protocol'
@@ -146,15 +146,27 @@ async function closeWs(ws: WebSocket): Promise<void> {
   await closed
 }
 
+function waitForReady(ws: WebSocket, timeoutMs = 10_000): Promise<any> {
+  const readyPromise = waitForMessage(ws, (m) => m.type === 'ready', timeoutMs)
+  ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
+  return readyPromise
+}
+
 describe('ws handshake snapshot', () => {
   let server: http.Server | undefined
   let port: number
   let snapshot: Snapshot
+  let originalNodeEnv: string | undefined
+  let originalAuthToken: string | undefined
+  let originalHelloTimeoutMs: string | undefined
 
-  beforeAll(async () => {
+  beforeEach(async () => {
+    originalNodeEnv = process.env.NODE_ENV
+    originalAuthToken = process.env.AUTH_TOKEN
+    originalHelloTimeoutMs = process.env.HELLO_TIMEOUT_MS
     process.env.NODE_ENV = 'test'
     process.env.AUTH_TOKEN = 'testtoken-testtoken'
-    process.env.HELLO_TIMEOUT_MS = '100'
+    process.env.HELLO_TIMEOUT_MS = '500'
 
     vi.resetModules()
     const { WsHandler } = await import('../../server/ws-handler')
@@ -220,9 +232,26 @@ describe('ws handshake snapshot', () => {
     port = info.port
   }, HOOK_TIMEOUT_MS)
 
-  afterAll(async () => {
-    if (!server) return
-    await new Promise<void>((resolve) => server.close(() => resolve()))
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      server = undefined
+    }
+    if (originalNodeEnv === undefined) {
+      delete process.env.NODE_ENV
+    } else {
+      process.env.NODE_ENV = originalNodeEnv
+    }
+    if (originalAuthToken === undefined) {
+      delete process.env.AUTH_TOKEN
+    } else {
+      process.env.AUTH_TOKEN = originalAuthToken
+    }
+    if (originalHelloTimeoutMs === undefined) {
+      delete process.env.HELLO_TIMEOUT_MS
+    } else {
+      process.env.HELLO_TIMEOUT_MS = originalHelloTimeoutMs
+    }
   }, HOOK_TIMEOUT_MS)
 
   it('sends settings and sessions snapshot after ready', async () => {
@@ -232,13 +261,10 @@ describe('ws handshake snapshot', () => {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
 
       const MSG_TIMEOUT = 10_000
-      const readyPromise = waitForMessage(ws, (m) => m.type === 'ready', MSG_TIMEOUT)
       const settingsPromise = waitForMessage(ws, (m) => m.type === 'settings.updated', MSG_TIMEOUT)
       const sessionsPromise = waitForMessage(ws, (m) => m.type === 'sessions.updated', MSG_TIMEOUT)
 
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-
-      await readyPromise
+      await waitForReady(ws, MSG_TIMEOUT)
 
       const settingsMsg = await settingsPromise
       const sessionsMsg = await sessionsPromise
@@ -265,12 +291,9 @@ describe('ws handshake snapshot', () => {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
 
       const MSG_TIMEOUT = 10_000
-      const readyPromise = waitForMessage(ws, (m) => m.type === 'ready', MSG_TIMEOUT)
       const fallbackPromise = waitForMessage(ws, (m) => m.type === 'config.fallback', MSG_TIMEOUT)
 
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-
-      await readyPromise
+      await waitForReady(ws, MSG_TIMEOUT)
       const fallbackMsg = await fallbackPromise
       expect(fallbackMsg).toEqual({
         type: 'config.fallback',
@@ -294,12 +317,9 @@ describe('ws handshake snapshot', () => {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
 
       const MSG_TIMEOUT = 10_000
-      const readyPromise = waitForMessage(ws, (m) => m.type === 'ready', MSG_TIMEOUT)
       const sessionsPromise = waitForMessage(ws, (m) => m.type === 'sessions.updated', MSG_TIMEOUT)
 
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-
-      await readyPromise
+      await waitForReady(ws, MSG_TIMEOUT)
       const sessionsMsg = await sessionsPromise
       expect(sessionsMsg.projects).toEqual([])
     } finally {
@@ -312,11 +332,19 @@ describe('ws handshake snapshot with chunking', () => {
   let server: http.Server | undefined
   let port: number
   let largeSnapshot: Snapshot
+  let originalNodeEnv: string | undefined
+  let originalAuthToken: string | undefined
+  let originalHelloTimeoutMs: string | undefined
+  let originalMaxChunkBytes: string | undefined
 
-  beforeAll(async () => {
+  beforeEach(async () => {
+    originalNodeEnv = process.env.NODE_ENV
+    originalAuthToken = process.env.AUTH_TOKEN
+    originalHelloTimeoutMs = process.env.HELLO_TIMEOUT_MS
+    originalMaxChunkBytes = process.env.MAX_WS_CHUNK_BYTES
     process.env.NODE_ENV = 'test'
     process.env.AUTH_TOKEN = 'testtoken-testtoken'
-    process.env.HELLO_TIMEOUT_MS = '100'
+    process.env.HELLO_TIMEOUT_MS = '500'
     // Set a very small chunk size to force multiple chunks
     process.env.MAX_WS_CHUNK_BYTES = '500'
 
@@ -358,10 +386,31 @@ describe('ws handshake snapshot with chunking', () => {
     port = info.port
   }, HOOK_TIMEOUT_MS)
 
-  afterAll(async () => {
-    delete process.env.MAX_WS_CHUNK_BYTES
-    if (!server) return
-    await new Promise<void>((resolve) => server.close(() => resolve()))
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      server = undefined
+    }
+    if (originalNodeEnv === undefined) {
+      delete process.env.NODE_ENV
+    } else {
+      process.env.NODE_ENV = originalNodeEnv
+    }
+    if (originalAuthToken === undefined) {
+      delete process.env.AUTH_TOKEN
+    } else {
+      process.env.AUTH_TOKEN = originalAuthToken
+    }
+    if (originalHelloTimeoutMs === undefined) {
+      delete process.env.HELLO_TIMEOUT_MS
+    } else {
+      process.env.HELLO_TIMEOUT_MS = originalHelloTimeoutMs
+    }
+    if (originalMaxChunkBytes === undefined) {
+      delete process.env.MAX_WS_CHUNK_BYTES
+    } else {
+      process.env.MAX_WS_CHUNK_BYTES = originalMaxChunkBytes
+    }
   }, HOOK_TIMEOUT_MS)
 
   it('sends chunked sessions with clear/append flags for large data', async () => {
@@ -370,13 +419,10 @@ describe('ws handshake snapshot with chunking', () => {
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
 
-      const readyPromise = waitForMessage(ws, (m) => m.type === 'ready')
       // Collect all sessions.updated messages (wait for idle to detect end of stream)
       const sessionsPromise = collectAllMessages(ws, (m) => m.type === 'sessions.updated', 500, 5000)
 
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-
-      await readyPromise
+      await waitForReady(ws)
 
       const sessionsMsgs = await sessionsPromise
 
