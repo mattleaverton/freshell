@@ -1,6 +1,10 @@
+import path from 'path'
+
 export interface WizardWindowOptions {
   isDev: boolean
   preloadPath?: string
+  /** The ASAR app root path (from app.getAppPath()). Required in production. */
+  appPath?: string
 }
 
 export interface BrowserWindowConstructor {
@@ -27,9 +31,12 @@ export function createWizardWindow(
   if (options.isDev) {
     void win.loadURL('http://localhost:5174')
   } else {
-    // In production, load the built wizard HTML
-    // The path is relative to the app's resources directory
-    void win.loadFile('dist/wizard/index.html')
+    // In production, resolve the wizard HTML relative to the ASAR app root
+    // so Electron finds it correctly inside the packaged app.
+    const wizardHtml = options.appPath
+      ? path.join(options.appPath, 'dist', 'wizard', 'index.html')
+      : path.join('dist', 'wizard', 'index.html')
+    void win.loadFile(wizardHtml)
   }
 
   return win

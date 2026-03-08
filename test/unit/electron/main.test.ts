@@ -30,6 +30,7 @@ describe('initMainProcess', () => {
       createMainWindow: vi.fn().mockResolvedValue(mockWindow),
       stopServer: vi.fn().mockResolvedValue(undefined),
       minimizeToTray: true,
+      platform: 'linux',
     }
   })
 
@@ -61,6 +62,25 @@ describe('initMainProcess', () => {
     expect(mockWindow.hide).toHaveBeenCalled()
   })
 
+  it('close-to-tray allows close through when app is quitting (isQuitting flag)', async () => {
+    await initMainProcess(deps)
+
+    // Find the close handler registered on the window
+    const closeCall = mockWindow.on.mock.calls.find(
+      (call: any[]) => call[0] === 'close'
+    )
+    expect(closeCall).toBeDefined()
+
+    // Trigger before-quit first -- this sets isQuitting = true
+    app.emit('before-quit')
+    await new Promise((r) => setTimeout(r, 10))
+
+    // Now the close handler should NOT prevent default
+    const event = { preventDefault: vi.fn() }
+    closeCall![1](event)
+    expect(event.preventDefault).not.toHaveBeenCalled()
+  })
+
   it('before-quit stops server', async () => {
     await initMainProcess(deps)
 
@@ -75,5 +95,28 @@ describe('initMainProcess', () => {
     await initMainProcess(deps)
     app.emit('activate')
     expect(mockWindow.show).toHaveBeenCalled()
+  })
+
+  describe('window-all-closed', () => {
+    it('quits on Linux when all windows are closed', async () => {
+      deps.platform = 'linux'
+      await initMainProcess(deps)
+      app.emit('window-all-closed')
+      expect(app.quit).toHaveBeenCalled()
+    })
+
+    it('quits on Windows when all windows are closed', async () => {
+      deps.platform = 'win32'
+      await initMainProcess(deps)
+      app.emit('window-all-closed')
+      expect(app.quit).toHaveBeenCalled()
+    })
+
+    it('does NOT quit on macOS when all windows are closed', async () => {
+      deps.platform = 'darwin'
+      await initMainProcess(deps)
+      app.emit('window-all-closed')
+      expect(app.quit).not.toHaveBeenCalled()
+    })
   })
 })

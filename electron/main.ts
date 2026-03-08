@@ -14,6 +14,7 @@ export interface MainProcessDeps {
   createMainWindow: () => Promise<any>
   stopServer: () => Promise<void>
   minimizeToTray: boolean
+  platform: NodeJS.Platform
 }
 
 export async function initMainProcess(deps: MainProcessDeps): Promise<void> {
@@ -27,21 +28,27 @@ export async function initMainProcess(deps: MainProcessDeps): Promise<void> {
   }
 
   let mainWindow: any = null
+  let isQuitting = false
 
   await app.whenReady()
 
   mainWindow = await deps.createMainWindow()
 
-  // Close-to-tray behavior
+  // Close-to-tray behavior: intercept close and hide, unless the app is
+  // genuinely quitting (via app.quit(), tray menu, etc.). The `before-quit`
+  // event sets `isQuitting = true` so the close handler lets it through.
   if (minimizeToTray && mainWindow) {
     mainWindow.on('close', (event: { preventDefault: () => void }) => {
-      event.preventDefault()
-      mainWindow.hide()
+      if (!isQuitting) {
+        event.preventDefault()
+        mainWindow.hide()
+      }
     })
   }
 
   // Cleanup on quit
   app.on('before-quit', async () => {
+    isQuitting = true
     await deps.stopServer()
   })
 
@@ -59,6 +66,14 @@ export async function initMainProcess(deps: MainProcessDeps): Promise<void> {
         mainWindow.restore?.()
       }
       mainWindow.focus?.()
+    }
+  })
+
+  // On Windows/Linux, quit when all windows are closed.
+  // On macOS, keep the app running (standard macOS behavior).
+  app.on('window-all-closed', () => {
+    if (deps.platform !== 'darwin') {
+      app.quit()
     }
   })
 }
