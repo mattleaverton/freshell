@@ -4,7 +4,7 @@ import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
 const mockFetch = vi.fn()
 global.fetch = mockFetch
 
-import { api, searchSessions, setSessionMetadata, type SearchResponse } from '@/lib/api'
+import { api, fetchSidebarSessionsSnapshot, searchSessions, setSessionMetadata, type SearchResponse } from '@/lib/api'
 
 describe('searchSessions()', () => {
   beforeEach(() => {
@@ -138,6 +138,59 @@ describe('setSessionMetadata()', () => {
     const call = mockFetch.mock.calls[0]
     const headers = call[1].headers as Headers
     expect(headers.get('Content-Type')).toBe('application/json')
+  })
+})
+
+describe('fetchSidebarSessionsSnapshot()', () => {
+  beforeEach(() => {
+    mockFetch.mockReset()
+    localStorage.setItem('freshell.auth-token', 'test-token')
+  })
+
+  afterEach(() => {
+    localStorage.clear()
+  })
+
+  it('uses GET /api/sessions?limit=100 when there are no open sessions', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify([])),
+    })
+
+    await fetchSidebarSessionsSnapshot()
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/sessions?limit=100',
+      expect.objectContaining({
+        headers: expect.any(Headers),
+      }),
+    )
+  })
+
+  it('uses POST /api/sessions/query with JSON when open sessions are present', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ projects: [] })),
+    })
+
+    await fetchSidebarSessionsSnapshot({
+      openSessions: [
+        { provider: 'codex', sessionId: 'older-open', serverInstanceId: 'srv-local' },
+      ],
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/sessions/query',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          limit: 100,
+          openSessions: [
+            { provider: 'codex', sessionId: 'older-open', serverInstanceId: 'srv-local' },
+          ],
+        }),
+      }),
+    )
   })
 })
 

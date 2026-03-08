@@ -8,6 +8,9 @@ import tabsReducer from '@/store/tabsSlice'
 import connectionReducer from '@/store/connectionSlice'
 import sessionsReducer from '@/store/sessionsSlice'
 import panesReducer from '@/store/panesSlice'
+import tabRegistryReducer from '@/store/tabRegistrySlice'
+import terminalMetaReducer from '@/store/terminalMetaSlice'
+import extensionsReducer from '@/store/extensionsSlice'
 import { networkReducer } from '@/store/networkSlice'
 
 // Mock heavy child components to avoid xterm/canvas issues
@@ -63,16 +66,39 @@ vi.mock('@/lib/ws-client', () => ({
 }))
 
 const apiGet = vi.hoisted(() => vi.fn())
+const fetchSidebarSessionsSnapshot = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/api', () => ({
   api: {
     get: (url: string) => apiGet(url),
     patch: vi.fn().mockResolvedValue({}),
     post: vi.fn().mockResolvedValue({}),
   },
+  fetchSidebarSessionsSnapshot: (options?: unknown) => fetchSidebarSessionsSnapshot(options),
   isApiUnauthorizedError: (err: any) => !!err && typeof err === 'object' && err.status === 401,
 }))
 
-function createStore() {
+function createStore(options?: {
+  tabs?: Array<Record<string, unknown>>
+  panes?: {
+    layouts: Record<string, unknown>
+    activePane: Record<string, string>
+    paneTitles?: Record<string, Record<string, string>>
+    paneTitleSetByUser?: Record<string, Record<string, boolean>>
+    renameRequestTabId?: string | null
+    renameRequestPaneId?: string | null
+    zoomedPane?: Record<string, string>
+  }
+}) {
+  const tabs = options?.tabs ?? [{ id: 'tab-1', mode: 'shell' }]
+  const panes = {
+    layouts: options?.panes?.layouts ?? {},
+    activePane: options?.panes?.activePane ?? {},
+    paneTitles: options?.panes?.paneTitles ?? {},
+    paneTitleSetByUser: options?.panes?.paneTitleSetByUser ?? {},
+    renameRequestTabId: options?.panes?.renameRequestTabId ?? null,
+    renameRequestPaneId: options?.panes?.renameRequestPaneId ?? null,
+    zoomedPane: options?.panes?.zoomedPane ?? {},
+  }
   return configureStore({
     reducer: {
       settings: settingsReducer,
@@ -81,6 +107,9 @@ function createStore() {
       sessions: sessionsReducer,
       panes: panesReducer,
       network: networkReducer,
+      tabRegistry: tabRegistryReducer,
+      terminalMeta: terminalMetaReducer,
+      extensions: extensionsReducer,
     },
     middleware: (getDefault) =>
       getDefault({
@@ -88,7 +117,7 @@ function createStore() {
       }),
     preloadedState: {
       settings: { settings: defaultSettings, loaded: true, lastSavedAt: undefined },
-      tabs: { tabs: [{ id: 'tab-1', mode: 'shell' }], activeTabId: 'tab-1' },
+      tabs: { tabs, activeTabId: (tabs[0]?.id as string | undefined) ?? null },
       connection: {
         status: 'disconnected' as const,
         lastError: undefined,
@@ -96,8 +125,21 @@ function createStore() {
         availableClis: {},
       },
       sessions: { projects: [], expandedProjects: new Set<string>(), wsSnapshotReceived: false, isLoading: false, error: null },
-      panes: { layouts: {}, activePane: {} },
+      panes,
       network: { status: null, loading: false, configuring: false, error: null },
+      tabRegistry: {
+        deviceId: 'device-test',
+        deviceLabel: 'device-test',
+        deviceAliases: {},
+        localOpen: [],
+        remoteOpen: [],
+        closed: [],
+        localClosed: {},
+        searchRangeDays: 30,
+        loading: false,
+      },
+      terminalMeta: { byTerminalId: {} },
+      extensions: { entries: [] },
     },
   })
 }
@@ -116,11 +158,13 @@ describe('App WS bootstrap recovery', () => {
       return () => { messageHandler = null }
     })
 
+    fetchSidebarSessionsSnapshot.mockReset()
+    fetchSidebarSessionsSnapshot.mockResolvedValue([])
+
     // Keep API calls fast and deterministic.
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
-      if (url.startsWith('/api/sessions')) return Promise.resolve([])
       return Promise.resolve({})
     })
   })
@@ -265,22 +309,91 @@ describe('App WS bootstrap recovery', () => {
     expect(extension?.client?.mobile).toBe(true)
   })
 
+  it('uses the sidebar snapshot helper with exact open-session locators during bootstrap', async () => {
+    const olderOpenSessionId = 'older-open'
+    fetchSidebarSessionsSnapshot.mockResolvedValueOnce({
+      projects: [
+        {
+          projectPath: '/older',
+          sessions: [
+            {
+              provider: 'codex',
+              sessionId: olderOpenSessionId,
+              projectPath: '/older',
+              updatedAt: 1,
+              title: 'Older Open Session',
+            },
+          ],
+        },
+      ],
+      totalSessions: 101,
+      oldestIncludedTimestamp: 55,
+      oldestIncludedSessionId: 'codex:cursor',
+      hasMore: true,
+    })
+
+    const store = createStore({
+      tabs: [{ id: 'tab-older', mode: 'codex', resumeSessionId: olderOpenSessionId }],
+      panes: {
+        layouts: {
+          'tab-older': {
+            type: 'leaf',
+            id: 'pane-older',
+            content: {
+              kind: 'terminal',
+              mode: 'codex',
+              createRequestId: 'req-older',
+              status: 'running',
+              resumeSessionId: olderOpenSessionId,
+              sessionRef: {
+                provider: 'codex',
+                sessionId: olderOpenSessionId,
+                serverInstanceId: 'srv-local',
+              },
+            },
+          },
+        },
+        activePane: {
+          'tab-older': 'pane-older',
+        },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(fetchSidebarSessionsSnapshot).toHaveBeenCalledWith({
+        limit: 100,
+        openSessions: [
+          { provider: 'codex', sessionId: olderOpenSessionId, serverInstanceId: 'srv-local' },
+          { provider: 'codex', sessionId: olderOpenSessionId },
+        ],
+      })
+      expect(store.getState().sessions.projects.map((project: any) => project.projectPath)).toEqual(['/older'])
+      expect(store.getState().sessions.oldestLoadedSessionId).toBe('codex:cursor')
+      expect(store.getState().sessions.hasMore).toBe(true)
+    })
+  })
+
   it('promotes a recent HTTP sessions baseline when socket is already ready before App bootstrap connects', async () => {
     const store = createStore()
     wsMocks.isReady = true
     wsMocks.serverInstanceId = 'srv-preconnected'
 
+    fetchSidebarSessionsSnapshot.mockResolvedValueOnce([
+      {
+        projectPath: '/p1',
+        sessions: [{ provider: 'claude', sessionId: 's1', projectPath: '/p1', updatedAt: 1 }],
+      },
+    ])
+
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
-      if (url.startsWith('/api/sessions')) {
-        return Promise.resolve([
-          {
-            projectPath: '/p1',
-            sessions: [{ provider: 'claude', sessionId: 's1', projectPath: '/p1', updatedAt: 1 }],
-          },
-        ])
-      }
       return Promise.resolve({})
     })
 
@@ -314,26 +427,48 @@ describe('App WS bootstrap recovery', () => {
   })
 
   it('falls back to refetch sessions when pre-connected socket has no recent baseline', async () => {
-    const store = createStore()
+    const olderOpenSessionId = 'older-open'
+    const store = createStore({
+      tabs: [{ id: 'tab-older', mode: 'codex', resumeSessionId: olderOpenSessionId }],
+      panes: {
+        layouts: {
+          'tab-older': {
+            type: 'leaf',
+            id: 'pane-older',
+            content: {
+              kind: 'terminal',
+              mode: 'codex',
+              createRequestId: 'req-older',
+              status: 'running',
+              resumeSessionId: olderOpenSessionId,
+              sessionRef: {
+                provider: 'codex',
+                sessionId: olderOpenSessionId,
+                serverInstanceId: 'srv-local',
+              },
+            },
+          },
+        },
+        activePane: {
+          'tab-older': 'pane-older',
+        },
+      },
+    })
     wsMocks.isReady = true
     wsMocks.serverInstanceId = 'srv-preconnected-fallback'
 
-    let sessionsCalls = 0
+    fetchSidebarSessionsSnapshot
+      .mockRejectedValueOnce(new Error('initial sessions load failed'))
+      .mockResolvedValueOnce([
+        {
+          projectPath: '/p-fallback',
+          sessions: [{ provider: 'codex', sessionId: 's-fallback', projectPath: '/p-fallback', updatedAt: 3 }],
+        },
+      ])
+
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/settings') return Promise.resolve(defaultSettings)
       if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
-      if (url.startsWith('/api/sessions')) {
-        sessionsCalls += 1
-        if (sessionsCalls === 1) {
-          return Promise.reject(new Error('initial sessions load failed'))
-        }
-        return Promise.resolve([
-          {
-            projectPath: '/p-fallback',
-            sessions: [{ provider: 'codex', sessionId: 's-fallback', projectPath: '/p-fallback', updatedAt: 3 }],
-          },
-        ])
-      }
       return Promise.resolve({})
     })
 
@@ -350,7 +485,20 @@ describe('App WS bootstrap recovery', () => {
       expect(store.getState().sessions.projects.map((p: any) => p.projectPath)).toEqual(['/p-fallback'])
     })
 
-    expect(sessionsCalls).toBeGreaterThanOrEqual(2)
+    expect(fetchSidebarSessionsSnapshot).toHaveBeenNthCalledWith(1, {
+      limit: 100,
+      openSessions: [
+        { provider: 'codex', sessionId: olderOpenSessionId, serverInstanceId: 'srv-local' },
+        { provider: 'codex', sessionId: olderOpenSessionId },
+      ],
+    })
+    expect(fetchSidebarSessionsSnapshot).toHaveBeenNthCalledWith(2, {
+      limit: 100,
+      openSessions: [
+        { provider: 'codex', sessionId: olderOpenSessionId, serverInstanceId: 'srv-local' },
+        { provider: 'codex', sessionId: olderOpenSessionId },
+      ],
+    })
     expect(wsMocks.connect).not.toHaveBeenCalled()
     expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'terminal.meta.list' }))
   })

@@ -81,11 +81,21 @@ describe('GET /sessions with pagination', () => {
   let app: express.Express
 
   // Lazy import to ensure mocks are in place
-  async function setupApp() {
+  async function setupApp(options?: {
+    projects?: ProjectGroup[]
+    serverInstanceId?: string
+  }) {
     const { createSessionsRouter } = await import('../../../server/sessions-router.js')
     app = express()
     app.use(express.json())
-    app.use(createSessionsRouter(mockDeps as any))
+    app.use(createSessionsRouter({
+      ...mockDeps,
+      codingCliIndexer: {
+        ...mockDeps.codingCliIndexer,
+        getProjects: () => options?.projects ?? allProjects,
+      },
+      serverInstanceId: options?.serverInstanceId ?? 'srv-local',
+    } as any))
   }
 
   it('returns full list when no pagination params given (backward compat)', async () => {
@@ -200,10 +210,87 @@ describe('GET /sessions with pagination', () => {
     expect(res.body.totalSessions).toBe(130)
     expect(typeof res.body.hasMore).toBe('boolean')
   })
+
+  it('POST /sessions/query personalizes only the first page and preserves the primary cursor', async () => {
+    await setupApp()
+    const openSessions = [
+      { provider: 'claude', sessionId: 'a0' },
+      { provider: 'claude', sessionId: 'b49' },
+      { provider: 'claude', sessionId: 'a1', serverInstanceId: 'srv-remote' },
+      { provider: 'claude', sessionId: 'a0' },
+    ]
+
+    const page1 = await request(app)
+      .post('/sessions/query')
+      .send({ limit: 100, openSessions })
+
+    expect(page1.status).toBe(200)
+    const page1Sessions = flattenSessions(page1.body.projects)
+    expect(page1Sessions).toContain('a0')
+    expect(page1Sessions.filter((sessionId) => sessionId === 'b49')).toHaveLength(1)
+    expect(page1Sessions).not.toContain('a1')
+    expect(page1.body.oldestIncludedTimestamp).toBe(1030)
+    expect(page1.body.oldestIncludedSessionId).toBe('claude:a30')
+    expect(page1.body.hasMore).toBe(true)
+
+    const page2 = await request(app)
+      .post('/sessions/query')
+      .send({
+        limit: 100,
+        before: page1.body.oldestIncludedTimestamp,
+        beforeId: page1.body.oldestIncludedSessionId,
+        openSessions,
+      })
+
+    expect(page2.status).toBe(200)
+    const page2Sessions = flattenSessions(page2.body.projects)
+    expect(page2Sessions[0]).toBe('a29')
+    expect(page2Sessions).not.toContain('a30')
+  })
+
+  it('POST /sessions/query reports hasMore false when force-included sessions already cover the remainder', async () => {
+    await setupApp({
+      projects: [
+        makeProject('/small', [
+          makeSession('s1', 100, '/small'),
+          makeSession('s2', 200, '/small'),
+          makeSession('s3', 300, '/small'),
+        ]),
+      ],
+    })
+
+    const res = await request(app)
+      .post('/sessions/query')
+      .send({
+        limit: 2,
+        openSessions: [{ provider: 'claude', sessionId: 's1' }],
+      })
+
+    expect(res.status).toBe(200)
+    expect(flattenSessions(res.body.projects)).toEqual(['s3', 's2', 's1'])
+    expect(res.body.hasMore).toBe(false)
+  })
+
+  it('POST /sessions/query rejects invalid body shapes', async () => {
+    await setupApp()
+    const res = await request(app)
+      .post('/sessions/query')
+      .send({
+        limit: 'not-a-number',
+        openSessions: [{ provider: 'claude' }],
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/Invalid request/)
+  })
 })
 
 function pageSessions(res: request.Response): number {
   return (res.body.projects as ProjectGroup[]).reduce(
     (sum, p) => sum + p.sessions.length, 0,
   )
+}
+
+function flattenSessions(projects: ProjectGroup[]): string[] {
+  return projects.flatMap((project) => project.sessions.map((session) => session.sessionId))
 }

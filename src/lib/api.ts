@@ -1,6 +1,7 @@
 import type { CodingCliProviderName } from './coding-cli-types'
 import { getClientPerfConfig, isClientPerfLoggingEnabled, logClientPerf } from '@/lib/perf-logger'
 import { getAuthToken } from '@/lib/auth'
+import type { SessionLocator } from '@/store/paneTypes'
 
 export type ApiError = {
   status: number
@@ -170,6 +171,34 @@ export async function setSessionMetadata(
   sessionType: string,
 ): Promise<void> {
   await api.post('/api/session-metadata', { provider, sessionId, sessionType })
+}
+
+export async function fetchSidebarSessionsSnapshot(options: {
+  limit?: number
+  before?: number
+  beforeId?: string
+  openSessions?: SessionLocator[]
+} = {}): Promise<any> {
+  const {
+    limit = 100,
+    before,
+    beforeId,
+    openSessions = [],
+  } = options
+
+  if (openSessions.length > 0) {
+    return api.post('/api/sessions/query', {
+      limit,
+      ...(before !== undefined ? { before } : {}),
+      ...(beforeId !== undefined ? { beforeId } : {}),
+      openSessions,
+    })
+  }
+
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (before !== undefined) params.set('before', String(before))
+  if (beforeId !== undefined) params.set('beforeId', beforeId)
+  return api.get(`/api/sessions?${params}`)
 }
 
 export async function searchSessions(options: SearchOptions): Promise<SearchResponse> {

@@ -7,6 +7,7 @@ import { startPerfTimer } from './perf-logger.js'
 import { logger } from './logger.js'
 import { cascadeSessionRenameToTerminal } from './rename-cascade.js'
 import { paginateProjects } from './session-pagination.js'
+import { buildSidebarOpenSessionKeys } from './sidebar-session-selection.js'
 import type { TerminalMeta } from './terminal-metadata-service.js'
 import type { SessionMetadataStore } from './session-metadata-store.js'
 
@@ -18,6 +19,19 @@ export const SessionPatchSchema = z.object({
   deleted: z.coerce.boolean().optional(),
   archived: z.coerce.boolean().optional(),
   createdAtOverride: z.coerce.number().optional(),
+})
+
+const SessionLocatorSchema = z.object({
+  provider: CodingCliProviderSchema,
+  sessionId: z.string().min(1),
+  serverInstanceId: z.string().min(1).optional(),
+})
+
+const SessionsQuerySchema = z.object({
+  limit: z.number().int().min(1).max(500).optional(),
+  before: z.number().nonnegative().optional(),
+  beforeId: z.string().min(1).optional(),
+  openSessions: z.array(SessionLocatorSchema).optional(),
 })
 
 export interface SessionsRouterDeps {
@@ -35,6 +49,7 @@ export interface SessionsRouterDeps {
   registry?: { updateTitle: (id: string, title: string) => void }
   wsHandler?: { broadcast: (msg: any) => void }
   sessionMetadataStore?: SessionMetadataStore
+  serverInstanceId?: string
 }
 
 export function createSessionsRouter(deps: SessionsRouterDeps): Router {
@@ -147,6 +162,28 @@ export function createSessionsRouter(deps: SessionsRouterDeps): Router {
       // Backward compat: return raw array
       res.json(projects)
     }
+  })
+
+  router.post('/sessions/query', async (req, res) => {
+    const parsed = SessionsQuerySchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid request', details: parsed.error.issues })
+    }
+
+    const projects = codingCliIndexer.getProjects()
+    const forcedKeys = buildSidebarOpenSessionKeys(
+      parsed.data.openSessions ?? [],
+      deps.serverInstanceId ?? '',
+    )
+
+    const result = paginateProjects(projects, {
+      limit: parsed.data.limit,
+      before: parsed.data.before,
+      beforeId: parsed.data.beforeId,
+      forceIncludeSessionKeys: forcedKeys,
+    })
+
+    res.json(result)
   })
 
   router.patch('/sessions/:sessionId', async (req, res) => {

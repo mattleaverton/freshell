@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type TouchEvent as ReactTouchEvent } from 'react'
-import { useAppDispatch, useAppSelector } from '@/store/hooks'
+import { useAppDispatch, useAppSelector, useAppStore } from '@/store/hooks'
 import { setStatus, setError, setErrorCode, setServerInstanceId, setPlatform, setAvailableClis, setFeatureFlags } from '@/store/connectionSlice'
 import { setSettings } from '@/store/settingsSlice'
 import {
@@ -15,10 +15,10 @@ import {
   setLoadingMore,
 } from '@/store/sessionsSlice'
 import { addTab, switchToNextTab, switchToPrevTab } from '@/store/tabsSlice'
-import { api, isApiUnauthorizedError, type VersionInfo } from '@/lib/api'
+import { api, fetchSidebarSessionsSnapshot, isApiUnauthorizedError, type VersionInfo } from '@/lib/api'
 import { getShareAction, ensureShareUrlToken } from '@/lib/share-utils'
 import { getWsClient } from '@/lib/ws-client'
-import { getSessionsForHello } from '@/lib/session-utils'
+import { collectSessionLocatorsFromTabs, getSessionsForHello } from '@/lib/session-utils'
 import { setClientPerfEnabled } from '@/lib/perf-logger'
 import { applyLocalTerminalFontFamily } from '@/lib/terminal-fonts'
 import { handleUiCommand } from '@/lib/ui-commands'
@@ -131,6 +131,7 @@ export default function App() {
   useTurnCompletionNotifications()
 
   const dispatch = useAppDispatch()
+  const appStore = useAppStore()
   const tabs = useAppSelector((s) => s.tabs.tabs)
   const activeTabId = useAppSelector((s) => s.tabs.activeTabId)
   const settings = useAppSelector((s) => s.settings.settings)
@@ -199,8 +200,8 @@ export default function App() {
 
   // Keep this tab's Redux state in sync with persisted writes from other browser tabs.
   useEffect(() => {
-    return installCrossTabSync(store)
-  }, [])
+    return installCrossTabSync(appStore)
+  }, [appStore])
 
   useEffect(() => {
     isMobileRef.current = isMobile
@@ -470,11 +471,11 @@ export default function App() {
       // early messages) are silently lost — causing the "chat history lost on
       // reload" bug.
       const ws = getWsClient()
-      stopTabRegistrySync = startTabRegistrySync(store, ws)
+      stopTabRegistrySync = startTabRegistrySync(appStore, ws)
 
       // Set up hello extension to include session IDs for prioritized repair
       ws.setHelloExtensionProvider(() => ({
-        sessions: getSessionsForHello(store.getState()),
+        sessions: getSessionsForHello(appStore.getState()),
         client: { mobile: isMobileRef.current },
       }))
 
@@ -489,12 +490,20 @@ export default function App() {
       }
 
       const promoteRecentHttpSessionsBaseline = () => {
-        const lastLoadedAt = store.getState().sessions.lastLoadedAt
+        const lastLoadedAt = appStore.getState().sessions.lastLoadedAt
         if (typeof lastLoadedAt !== 'number') return false
         if (Date.now() - lastLoadedAt > RECENT_HTTP_SESSIONS_BASELINE_MS) return false
         dispatch(markWsSnapshotReceived())
         return true
       }
+
+      const loadSidebarSessionsSnapshot = () => fetchSidebarSessionsSnapshot({
+        limit: 100,
+        openSessions: collectSessionLocatorsFromTabs(
+          appStore.getState().tabs.tabs,
+          appStore.getState().panes,
+        ),
+      })
 
       const unsubscribe = ws.onMessage((msg) => {
         if (!msg?.type) return
@@ -581,7 +590,7 @@ export default function App() {
         }
         if (msg.type === 'sessions.page') {
           // Ignore stale page responses from a previous snapshot generation
-          const sessionState = store.getState().sessions
+          const sessionState = appStore.getState().sessions
           if (activePaginationGeneration === snapshotGeneration && sessionState.hasMore != null) {
             const projects = (msg.projects || []) as ProjectGroup[]
             dispatch(appendSessionsPage(projects))
@@ -604,7 +613,7 @@ export default function App() {
         if (msg.type === 'ui.command') {
           handleUiCommand(msg as Record<string, unknown>, {
             dispatch,
-            getState: store.getState,
+            getState: appStore.getState,
             send: (payload) => ws.send(payload),
           })
         }
@@ -726,7 +735,7 @@ export default function App() {
       }
 
       try {
-        const sessionsRes = await api.get('/api/sessions?limit=100')
+        const sessionsRes = await loadSidebarSessionsSnapshot()
         if (!cancelled) {
           if (sessionsRes && typeof sessionsRes === 'object' && !Array.isArray(sessionsRes)) {
             // Paginated response
@@ -765,7 +774,7 @@ export default function App() {
         const promoted = promoteRecentHttpSessionsBaseline()
         if (!promoted) {
           try {
-            const sessionsRes = await api.get('/api/sessions?limit=100')
+            const sessionsRes = await loadSidebarSessionsSnapshot()
             if (!cancelled) {
               if (sessionsRes && typeof sessionsRes === 'object' && !Array.isArray(sessionsRes)) {
                 dispatch(setProjects(sessionsRes.projects || []))
@@ -818,7 +827,7 @@ export default function App() {
       stopTabRegistrySync?.()
       void cleanupPromise
     }
-  }, [dispatch])
+  }, [appStore, dispatch])
 
   // Auto-show setup wizard on first run (unconfigured + localhost)
   useEffect(() => {

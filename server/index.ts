@@ -305,6 +305,7 @@ async function main() {
     registry,
     wsHandler,
     sessionMetadataStore,
+    serverInstanceId,
   }))
 
   app.use('/api', createProjectColorsRouter({ configStore, codingCliIndexer }))
