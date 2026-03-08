@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterAll, afterEach, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import * as net from 'net'
@@ -42,7 +42,7 @@ describe('Port Forward API Integration', () => {
   let manager: PortForwardManager
   let echoServer: { server: net.Server; port: number } | null = null
 
-  beforeAll(() => {
+  beforeEach(() => {
     process.env.AUTH_TOKEN = TEST_AUTH_TOKEN
     process.env.FRESHELL_TRUST_PROXY = 'loopback'
     manager = new PortForwardManager({ idleTimeoutMs: 60_000 })
@@ -65,7 +65,8 @@ describe('Port Forward API Integration', () => {
     app.use('/api/proxy', createProxyRouter({ portForwardManager: manager }))
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    await manager.closeAll()
     if (echoServer) {
       echoServer.server.close()
       echoServer = null
@@ -73,7 +74,7 @@ describe('Port Forward API Integration', () => {
   })
 
   afterAll(() => {
-    manager.closeAll()
+    delete process.env.AUTH_TOKEN
     delete process.env.FRESHELL_TRUST_PROXY
   })
 

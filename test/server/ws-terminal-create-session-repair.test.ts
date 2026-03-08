@@ -46,21 +46,63 @@ function listen(server: http.Server, timeoutMs = HOOK_TIMEOUT_MS): Promise<{ por
 
 function waitForMessage(ws: WebSocket, predicate: (msg: any) => boolean, timeoutMs = 5000): Promise<any> {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
+    const cleanup = () => {
+      clearTimeout(timeout)
       ws.off('message', handler)
+      ws.off('close', onClose)
+      ws.off('error', onError)
+    }
+
+    const timeout = setTimeout(() => {
+      cleanup()
       reject(new Error('Timeout waiting for message'))
     }, timeoutMs)
 
     const handler = (data: WebSocket.Data) => {
-      const msg = JSON.parse(data.toString())
-      if (predicate(msg)) {
-        clearTimeout(timeout)
-        ws.off('message', handler)
-        resolve(msg)
+      try {
+        const msg = JSON.parse(data.toString())
+        if (predicate(msg)) {
+          cleanup()
+          resolve(msg)
+        }
+      } catch {
+        // Ignore malformed frames in tests.
       }
     }
+
+    const onClose = () => {
+      cleanup()
+      reject(new Error('Socket closed waiting for message'))
+    }
+
+    const onError = (error: Error) => {
+      cleanup()
+      reject(error)
+    }
+
+    if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      onClose()
+      return
+    }
+
     ws.on('message', handler)
+    ws.once('close', onClose)
+    ws.once('error', onError)
   })
+}
+
+function waitForReady(ws: WebSocket): Promise<any> {
+  const readyPromise = waitForMessage(ws, (m) => m.type === 'ready')
+  ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
+  return readyPromise
+}
+
+function waitForCreated(ws: WebSocket, requestId: string, timeoutMs = 5000): Promise<any> {
+  return waitForMessage(
+    ws,
+    (m) => m.type === 'terminal.created' && m.requestId === requestId,
+    timeoutMs,
+  )
 }
 
 function closeWebSocket(ws: WebSocket, timeoutMs = 500): Promise<void> {
@@ -232,6 +274,7 @@ describe('terminal.create session repair wait', () => {
     process.env.AUTH_TOKEN = 'testtoken-testtoken'
     process.env.HELLO_TIMEOUT_MS = '100'
 
+    vi.resetModules()
     const { WsHandler } = await import('../../server/ws-handler')
     server = http.createServer((_req, res) => {
       res.statusCode = 404
@@ -272,10 +315,10 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await waitForReady(ws)
 
       const requestId = 'resume-1'
+      const createdPromise = waitForCreated(ws, requestId, 3000)
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
@@ -283,11 +326,7 @@ describe('terminal.create session repair wait', () => {
         resumeSessionId: VALID_SESSION_ID,
       }))
 
-      const created = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-        3000,
-      )
+      const created = await createdPromise
 
       expect(created.terminalId).toMatch(/^term_/)
       expect(created.effectiveResumeSessionId).toBe(VALID_SESSION_ID)
@@ -312,10 +351,10 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await waitForReady(ws)
 
       const requestId = 'resume-missing-1'
+      const createdPromise = waitForCreated(ws, requestId)
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
@@ -323,10 +362,7 @@ describe('terminal.create session repair wait', () => {
         resumeSessionId: VALID_SESSION_ID,
       }))
 
-      const created = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-      )
+      const created = await createdPromise
 
       expect(registry.lastCreateOpts?.resumeSessionId).toBeUndefined()
       expect(created.effectiveResumeSessionId).toBeUndefined()
@@ -352,10 +388,10 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await waitForReady(ws)
 
       const requestId = 'resume-repair-missing-1'
+      const createdPromise = waitForCreated(ws, requestId)
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
@@ -363,10 +399,7 @@ describe('terminal.create session repair wait', () => {
         resumeSessionId: VALID_SESSION_ID,
       }))
 
-      const created = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-      )
+      const created = await createdPromise
 
       expect(registry.lastCreateOpts?.resumeSessionId).toBeUndefined()
       expect(created.effectiveResumeSessionId).toBeUndefined()
@@ -382,10 +415,10 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await waitForReady(ws)
 
       const requestId = 'resume-timeout-1'
+      const createdPromise = waitForCreated(ws, requestId, 3000)
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
@@ -393,11 +426,7 @@ describe('terminal.create session repair wait', () => {
         resumeSessionId: VALID_SESSION_ID,
       }))
 
-      const created = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-        3000,
-      )
+      const created = await createdPromise
 
       // Should still create with the resumeSessionId (repair failed, but we proceed)
       expect(created.terminalId).toMatch(/^term_/)
@@ -414,10 +443,10 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await waitForReady(ws)
 
       const requestId = 'resume-dup-1'
+      const createdPromise = waitForCreated(ws, requestId, 3000)
 
       // Send two creates with the same requestId in quick succession
       ws.send(JSON.stringify({
@@ -433,11 +462,7 @@ describe('terminal.create session repair wait', () => {
         resumeSessionId: VALID_SESSION_ID,
       }))
 
-      const created = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-        3000,
-      )
+      const created = await createdPromise
 
       expect(created.terminalId).toMatch(/^term_/)
 
@@ -460,9 +485,9 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws1.on('open', () => resolve()))
-      ws1.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws1, (m) => m.type === 'ready')
+      await waitForReady(ws1)
 
+      const createdOnWs1Promise = waitForCreated(ws1, requestId, 3000)
       ws1.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
@@ -474,9 +499,9 @@ describe('terminal.create session repair wait', () => {
 
       ws2 = new WebSocket(`ws://127.0.0.1:${port}/ws`)
       await new Promise<void>((resolve) => ws2!.on('open', () => resolve()))
-      ws2.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws2, (m) => m.type === 'ready')
+      await waitForReady(ws2)
 
+      const createdOnWs2Promise = waitForCreated(ws2, requestId, 3000)
       ws2.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
@@ -485,8 +510,8 @@ describe('terminal.create session repair wait', () => {
       }))
 
       const [createdOnWs1, createdOnWs2] = await Promise.all([
-        waitForMessage(ws1, (m) => m.type === 'terminal.created' && m.requestId === requestId, 3000),
-        waitForMessage(ws2, (m) => m.type === 'terminal.created' && m.requestId === requestId, 3000),
+        createdOnWs1Promise,
+        createdOnWs2Promise,
       ])
 
       expect(createdOnWs2.terminalId).toBe(createdOnWs1.terminalId)
@@ -508,9 +533,9 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws1.on('open', () => resolve()))
-      ws1.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws1, (m) => m.type === 'ready')
+      await waitForReady(ws1)
 
+      const createdOnWs1Promise = waitForCreated(ws1, 'resume-session-lock-1', 3000)
       ws1.send(JSON.stringify({
         type: 'terminal.create',
         requestId: 'resume-session-lock-1',
@@ -522,9 +547,9 @@ describe('terminal.create session repair wait', () => {
 
       ws2 = new WebSocket(`ws://127.0.0.1:${port}/ws`)
       await new Promise<void>((resolve) => ws2!.on('open', () => resolve()))
-      ws2.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws2, (m) => m.type === 'ready')
+      await waitForReady(ws2)
 
+      const createdOnWs2Promise = waitForCreated(ws2, 'resume-session-lock-2', 3000)
       ws2.send(JSON.stringify({
         type: 'terminal.create',
         requestId: 'resume-session-lock-2',
@@ -533,8 +558,8 @@ describe('terminal.create session repair wait', () => {
       }))
 
       const [createdOnWs1, createdOnWs2] = await Promise.all([
-        waitForMessage(ws1, (m) => m.type === 'terminal.created' && m.requestId === 'resume-session-lock-1', 3000),
-        waitForMessage(ws2, (m) => m.type === 'terminal.created' && m.requestId === 'resume-session-lock-2', 3000),
+        createdOnWs1Promise,
+        createdOnWs2Promise,
       ])
 
       expect(createdOnWs2.terminalId).toBe(createdOnWs1.terminalId)
@@ -555,8 +580,7 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await waitForReady(ws)
 
       const requestId = 'resume-disconnect-1'
       ws.send(JSON.stringify({
@@ -600,8 +624,7 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await waitForReady(ws)
 
       ws.send(JSON.stringify({
         type: 'terminal.create',
@@ -640,8 +663,7 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws1.on('open', () => resolve()))
-      ws1.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws1, (m) => m.type === 'ready')
+      await waitForReady(ws1)
 
       ws1.send(JSON.stringify({
         type: 'terminal.create',
@@ -653,29 +675,21 @@ describe('terminal.create session repair wait', () => {
 
       ws2 = new WebSocket(`ws://127.0.0.1:${port}/ws`)
       await new Promise<void>((resolve) => ws2!.on('open', () => resolve()))
-      ws2.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws2, (m) => m.type === 'ready')
+      await waitForReady(ws2)
 
+      const createdOnWs2 = waitForCreated(ws2, requestId, 3000)
       ws2.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
         mode: 'shell',
       }))
 
-      const createdOnWs2 = waitForMessage(
-        ws2,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-        3000,
-      )
+      const createdOnWs1Promise = waitForCreated(ws1, requestId, 3000)
 
       await new Promise((resolve) => setTimeout(resolve, 50))
       releaseConfig?.()
 
-      const createdOnWs1 = await waitForMessage(
-        ws1,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-        3000,
-      )
+      const createdOnWs1 = await createdOnWs1Promise
       const createdOnWs2Resolved = await createdOnWs2
 
       expect(createdOnWs2Resolved.terminalId).toBe(createdOnWs1.terminalId)
@@ -699,38 +713,32 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws1.on('open', () => resolve()))
-      ws1.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws1, (m) => m.type === 'ready')
+      await waitForReady(ws1)
 
+      const firstCreatedPromise = waitForCreated(ws1, requestId)
       ws1.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
         mode: 'shell',
       }))
 
-      const firstCreated = await waitForMessage(
-        ws1,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-      )
+      const firstCreated = await firstCreatedPromise
 
       await closeWebSocket(ws1)
       now += 10 * 60_000
 
       ws2 = new WebSocket(`ws://127.0.0.1:${port}/ws`)
       await new Promise<void>((resolve) => ws2.on('open', () => resolve()))
-      ws2.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws2, (m) => m.type === 'ready')
+      await waitForReady(ws2)
 
+      const secondCreatedPromise = waitForCreated(ws2, requestId)
       ws2.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
         mode: 'shell',
       }))
 
-      const secondCreated = await waitForMessage(
-        ws2,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-      )
+      const secondCreated = await secondCreatedPromise
 
       expect(secondCreated.terminalId).toBe(firstCreated.terminalId)
       expect(registry.records.size).toBe(1)
@@ -752,15 +760,14 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => observer.on('open', () => resolve()))
-      observer.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(observer, (m) => m.type === 'ready')
+      await waitForReady(observer)
 
       creator = new WebSocket(`ws://127.0.0.1:${port}/ws`)
       await new Promise<void>((resolve) => creator.on('open', () => resolve()))
-      creator.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(creator, (m) => m.type === 'ready')
+      await waitForReady(creator)
 
       const listUpdatedPromise = waitForMessage(observer, (m) => m.type === 'terminal.list.updated')
+      const createdPromise = waitForCreated(creator, 'create-attach-fail-list-update')
 
       creator.send(JSON.stringify({
         type: 'terminal.create',
@@ -768,10 +775,7 @@ describe('terminal.create session repair wait', () => {
         mode: 'shell',
       }))
 
-      const created = await waitForMessage(
-        creator,
-        (m) => m.type === 'terminal.created' && m.requestId === 'create-attach-fail-list-update',
-      )
+      const created = await createdPromise
       expect(registry.records.size).toBe(1)
 
       await listUpdatedPromise
@@ -803,10 +807,10 @@ describe('terminal.create session repair wait', () => {
 
     try {
       await new Promise<void>((resolve) => ws.on('open', () => resolve()))
-      ws.send(JSON.stringify({ type: 'hello', token: 'testtoken-testtoken', protocolVersion: WS_PROTOCOL_VERSION }))
-      await waitForMessage(ws, (m) => m.type === 'ready')
+      await waitForReady(ws)
 
       const requestId = 'resume-invalid-1'
+      const createdPromise = waitForCreated(ws, requestId)
       ws.send(JSON.stringify({
         type: 'terminal.create',
         requestId,
@@ -814,10 +818,7 @@ describe('terminal.create session repair wait', () => {
         resumeSessionId: 'not-a-uuid',
       }))
 
-      const created = await waitForMessage(
-        ws,
-        (m) => m.type === 'terminal.created' && m.requestId === requestId,
-      )
+      const created = await createdPromise
 
       expect(registry.lastCreateOpts?.resumeSessionId).toBeUndefined()
       expect(created.effectiveResumeSessionId).toBeUndefined()

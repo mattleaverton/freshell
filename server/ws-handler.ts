@@ -224,6 +224,7 @@ function createScreenshotError(code: ScreenshotErrorCode, message: string): Erro
 
 export class WsHandler {
   private readonly config: WsHandlerConfig
+  private readonly authToken: string
   private wss: WebSocketServer
   private connections = new Set<LiveWebSocket>()
   private clientStates = new Map<LiveWebSocket, ClientState>()
@@ -264,6 +265,7 @@ export class WsHandler {
     extensionManager?: ExtensionManager,
   ) {
     this.config = readWsHandlerConfig()
+    this.authToken = getRequiredAuthToken()
     this.sessionRepairService = sessionRepairService
     this.handshakeSnapshotProvider = handshakeSnapshotProvider
     this.terminalMetaListProvider = terminalMetaListProvider
@@ -973,8 +975,7 @@ export class WsHandler {
       }
 
       if (m.type === 'hello') {
-        const expected = getRequiredAuthToken()
-        if (!m.token || !timingSafeCompare(m.token, expected)) {
+        if (!m.token || !timingSafeCompare(m.token, this.authToken)) {
           log.warn({ event: 'ws_auth_failed', connectionId: ws.connectionId }, 'WebSocket auth failed')
           this.sendError(ws, { code: 'NOT_AUTHENTICATED', message: 'Invalid token' })
           ws.close(CLOSE_CODES.NOT_AUTHENTICATED, 'Invalid token')
