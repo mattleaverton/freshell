@@ -1,0 +1,17 @@
+{
+  "name": "claude",
+  "version": "1.0.0",
+  "label": "Claude CLI",
+  "description": "Anthropic's Claude Code CLI agent",
+  "category": "cli",
+  "cli": {
+    "command": "claude",
+    "envVar": "CLAUDE_CMD",
+    "resumeArgs": ["--resume", "{{sessionId}}"],
+    "supportsPermissionMode": true
+  },
+  "picker": {
+    "shortcut": "L",
+    "group": "agents"
+  }
+}
