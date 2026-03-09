@@ -69,3 +69,21 @@ it('returns a clean tab match when the matched tab has no panes', () => {
 
   expect(resolveTarget('Alpha', ctx)).toEqual({ tabId: 't1', paneId: undefined, message: 'tab matched; active pane used' })
 })
+
+it('rejects ambiguous pane title targets', () => {
+  const ctx = {
+    activeTabId: 't1',
+    panesByTab: {
+      t1: [{ id: 'p1', title: 'Shell' }],
+      t2: [{ id: 'p2', title: 'Shell' }],
+    },
+    tabs: [
+      { id: 't1', title: 'Alpha', activePaneId: 'p1' },
+      { id: 't2', title: 'Beta', activePaneId: 'p2' },
+    ],
+  } as any
+
+  expect(resolveTarget('Shell', ctx)).toEqual({
+    message: 'pane target is ambiguous; use pane id or tab.pane index',
+  })
+})

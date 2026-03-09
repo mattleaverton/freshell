@@ -47,21 +47,26 @@ function resolveCliPaths() {
 }
 
 async function runCli(url: string, args: string[]) {
+  const result = await runCliResult(url, args)
+  if (result.code !== 0) throw new Error(`cli exited ${result.code}: ${result.stderr}`)
+  return { stdout: result.stdout, stderr: result.stderr }
+}
+
+async function runCliResult(url: string, args: string[]) {
   const { tsxPath, cliPath } = resolveCliPaths()
   const proc = spawn(process.execPath, [tsxPath, cliPath, ...args], {
     env: { ...process.env, FRESHELL_URL: url, FRESHELL_TOKEN: 'test-token' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 
-  return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+  return await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
     let stdout = ''
     let stderr = ''
     proc.stdout.on('data', (chunk) => { stdout += chunk.toString() })
     proc.stderr.on('data', (chunk) => { stderr += chunk.toString() })
     proc.on('error', reject)
     proc.on('close', (code) => {
-      if (code !== 0) return reject(new Error(`cli exited ${code}: ${stderr}`))
-      resolve({ stdout, stderr })
+      resolve({ code: code ?? 0, stdout, stderr })
     })
   })
 }
@@ -154,6 +159,29 @@ describe('cli e2e flow', () => {
 
       expect(parsed.status).toBe('ok')
       expect(renamePane).toHaveBeenCalledWith('pane_1', 'Renamed shell')
+    } finally {
+      await close()
+    }
+  })
+
+  it('rejects ambiguous pane title targets', async () => {
+    const { url, close } = await startTestServer({
+      listTabs: () => ([
+        { id: 'tab_1', title: 'Alpha', activePaneId: 'pane_1' },
+        { id: 'tab_2', title: 'Beta', activePaneId: 'pane_2' },
+      ]),
+      listPanes: (tabId?: string) => {
+        if (tabId === 'tab_2') {
+          return [{ id: 'pane_2', index: 0, kind: 'terminal', terminalId: 'term_2', title: 'Shell' }]
+        }
+        return [{ id: 'pane_1', index: 0, kind: 'terminal', terminalId: 'term_1', title: 'Shell' }]
+      },
+    })
+    try {
+      const output = await runCliResult(url, ['select-pane', '-t', 'Shell'])
+
+      expect(output.code).toBe(1)
+      expect(output.stderr).toContain('pane target is ambiguous')
     } finally {
       await close()
     }

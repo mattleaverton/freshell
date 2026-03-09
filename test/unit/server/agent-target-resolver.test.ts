@@ -70,4 +70,18 @@ describe('resolveTarget', () => {
     expect(resTab.tabId).toBe('tab_dot')
     expect(resTab.paneId).toBe('pane_dot')
   })
+
+  it('rejects ambiguous pane title matches', () => {
+    const res = resolveTarget('Shell', {
+      ...snapshot,
+      paneTitles: {
+        tab_plain: { pane_0: 'Shell' },
+        tab_dot: { pane_dot: 'Shell' },
+      },
+    } as any)
+
+    expect(res).toEqual({
+      message: 'pane target is ambiguous; use pane id or tab.pane index',
+    })
+  })
 })

@@ -70,9 +70,18 @@ export function createAgentApiRouter({
   const resolvePaneTarget = (raw: string) => {
     if (layoutStore.resolveTarget) {
       const resolved = layoutStore.resolveTarget(raw)
-      if (resolved?.paneId) return resolved
+      if (resolved?.paneId || resolved?.tabId || (resolved?.message && resolved.message !== 'target not resolved')) {
+        return resolved
+      }
     }
     return { paneId: raw }
+  }
+
+  const rejectPaneTargetError = (res: any, resolved: { paneId?: string; message?: string }) => {
+    if (!resolved?.message || resolved.paneId) return false
+    const status = resolved.message.includes('ambiguous') ? 409 : 404
+    res.status(status).json(fail(resolved.message))
+    return true
   }
 
   const parseOptionalNumber = (value: unknown): number | undefined => {
@@ -270,6 +279,7 @@ export function createAgentApiRouter({
   router.get('/panes/:id/capture', (req, res) => {
     const rawTarget = req.params.id
     const resolved = resolvePaneTarget(rawTarget)
+    if (rejectPaneTargetError(res, resolved)) return
     const paneId = resolved.paneId || rawTarget
     const paneSnapshot = layoutStore.getPaneSnapshot?.(paneId)
     let terminalId = paneSnapshot?.terminalId || layoutStore.resolvePaneToTerminal?.(paneId)
@@ -515,6 +525,7 @@ export function createAgentApiRouter({
   router.post('/panes/:id/split', (req, res) => {
     const rawPaneId = req.params.id
     const resolved = resolvePaneTarget(rawPaneId)
+    if (rejectPaneTargetError(res, resolved)) return
     const paneId = resolved.paneId || rawPaneId
     const direction = req.body?.direction || 'horizontal'
     const wantsBrowser = !!req.body?.browser
@@ -578,6 +589,7 @@ export function createAgentApiRouter({
       }
 
       const resolved = resolvePaneTarget(req.params.id)
+      if (rejectPaneTargetError(res, resolved)) return
       const paneId = resolved.paneId || req.params.id
       const paneSnapshot = layoutStore.getPaneSnapshot?.(paneId)
       const result = layoutStore.renamePane(paneId, name)
@@ -611,6 +623,7 @@ export function createAgentApiRouter({
   router.post('/panes/:id/close', (req, res) => {
     const rawPaneId = req.params.id
     const resolved = resolvePaneTarget(rawPaneId)
+    if (rejectPaneTargetError(res, resolved)) return
     const paneId = resolved.paneId || rawPaneId
     const result = layoutStore.closePane(paneId)
     wsHandler?.broadcastUiCommand({ command: 'pane.close', payload: { tabId: result?.tabId, paneId } })
@@ -620,6 +633,7 @@ export function createAgentApiRouter({
   router.post('/panes/:id/select', (req, res) => {
     const rawPaneId = req.params.id
     const resolved = resolvePaneTarget(rawPaneId)
+    if (rejectPaneTargetError(res, resolved)) return
     const paneId = resolved.paneId || rawPaneId
     const tabId = req.body?.tabId || resolved.tabId
     const result = layoutStore.selectPane(tabId, paneId)
@@ -706,8 +720,10 @@ export function createAgentApiRouter({
     if (!otherRaw) return res.json(approx(undefined, 'swap target missing'))
 
     const resolved = resolvePaneTarget(rawPaneId)
+    if (rejectPaneTargetError(res, resolved)) return
     const paneId = resolved.paneId || rawPaneId
     const otherResolved = resolvePaneTarget(otherRaw)
+    if (rejectPaneTargetError(res, otherResolved)) return
     const otherId = otherResolved.paneId || otherRaw
     if (!otherId) return res.json(approx(undefined, 'swap target missing'))
     const result = layoutStore.swapPane(req.body?.tabId, paneId, otherId)
@@ -719,8 +735,10 @@ export function createAgentApiRouter({
   })
 
   router.post('/panes/:id/respawn', (req, res) => {
-    const paneId = req.params.id
-    const target = layoutStore.resolveTarget(paneId)
+    const resolved = resolvePaneTarget(req.params.id)
+    if (rejectPaneTargetError(res, resolved)) return
+    const paneId = resolved.paneId || req.params.id
+    const target = resolved.tabId ? resolved : layoutStore.resolveTarget(paneId)
     const tabId = target?.tabId
     if (!tabId) return res.status(404).json(fail('pane not found'))
     const terminal = registry.create({ mode: req.body?.mode || 'shell', shell: req.body?.shell, cwd: req.body?.cwd, envContext: { tabId, paneId } })
@@ -731,10 +749,12 @@ export function createAgentApiRouter({
   })
 
   router.post('/panes/:id/attach', (req, res) => {
-    const paneId = req.params.id
+    const resolved = resolvePaneTarget(req.params.id)
+    if (rejectPaneTargetError(res, resolved)) return
+    const paneId = resolved.paneId || req.params.id
     const terminalId = req.body?.terminalId
     if (!terminalId) return res.status(400).json(fail('terminalId required'))
-    const target = layoutStore.resolveTarget(paneId)
+    const target = resolved.tabId ? resolved : layoutStore.resolveTarget(paneId)
     const tabId = target?.tabId
     if (!tabId) return res.status(404).json(fail('pane not found'))
     const attachedTerminal = registry.get?.(terminalId)
@@ -752,10 +772,12 @@ export function createAgentApiRouter({
   })
 
   router.post('/panes/:id/navigate', (req, res) => {
-    const paneId = req.params.id
+    const resolved = resolvePaneTarget(req.params.id)
+    if (rejectPaneTargetError(res, resolved)) return
+    const paneId = resolved.paneId || req.params.id
     const url = req.body?.url || req.body?.target
     if (!url) return res.status(400).json(fail('url required'))
-    const target = layoutStore.resolveTarget(paneId)
+    const target = resolved.tabId ? resolved : layoutStore.resolveTarget(paneId)
     const tabId = target?.tabId
     if (!tabId) return res.status(404).json(fail('pane not found'))
     const content = { kind: 'browser', url, devToolsOpen: false }
@@ -765,7 +787,9 @@ export function createAgentApiRouter({
   })
 
   router.post('/panes/:id/send-keys', (req, res) => {
-    const paneId = req.params.id
+    const resolved = resolvePaneTarget(req.params.id)
+    if (rejectPaneTargetError(res, resolved)) return
+    const paneId = resolved.paneId || req.params.id
     const payload = req.body || {}
     const data = payload.data ?? payload.keys ?? payload.text ?? ''
     let terminalId = layoutStore.resolvePaneToTerminal?.(paneId)

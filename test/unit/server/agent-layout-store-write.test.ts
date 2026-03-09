@@ -82,3 +82,53 @@ it('seeds derived titles for server-created, split, and attached panes', () => {
     expect.objectContaining({ id: split.newPaneId, title: 'example.txt' }),
   ])
 })
+
+it('preserves user-set pane titles across attach, respawn, and navigate updates', () => {
+  const store = new LayoutStore()
+  store.updateFromUi({
+    tabs: [{ id: 'tab_a', title: 'Alpha' }],
+    activeTabId: 'tab_a',
+    layouts: {
+      tab_a: {
+        type: 'leaf',
+        id: 'pane_1',
+        content: { kind: 'terminal', terminalId: 'term_1', mode: 'shell', shell: 'system' },
+      },
+    },
+    activePane: { tab_a: 'pane_1' },
+    paneTitles: { tab_a: { pane_1: 'Ops desk' } },
+    paneTitleSetByUser: { tab_a: { pane_1: true } },
+    timestamp: Date.now(),
+  } as any, 'conn-1')
+
+  store.attachPaneContent('tab_a', 'pane_1', {
+    kind: 'terminal',
+    terminalId: 'term_2',
+    mode: 'codex',
+    shell: 'system',
+    status: 'running',
+  })
+  expect(store.listPanes('tab_a')).toEqual([
+    expect.objectContaining({ id: 'pane_1', kind: 'terminal', terminalId: 'term_2', title: 'Ops desk' }),
+  ])
+
+  store.attachPaneContent('tab_a', 'pane_1', {
+    kind: 'browser',
+    url: 'https://docs.example.com/runbook',
+    devToolsOpen: false,
+  })
+  expect(store.listPanes('tab_a')).toEqual([
+    expect.objectContaining({ id: 'pane_1', kind: 'browser', title: 'Ops desk' }),
+  ])
+
+  store.attachPaneContent('tab_a', 'pane_1', {
+    kind: 'terminal',
+    terminalId: 'term_3',
+    mode: 'shell',
+    shell: 'system',
+    status: 'running',
+  })
+  expect(store.listPanes('tab_a')).toEqual([
+    expect.objectContaining({ id: 'pane_1', kind: 'terminal', terminalId: 'term_3', title: 'Ops desk' }),
+  ])
+})

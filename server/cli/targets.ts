@@ -5,6 +5,7 @@ export type TargetContext = {
 }
 
 type ResolveResult = { tabId?: string; paneId?: string; message?: string }
+const AMBIGUOUS_PANE_TARGET_MESSAGE = 'pane target is ambiguous; use pane id or tab.pane index'
 
 function paneIdOf(entry: string | { id: string; title?: string } | undefined) {
   if (!entry) return undefined
@@ -60,10 +61,15 @@ export function resolveTarget(target: string, ctx: TargetContext): ResolveResult
     }
   }
 
+  let titleMatch: ResolveResult | undefined
   for (const [tabId, panes] of Object.entries(ctx.panesByTab)) {
-    const pane = panes.find((entry) => paneTitleOf(entry) === clean)
-    if (pane) return { tabId, paneId: paneIdOf(pane) }
+    for (const pane of panes) {
+      if (paneTitleOf(pane) !== clean) continue
+      if (titleMatch) return { message: AMBIGUOUS_PANE_TARGET_MESSAGE }
+      titleMatch = { tabId, paneId: paneIdOf(pane) }
+    }
   }
+  if (titleMatch) return titleMatch
 
   return { message: 'target not resolved' }
 }

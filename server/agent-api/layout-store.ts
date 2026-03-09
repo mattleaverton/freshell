@@ -7,6 +7,7 @@ type UiSnapshot = {
   layouts: Record<string, any>
   activePane: Record<string, string>
   paneTitles?: Record<string, Record<string, string>>
+  paneTitleSetByUser?: Record<string, Record<string, boolean>>
   timestamp?: number
 }
 
@@ -26,6 +27,36 @@ type PaneSnapshot = {
 export class LayoutStore {
   private snapshot: UiSnapshot | null = null
   private sourceConnectionId: string | null = null
+
+  private ensurePaneTitleMaps(tabId: string) {
+    if (!this.snapshot) return
+    if (!this.snapshot.paneTitles) this.snapshot.paneTitles = {}
+    if (!this.snapshot.paneTitles[tabId]) this.snapshot.paneTitles[tabId] = {}
+    if (!this.snapshot.paneTitleSetByUser) this.snapshot.paneTitleSetByUser = {}
+    if (!this.snapshot.paneTitleSetByUser[tabId]) this.snapshot.paneTitleSetByUser[tabId] = {}
+  }
+
+  private removePaneMetadata(tabId: string, paneId: string) {
+    if (!this.snapshot) return
+    if (this.snapshot.paneTitles?.[tabId]) {
+      delete this.snapshot.paneTitles[tabId][paneId]
+      if (Object.keys(this.snapshot.paneTitles[tabId]).length === 0) {
+        delete this.snapshot.paneTitles[tabId]
+      }
+    }
+    if (this.snapshot.paneTitleSetByUser?.[tabId]) {
+      delete this.snapshot.paneTitleSetByUser[tabId][paneId]
+      if (Object.keys(this.snapshot.paneTitleSetByUser[tabId]).length === 0) {
+        delete this.snapshot.paneTitleSetByUser[tabId]
+      }
+    }
+  }
+
+  private removeTabMetadata(tabId: string) {
+    if (!this.snapshot) return
+    delete this.snapshot.paneTitles?.[tabId]
+    delete this.snapshot.paneTitleSetByUser?.[tabId]
+  }
 
   private derivePaneTitle(content: any): string | undefined {
     if (!content || typeof content !== 'object') return undefined
@@ -94,8 +125,8 @@ export class LayoutStore {
   private seedPaneTitle(tabId: string, paneId: string, content: any) {
     const title = this.derivePaneTitle(content)
     if (!title || !this.snapshot) return
-    if (!this.snapshot.paneTitles) this.snapshot.paneTitles = {}
-    if (!this.snapshot.paneTitles[tabId]) this.snapshot.paneTitles[tabId] = {}
+    if (this.snapshot.paneTitleSetByUser?.[tabId]?.[paneId]) return
+    this.ensurePaneTitleMaps(tabId)
     this.snapshot.paneTitles[tabId][paneId] = title
   }
 
@@ -374,6 +405,7 @@ export class LayoutStore {
       if (remaining.length === 0) return { message: 'cannot close only pane' as const }
       this.snapshot.layouts[tab.id] = this.buildGridLayout(remaining)
       this.snapshot.activePane[tab.id] = remaining[remaining.length - 1].id
+      this.removePaneMetadata(tab.id, paneId)
       return { tabId: tab.id }
     }
     return { message: 'pane not found' as const }
@@ -417,9 +449,9 @@ export class LayoutStore {
     const pane = this.getPaneSnapshot(paneId)
     if (!pane) return { message: 'pane not found' as const }
 
-    if (!this.snapshot.paneTitles) this.snapshot.paneTitles = {}
-    if (!this.snapshot.paneTitles[pane.tabId]) this.snapshot.paneTitles[pane.tabId] = {}
+    this.ensurePaneTitleMaps(pane.tabId)
     this.snapshot.paneTitles[pane.tabId][paneId] = title
+    this.snapshot.paneTitleSetByUser[pane.tabId][paneId] = true
     return { tabId: pane.tabId, paneId }
   }
 
@@ -429,6 +461,7 @@ export class LayoutStore {
     if (nextTabs.length === this.snapshot.tabs.length) return { message: 'tab not found' as const }
     delete this.snapshot.layouts[tabId]
     delete this.snapshot.activePane[tabId]
+    this.removeTabMetadata(tabId)
     this.snapshot.tabs = nextTabs
     this.snapshot.activeTabId = nextTabs[0]?.id || null
     return { tabId }

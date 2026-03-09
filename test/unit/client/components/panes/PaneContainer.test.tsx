@@ -429,6 +429,37 @@ describe('PaneContainer', () => {
     })
   })
 
+  describe('pane rename sync', () => {
+    it('patches the pane rename API when inline rename commits', async () => {
+      const leafNode: PaneNode = {
+        type: 'leaf',
+        id: 'pane-1',
+        content: createTerminalContent({ terminalId: 'term-1' }),
+      }
+
+      const store = createStore({
+        layouts: { 'tab-1': leafNode },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        renameRequestTabId: 'tab-1',
+        renameRequestPaneId: 'pane-1',
+      })
+
+      renderWithStore(
+        <PaneContainer tabId="tab-1" node={leafNode} />,
+        store
+      )
+
+      const renameInput = await screen.findByLabelText('Rename pane')
+      fireEvent.change(renameInput, { target: { value: 'Ops desk' } })
+      fireEvent.blur(renameInput)
+
+      await waitFor(() => {
+        expect(mockApiPatch).toHaveBeenCalledWith('/api/panes/pane-1', { name: 'Ops desk' })
+      })
+    })
+  })
+
   describe('pane close behavior', () => {
     it('closes the pane from Redux state when close button is clicked', () => {
       const pane1Id = 'pane-1'

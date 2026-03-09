@@ -20,7 +20,6 @@ import { cn } from '@/lib/utils'
 import { getWsClient } from '@/lib/ws-client'
 import { api } from '@/lib/api'
 import { derivePaneTitle } from '@/lib/derivePaneTitle'
-import { shouldSyncRenameToServer } from '@/lib/rename-utils'
 import { getTabDirectoryPreference } from '@/lib/tab-directory-preference'
 import { formatPaneRuntimeLabel, formatPaneRuntimeTooltip } from '@/lib/format-terminal-title-meta'
 import { snap1D, collectCollinearSnapTargets, convertThresholdToLocal } from '@/lib/pane-snap'
@@ -174,15 +173,12 @@ export default function PaneContainer({ tabId, node, hidden }: PaneContainerProp
         dispatch(updateTab({ id: tabId, updates: { title: trimmed } }))
       }
 
-      // For coding CLI panes, persist the rename to the server so it
-      // cascades as a session title override.
-      if (node.type === 'leaf' && node.content.kind === 'terminal') {
-        const { mode, terminalId } = node.content
-        if (shouldSyncRenameToServer(mode, terminalId)) {
-          api.patch(`/api/terminals/${encodeURIComponent(terminalId!)}`, {
-            titleOverride: trimmed,
-          }).catch(() => {}) // Best-effort; UI already updated via Redux
-        }
+      // Persist the rename immediately so later server-side pane content
+      // changes preserve the user-authored title.
+      if (node.type === 'leaf') {
+        api.patch(`/api/panes/${encodeURIComponent(renamingPaneId)}`, {
+          name: trimmed,
+        }).catch(() => {}) // Best-effort; UI already updated via Redux
       }
     }
     // Empty value keeps the original title (no dispatch)

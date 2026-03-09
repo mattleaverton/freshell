@@ -43,6 +43,27 @@ it('resolves tmux-style pane targets for close', async () => {
   expect(closePane).toHaveBeenCalledWith('pane_resolved')
 })
 
+it('rejects ambiguous pane title targets before mutating pane routes', async () => {
+  const app = express()
+  app.use(express.json())
+  const closePane = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: {
+      closePane,
+      resolveTarget: () => ({ message: 'pane target is ambiguous; use pane id or tab.pane index' }),
+    },
+    registry: {},
+    wsHandler: { broadcastUiCommand: () => {} },
+  }))
+
+  const res = await request(app).post('/api/panes/Shell/close').send({})
+
+  expect(res.status).toBe(409)
+  expect(res.body.status).toBe('error')
+  expect(res.body.message).toContain('ambiguous')
+  expect(closePane).not.toHaveBeenCalled()
+})
+
 it('rejects blank pane rename payloads', async () => {
   const app = express()
   app.use(express.json())
