@@ -14,7 +14,7 @@ const SYNCABLE_TERMINAL_MODES = new Set(['claude', 'codex', 'opencode', 'gemini'
 
 type ResizeLayoutStore = {
   getSplitSizes?: (tabId: string | undefined, splitId: string) => [number, number] | undefined
-  resolveTarget?: (target: string) => { paneId?: string }
+  resolveTarget?: (target: string) => { tabId?: string; paneId?: string; message?: string }
   findSplitForPane?: (paneId: string) => { tabId: string; splitId: string } | undefined
 }
 
@@ -96,6 +96,9 @@ export function createAgentApiRouter({
 
   const isValidPercent = (value: number) => Number.isFinite(value) && value >= 1 && value <= 99
   const clampPercent = (value: number) => Math.min(99, Math.max(1, value))
+  const isAmbiguousTargetMessage = (message: string | undefined) => (
+    typeof message === 'string' && message.includes('ambiguous')
+  )
   const normalizePairToHundred = (a: number, b: number): [number, number] => {
     const left = clampPercent(a)
     const right = clampPercent(b)
@@ -124,6 +127,9 @@ export function createAgentApiRouter({
           return { tabId: parent.tabId, splitId: parent.splitId, message: 'pane matched; resized parent split' }
         }
       }
+      if (isAmbiguousTargetMessage(resolved?.message)) {
+        return { tabId: resolved.tabId, splitId: rawTarget, message: resolved.message }
+      }
     }
 
     return { tabId: requestedTabId, splitId: rawTarget, message: 'split not found' }
@@ -132,7 +138,17 @@ export function createAgentApiRouter({
   const persistSyncableTerminalRename = async (paneSnapshot: any, title: string) => {
     const paneContent = paneSnapshot?.paneContent
     const terminalId = typeof paneContent?.terminalId === 'string' ? paneContent.terminalId : undefined
-    const mode = typeof paneContent?.mode === 'string' ? paneContent.mode : undefined
+    const meta = terminalId
+      ? terminalMetadata?.list?.().find((entry) => entry.terminalId === terminalId)
+      : undefined
+    const modeCandidates = [
+      typeof paneContent?.mode === 'string' ? paneContent.mode : undefined,
+      terminalId ? registry.get?.(terminalId)?.mode : undefined,
+      typeof meta?.provider === 'string' ? meta.provider : undefined,
+    ]
+    const mode = modeCandidates.find((candidate) => (
+      typeof candidate === 'string' && SYNCABLE_TERMINAL_MODES.has(candidate)
+    ))
 
     if (!terminalId || !mode || !SYNCABLE_TERMINAL_MODES.has(mode) || !configStore) {
       return
@@ -142,7 +158,6 @@ export function createAgentApiRouter({
       await configStore.patchTerminalOverride?.(terminalId, { titleOverride: title })
       registry.updateTitle?.(terminalId, title)
 
-      const meta = terminalMetadata?.list?.().find((entry) => entry.terminalId === terminalId)
       if (meta?.provider && meta?.sessionId) {
         try {
           await configStore.patchSessionOverride?.(makeSessionKey(meta.provider as any, meta.sessionId), {
@@ -633,6 +648,9 @@ export function createAgentApiRouter({
   router.post('/panes/:id/resize', (req, res) => {
     const rawTarget = req.params.id
     const resolved = resolveResizeTarget(layoutStore as ResizeLayoutStore, rawTarget, req.body?.tabId)
+    if (isAmbiguousTargetMessage(resolved.message) && rejectPaneTargetError(res, { message: resolved.message })) {
+      return
+    }
     if (resolved.message === 'split not found') {
       return res.json(ok({ message: 'split not found' }, 'split not found'))
     }

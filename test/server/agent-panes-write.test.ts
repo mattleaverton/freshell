@@ -245,6 +245,79 @@ it('persists syncable coding CLI pane renames through terminal overrides and ses
   expect(broadcast).toHaveBeenCalledWith({ type: 'terminal.list.updated' })
 })
 
+it('falls back to terminal metadata when pane snapshot mode is stale during pane rename persistence', async () => {
+  const app = express()
+  app.use(express.json())
+  const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_1' }))
+  const patchTerminalOverride = vi.fn().mockResolvedValue({})
+  const patchSessionOverride = vi.fn().mockResolvedValue({})
+  const updateTitle = vi.fn()
+  const refresh = vi.fn().mockResolvedValue(undefined)
+  const broadcast = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: {
+      renamePane,
+      getPaneSnapshot: () => ({
+        tabId: 'tab_1',
+        paneId: 'pane_1',
+        paneContent: { kind: 'terminal', mode: 'shell', terminalId: 'term_1' },
+      }),
+    } as any,
+    registry: { get: () => ({ mode: 'shell' }), updateTitle } as any,
+    wsHandler: { broadcastUiCommand: vi.fn(), broadcast },
+    configStore: { patchTerminalOverride, patchSessionOverride } as any,
+    terminalMetadata: {
+      list: () => [{ terminalId: 'term_1', provider: 'codex', sessionId: 'session-1' }],
+    } as any,
+    codingCliIndexer: { refresh } as any,
+  }))
+
+  const res = await request(app).patch('/api/panes/pane_1').send({ name: 'Recovered agent' })
+
+  expect(res.status).toBe(200)
+  expect(renamePane).toHaveBeenCalledWith('pane_1', 'Recovered agent')
+  expect(patchTerminalOverride).toHaveBeenCalledWith('term_1', { titleOverride: 'Recovered agent' })
+  expect(updateTitle).toHaveBeenCalledWith('term_1', 'Recovered agent')
+  expect(patchSessionOverride).toHaveBeenCalledWith('codex:session-1', { titleOverride: 'Recovered agent' })
+  expect(refresh).toHaveBeenCalledOnce()
+  expect(broadcast).toHaveBeenCalledWith({ type: 'terminal.list.updated' })
+})
+
+it('falls back to registry mode when pane snapshot mode is stale during pane rename persistence', async () => {
+  const app = express()
+  app.use(express.json())
+  const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_1' }))
+  const patchTerminalOverride = vi.fn().mockResolvedValue({})
+  const patchSessionOverride = vi.fn()
+  const updateTitle = vi.fn()
+  const broadcast = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: {
+      renamePane,
+      getPaneSnapshot: () => ({
+        tabId: 'tab_1',
+        paneId: 'pane_1',
+        paneContent: { kind: 'terminal', mode: 'shell', terminalId: 'term_1' },
+      }),
+    } as any,
+    registry: { get: () => ({ mode: 'codex' }), updateTitle } as any,
+    wsHandler: { broadcastUiCommand: vi.fn(), broadcast },
+    configStore: { patchTerminalOverride, patchSessionOverride } as any,
+    terminalMetadata: {
+      list: () => [],
+    } as any,
+  }))
+
+  const res = await request(app).patch('/api/panes/pane_1').send({ name: 'Recovered agent' })
+
+  expect(res.status).toBe(200)
+  expect(renamePane).toHaveBeenCalledWith('pane_1', 'Recovered agent')
+  expect(patchTerminalOverride).toHaveBeenCalledWith('term_1', { titleOverride: 'Recovered agent' })
+  expect(updateTitle).toHaveBeenCalledWith('term_1', 'Recovered agent')
+  expect(patchSessionOverride).not.toHaveBeenCalled()
+  expect(broadcast).toHaveBeenCalledWith({ type: 'terminal.list.updated' })
+})
+
 it('does not fail the pane rename when coding CLI session cascade refresh fails', async () => {
   const app = express()
   app.use(express.json())
