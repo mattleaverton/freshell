@@ -1667,7 +1667,7 @@ describe('PaneContainer', () => {
   })
 
   describe('FreshClaude runtime metadata', () => {
-    it('renders FreshClaude header token usage from the indexed Claude session linked by cliSessionId and does not approximate from SDK totals', () => {
+    it('renders FreshClaude header token usage from the indexed Claude session linked by cliSessionId and does not approximate from SDK totals', async () => {
       const node: PaneNode = {
         type: 'leaf',
         id: 'pane-fresh',
@@ -1752,16 +1752,15 @@ describe('PaneContainer', () => {
       expect(screen.getByText(/freshell \(main\*\)\s+25%/)).toBeInTheDocument()
 
       store.dispatch(applySessionsPatch({
-        upsertProjects: [
-          {
-            projectPath: '/home/user/code/freshell',
-            sessions: [],
-          },
-        ],
-        removeProjectPaths: [],
+        upsertProjects: [],
+        removeProjectPaths: ['/home/user/code/freshell'],
       }))
 
-      expect(screen.queryByText(/freshell \(main\*\)\s+25%/)).not.toBeInTheDocument()
+      expect(store.getState().sessions.projects).toEqual([])
+
+      await waitFor(() => {
+        expect(screen.queryByText(/freshell \(main\*\)\s+25%/)).not.toBeInTheDocument()
+      })
 
       store.dispatch(turnResult({
         sessionId: 'sdk-session-1',

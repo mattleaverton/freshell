@@ -21,21 +21,30 @@ import { getWsClient } from '@/lib/ws-client'
 import { api } from '@/lib/api'
 import { derivePaneTitle } from '@/lib/derivePaneTitle'
 import { getTabDirectoryPreference } from '@/lib/tab-directory-preference'
-import { formatPaneRuntimeLabel, formatPaneRuntimeTooltip } from '@/lib/format-terminal-title-meta'
+import {
+  formatPaneRuntimeLabel,
+  formatPaneRuntimeTooltip,
+  type PaneRuntimeMeta,
+} from '@/lib/format-terminal-title-meta'
 import { snap1D, collectCollinearSnapTargets, convertThresholdToLocal } from '@/lib/pane-snap'
 import { nanoid } from 'nanoid'
 import { ContextIds } from '@/components/context-menu/context-menu-constants'
 import type { CodingCliProviderName } from '@/lib/coding-cli-types'
+import type { ChatSessionState } from '@/store/agentChatTypes'
+import type { AgentChatPaneContent } from '@/store/paneTypes'
 import { updateSettingsLocal } from '@/store/settingsSlice'
 import { clearPaneAttention, clearTabAttention } from '@/store/turnCompletionSlice'
 import { clearPendingCreate, removeSession } from '@/store/agentChatSlice'
 import { cancelCreate } from '@/lib/sdk-message-handler'
 import type { TerminalMetaRecord } from '@/store/terminalMetaSlice'
+import type { ProjectGroup, CodingCliSession } from '@/store/types'
 import { ErrorBoundary } from '@/components/ui/error-boundary'
 
 // Stable empty object to avoid selector memoization issues
 const EMPTY_PANE_TITLES: Record<string, string> = {}
 const EMPTY_TERMINAL_META_BY_ID: Record<string, TerminalMetaRecord> = {}
+const EMPTY_PROJECTS: ProjectGroup[] = []
+const EMPTY_AGENT_CHAT_SESSIONS: Record<string, ChatSessionState> = {}
 const EMPTY_ATTENTION_BY_PANE: Record<string, boolean> = {}
 const EMPTY_PENDING_CREATES: Record<string, string> = {}
 
@@ -103,6 +112,44 @@ function resolvePaneRuntimeMeta(
   return undefined
 }
 
+function findIndexedSessionById(
+  projects: ProjectGroup[],
+  provider: CodingCliProviderName,
+  sessionId: string,
+): CodingCliSession | undefined {
+  for (const project of projects) {
+    const match = project.sessions.find((session) => (
+      session.provider === provider && session.sessionId === sessionId
+    ))
+    if (match) return match
+  }
+  return undefined
+}
+
+function resolveFreshClaudeRuntimeMeta(
+  indexedProjects: ProjectGroup[],
+  content: AgentChatPaneContent,
+  session: ChatSessionState | undefined,
+): PaneRuntimeMeta | undefined {
+  if (content.provider !== 'freshclaude') return undefined
+
+  const provider = getAgentChatProviderConfig(content.provider)?.codingCliProvider
+  const indexedSessionId = session?.cliSessionId ?? content.resumeSessionId
+  if (!provider || !indexedSessionId) return undefined
+
+  const indexed = findIndexedSessionById(indexedProjects, provider, indexedSessionId)
+  if (!indexed) return undefined
+
+  return {
+    cwd: indexed.cwd,
+    checkoutRoot: indexed.projectPath,
+    repoRoot: indexed.projectPath,
+    branch: indexed.gitBranch,
+    isDirty: indexed.isDirty,
+    tokenUsage: indexed.tokenUsage,
+  }
+}
+
 export default function PaneContainer({ tabId, node, hidden }: PaneContainerProps) {
   const dispatch = useAppDispatch()
   const activePane = useAppSelector((s) => s.panes.activePane[tabId])
@@ -112,6 +159,8 @@ export default function PaneContainer({ tabId, node, hidden }: PaneContainerProp
   const terminalMetaById = useAppSelector(
     (s) => s.terminalMeta?.byTerminalId ?? EMPTY_TERMINAL_META_BY_ID
   )
+  const indexedProjects = useAppSelector((s) => s.sessions?.projects ?? EMPTY_PROJECTS)
+  const agentChatSessions = useAppSelector((s) => s.agentChat?.sessions ?? EMPTY_AGENT_CHAT_SESSIONS)
   const zoomedPaneId = useAppSelector((s) => s.panes.zoomedPane?.[tabId])
   const attentionByPane = useAppSelector(
     (s) => s.turnCompletion?.attentionByPane ?? EMPTY_ATTENTION_BY_PANE
@@ -340,7 +389,7 @@ export default function PaneContainer({ tabId, node, hidden }: PaneContainerProp
       node.content.kind === 'terminal'
         ? (node.content.initialCwd || tab?.initialCwd)
         : undefined
-    const paneRuntimeMeta =
+    const paneRuntimeMeta: PaneRuntimeMeta | undefined =
       node.content.kind === 'terminal'
         ? resolvePaneRuntimeMeta(terminalMetaById, {
           terminalId: node.content.terminalId,
@@ -350,6 +399,12 @@ export default function PaneContainer({ tabId, node, hidden }: PaneContainerProp
           resumeSessionId: paneResumeSessionId,
           initialCwd: paneInitialCwd,
         })
+        : node.content.kind === 'agent-chat'
+          ? resolveFreshClaudeRuntimeMeta(
+            indexedProjects,
+            node.content,
+            node.content.sessionId ? agentChatSessions[node.content.sessionId] : undefined,
+          )
         : undefined
     const paneMetaLabel =
       paneRuntimeMeta

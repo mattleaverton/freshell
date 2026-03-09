@@ -6,7 +6,7 @@ import App from '@/App'
 import settingsReducer, { defaultSettings } from '@/store/settingsSlice'
 import tabsReducer from '@/store/tabsSlice'
 import connectionReducer from '@/store/connectionSlice'
-import sessionsReducer from '@/store/sessionsSlice'
+import sessionsReducer, { markWsSnapshotReceived } from '@/store/sessionsSlice'
 import panesReducer from '@/store/panesSlice'
 import agentChatReducer from '@/store/agentChatSlice'
 import turnCompletionReducer from '@/store/turnCompletionSlice'
@@ -633,6 +633,8 @@ describe('pane header runtime metadata flow (e2e)', () => {
     await waitFor(() => {
       expect(screen.getByText(/freshell \(main\*\)\s+25%/)).toBeInTheDocument()
     })
+
+    store.dispatch(markWsSnapshotReceived())
 
     act(() => {
       wsMocks.emitMessage({
