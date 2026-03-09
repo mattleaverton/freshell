@@ -41,6 +41,7 @@ The direct end state is still correct. What changes here is the execution shape 
    - `src/App.tsx` fetches settings, platform, version, sessions, and network status separately.
    - `src/App.tsx`, `src/components/Sidebar.tsx`, `src/components/OverviewView.tsx`, `src/components/BackgroundSessions.tsx`, `src/components/SessionView.tsx`, `src/components/TerminalView.tsx`, and `src/store/codingCliThunks.ts` all participate in websocket connection behavior.
    - The app therefore needs late-handler reconciliation for messages that can arrive before `App.tsx` finishes bootstrapping.
+   - The current startup path also over-assumes that the session directory is always the first thing worth paying for, even when the visible pane is a terminal or agent chat. That is not aligned with the user goal of sending only what is visible now.
 
 2. **Session browsing is still client-owned in the expensive places.**
    - `src/store/sessionsSlice.ts` stores full `ProjectGroup[]`.
@@ -67,21 +68,25 @@ The direct end state is still correct. What changes here is the execution shape 
 7. **The current test suite already hardcodes the old behavior in more places than the earlier draft acknowledged.**
    - `test/unit/client/ws-client-sdk.test.ts`, `test/unit/client/components/App.test.tsx`, `test/unit/client/store/sessionsSlice.test.ts`, `test/unit/server/ws-chunking.test.ts`, `test/server/ws-sessions-patch.test.ts`, and `test/e2e/auth-required-bootstrap-flow.test.tsx` will all need direct rewrites or deletion as part of the cutover.
    - Leaving those suites outside the plan would create predictable red bars late in execution and invite accidental compatibility shims.
+   - `src/components/context-menu/ContextMenuProvider.tsx` also still calls `GET /api/sessions` after rename/archive/delete actions, so the plan must cut mutation refresh flows over as well or the old snapshot route will survive through a side door.
 
 ## End-State Architecture
 
 ### Transport Split
 
-1. `GET /api/bootstrap` returns only first-paint data:
+1. `GET /api/bootstrap` returns only shell-critical first-paint data:
    - settings
    - platform and feature flags
    - config fallback/perf flags
-   - first session-directory window
-   - optionally terminal metadata if the payload stays within bootstrap budget
+   - startup readiness/auth shell state already needed by `App.tsx`
+   - no session-directory window, agent timeline, terminal viewport, or terminal list payloads
 2. `GET /api/version` and network diagnostics remain background startup work because they are not required for first paint.
-3. `GET /api/session-directory` returns server-shaped directory windows, search results, snippets, cursors, and revision markers.
-4. `GET /api/agent-sessions/:sessionId/timeline` and `GET /api/agent-sessions/:sessionId/turns/:turnId` return recent-first timeline summaries and on-demand turn bodies.
-5. `GET /api/terminals/:terminalId/viewport`, `/scrollback`, and `/search` return visible terminal state, older pages, and search results.
+3. After shell bootstrap, the client hydrates only currently visible surfaces:
+   - `GET /api/session-directory` for sidebar/history only when that surface is on-screen
+   - `GET /api/agent-sessions/:sessionId/timeline` and `GET /api/agent-sessions/:sessionId/turns/:turnId` for the visible agent chat pane
+   - `GET /api/terminals/:terminalId/viewport`, `/scrollback`, and `/search` for the visible terminal pane
+4. Offscreen tabs and panes do not pre-hydrate by default. They hydrate only on selection or after visible work is idle and explicitly budgeted.
+5. Session mutations return focused invalidation signals or enough local confirmation data to refresh only the active query window; they never trigger a full `/api/sessions` reload.
 6. WebSocket v4 carries only:
    - `ready`
    - live terminal deltas and lifecycle events
@@ -92,37 +97,43 @@ The direct end state is still correct. What changes here is the execution shape 
 
 ### Priority Rules
 
-1. Visible HTTP jobs outrank background HTTP jobs.
-2. Live terminal input and output outrank all read-model work.
-3. Background requests are abortable on both client and server.
-4. Any frame that routinely exceeds the realtime budget is in the wrong transport lane.
+1. Read-model work has three lanes: `critical`, `visible`, and `background`.
+2. `critical` is reserved for shell bootstrap and the focused pane's first visible payload.
+3. `visible` is for on-screen secondary surfaces such as sidebar/history refreshes.
+4. Live terminal input and output outrank all read-model work.
+5. Background requests are abortable on both client and server.
+6. Any frame that routinely exceeds the realtime budget is in the wrong transport lane.
 
 ### Ownership Rules
 
 1. The server owns expensive directory shaping: search, pagination, snippets, and stable canonical order.
-2. The client may still do tiny, client-only adornment on the already-fetched visible window:
+2. The client decides which surfaces are actually visible from local layout state, but the server owns the shape of every fetched read model.
+3. The client may still do tiny, client-only adornment on the already-fetched visible window:
    - pinning sessions that already have open tabs
    - displaying local activity state
    - expansion UI state in `HistoryView`
-3. The server owns agent turn folding and turn-body hydration.
-4. The server owns terminal viewport serialization, scrollback paging, and terminal search.
-5. `App.tsx` owns websocket lifecycle. Child components and thunks stop calling `ws.connect()`.
+4. The server owns agent turn folding and turn-body hydration.
+5. The server owns terminal viewport serialization, scrollback paging, and terminal search.
+6. `App.tsx` owns websocket lifecycle. Child components and thunks stop calling `ws.connect()`.
 
 ### Cutover Invariants
 
 1. `WS_PROTOCOL_VERSION = 4`.
-2. Startup does one visible bootstrap request before websocket connect.
-3. `version` and network status no longer block websocket readiness or first paint.
-4. No runtime path emits or consumes `sessions.updated`, `sessions.page`, `sessions.patch`, `sessions.fetch`, or `sdk.history`.
-5. Terminal reconnect paints the current viewport first, then requests only the short missed tail with `sinceSeq`.
-6. Session and terminal search are server-side only.
-7. When state is uncertain, refetch the active visible window instead of rebuilding large client reconciliation logic.
+2. Startup does one shell bootstrap request before websocket connect.
+3. Bootstrap never embeds session-directory windows, agent timelines, terminal viewports, or other pane payloads.
+4. After shell bootstrap, only currently visible surfaces hydrate immediately.
+5. `version` and network status no longer block websocket readiness or first paint.
+6. No runtime path emits or consumes `sessions.updated`, `sessions.page`, `sessions.patch`, `sessions.fetch`, or `sdk.history`.
+7. Terminal reconnect paints the current viewport first, then requests only the short missed tail with `sinceSeq`.
+8. Session and terminal search are server-side only.
+9. Session rename/archive/delete flows refetch or invalidate only the active directory window, never a full session snapshot.
+10. When state is uncertain, refetch the active visible window instead of rebuilding large client reconciliation logic.
 
 ## Budgets And Invariants
 
 ```ts
 export const MAX_REALTIME_MESSAGE_BYTES = 16 * 1024
-export const MAX_BOOTSTRAP_DIRECTORY_ITEMS = 40
+export const MAX_BOOTSTRAP_PAYLOAD_BYTES = 12 * 1024
 export const MAX_DIRECTORY_PAGE_ITEMS = 50
 export const MAX_AGENT_TIMELINE_ITEMS = 30
 export const MAX_TERMINAL_SCROLLBACK_PAGE_BYTES = 64 * 1024
@@ -130,7 +141,7 @@ export const MAX_TERMINAL_SCROLLBACK_PAGE_BYTES = 64 * 1024
 
 Additional invariants:
 
-1. `GET /api/bootstrap` must stay small enough to render immediately on slow links.
+1. `GET /api/bootstrap` must stay under `MAX_BOOTSTRAP_PAYLOAD_BYTES` and remain shell-only.
 2. Realtime queues are bounded; overflow yields gaps or invalidations, never unbounded buffering.
 3. Offscreen data is fetched later or on demand, never before the visible window is rendered.
 
@@ -143,14 +154,16 @@ Every task below follows red-green-refactor and adds coverage at the seam being 
 3. Unit tests for read-model scheduler priority and abort handling.
 4. Integration tests for bootstrap, session-directory, agent-timeline, and terminal-view HTTP routes.
 5. Client tests proving:
-   - `App.tsx` performs one visible bootstrap request
+   - `App.tsx` performs one shell bootstrap request and then hydrates only the actually visible surfaces
    - child components no longer own websocket connection setup
    - sessions state is visible-window oriented, not snapshot oriented
    - agent chat no longer depends on `sdk.history`
    - terminal search no longer depends on `SearchAddon`
+   - session rename/archive/delete flows never call `GET /api/sessions`
    - `ws-client` SDK handling no longer depends on replay-history messages
 6. Slow-network e2e tests proving:
    - the app becomes interactive before offscreen work completes
+   - focused-pane requests in the `critical` lane complete ahead of merely visible or background work
    - terminal reconnect shows the current screen without replaying the entire backlog
    - agent chat reload shows recent turns before older bodies
    - background fetches do not delay terminal input or visible updates
@@ -171,7 +184,7 @@ npm run verify
 
 1. Do not keep the legacy socket snapshot protocol alive behind a compatibility shim.
 2. Do not move search or heavy pagination back into the browser.
-3. Do not bloat bootstrap with non-visible startup data.
+3. Do not bloat bootstrap with directory, timeline, viewport, or other pane payloads.
 4. Do not preserve duplicate server route modules after the new architecture lands.
 
 ---
@@ -371,9 +384,10 @@ git commit -m "feat(realtime): prioritize live terminal traffic and enforce budg
 **Step 1: Write the failing tests**
 
 Cover:
+- critical jobs start before visible and background jobs
 - visible jobs start before background jobs
 - background concurrency is capped
-- request abort cancels in-flight or queued background work
+- request abort cancels queued work and aborts request-bound work correctly
 - scheduler snapshots expose queue depth for logs and assertions
 
 **Step 2: Run the test to verify failure**
@@ -416,11 +430,18 @@ git commit -m "test(server): define read-model scheduler behavior"
 Create:
 
 ```ts
-export type ReadModelPriority = 'visible' | 'background'
+export type ReadModelPriority = 'critical' | 'visible' | 'background'
 
 export class ReadModelWorkScheduler {
   run<T>(priority: ReadModelPriority, job: (signal: AbortSignal) => Promise<T>, options?: { signal?: AbortSignal }): Promise<T>
-  snapshot(): { visibleQueued: number; backgroundQueued: number; runningVisible: number; runningBackground: number }
+  snapshot(): {
+    criticalQueued: number
+    visibleQueued: number
+    backgroundQueued: number
+    runningCritical: number
+    runningVisible: number
+    runningBackground: number
+  }
 }
 ```
 
@@ -430,7 +451,7 @@ export class ReadModelWorkScheduler {
 
 **Step 3: Keep policy explicit**
 
-Visible work may preempt queued background work, but never cancel active visible work.
+`critical` work may jump ahead of queued `visible` and `background` work. `visible` work may jump ahead of queued `background` work. No lane cancels already-running work except through the owning request abort signal.
 
 **Step 4: Run the test to verify pass**
 
@@ -444,7 +465,7 @@ Expected: PASS.
 
 ```bash
 git add server/read-models/work-scheduler.ts server/read-models/request-abort.ts
-git commit -m "feat(server): add visible-vs-background read-model scheduler"
+git commit -m "feat(server): add priority-aware read-model scheduler"
 ```
 
 ---
@@ -552,8 +573,8 @@ git commit -m "feat(shared): add server-owned read-model contracts"
 **Step 1: Write the failing tests**
 
 Cover:
-- `GET /api/bootstrap` returns only first-paint data
-- bootstrap includes the first session-directory window
+- `GET /api/bootstrap` returns only shell-critical first-paint data
+- bootstrap excludes session-directory, agent timeline, terminal viewport, and terminal list payloads
 - invalid auth and malformed responses fail cleanly
 - `version` and network status are not required members of bootstrap
 
@@ -598,8 +619,8 @@ Use the new shared contract and return:
 - settings
 - platform/available CLI/feature flags data
 - config fallback/perf flags
-- first session-directory window
-- terminal metadata only if the payload stays within budget
+- startup readiness/auth shell state already needed before visible surfaces hydrate
+- no session-directory, agent timeline, terminal viewport, or terminal list payloads
 
 **Step 2: Keep lower-priority startup work out of bootstrap**
 
@@ -621,7 +642,7 @@ Expected: PASS.
 
 ```bash
 git add server/startup-router.ts server/index.ts
-git commit -m "feat(api): add visible-first bootstrap route"
+git commit -m "feat(api): add shell-only bootstrap route"
 ```
 
 ---
@@ -635,7 +656,8 @@ git commit -m "feat(api): add visible-first bootstrap route"
 **Step 1: Write the failing tests**
 
 Cover:
-- app uses one visible bootstrap request before websocket connect
+- app uses one shell bootstrap request before websocket connect
+- visible surfaces hydrate after shell bootstrap based on the current layout instead of being inlined into bootstrap
 - `version` and network status are demoted to background work
 - `App.tsx` owns websocket connection lifecycle
 - child components no longer need to call `ws.connect()`
@@ -650,7 +672,7 @@ Expected: FAIL because startup is still a waterfall and connection ownership is 
 
 **Step 3: Add assertions around ordering**
 
-Bootstrap must finish before `ready` is awaited.
+Shell bootstrap must finish before `ready` is awaited, but sidebar or pane hydration must remain separate follow-up work.
 
 **Step 4: Run the tests again**
 
@@ -692,11 +714,12 @@ Use:
 const bootstrap = await api.getBootstrap()
 dispatch(seedBootstrap(bootstrap))
 await ws.connect()
+dispatch(hydrateVisibleSurfacesFromLayout())
 ```
 
-**Step 3: Move lower-priority startup work behind first paint**
+**Step 3: Keep shell bootstrap narrow and move other work to the right lanes**
 
-Run `GET /api/version` and network status fetches after the visible bootstrap and websocket connection are established.
+Run `GET /api/version` and network status after shell bootstrap and websocket connect. Let sidebar/history, terminal viewport, and agent timeline fetch through their own read-model requests based on what is actually visible.
 
 **Step 4: Run the tests to verify pass**
 
@@ -990,7 +1013,9 @@ git commit -m "refactor(client): store session directory windows instead of snap
 - Modify: `test/unit/client/components/Sidebar.render-stability.test.tsx`
 - Modify: `test/unit/client/components/HistoryView.a11y.test.tsx`
 - Modify: `test/unit/client/components/HistoryView.mobile.test.tsx`
+- Modify: `test/unit/client/components/ContextMenuProvider.test.tsx`
 - Modify: `test/e2e/sidebar-click-opens-pane.test.tsx`
+- Modify: `test/e2e/refresh-context-menu-flow.test.tsx`
 
 **Step 1: Write the failing tests**
 
@@ -1000,11 +1025,12 @@ Cover:
 - stale requests are aborted
 - `sessions.changed` triggers a bounded refresh of the active window
 - `HistoryView` keeps only UI expansion state locally
+- rename/archive/delete actions refresh only the active directory window and never call `GET /api/sessions`
 
 **Step 2: Run the tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
 ```
 
 Expected: FAIL because both components still derive from local snapshots.
@@ -1016,7 +1042,7 @@ The transport rewrite must not degrade discoverability or keyboard access.
 **Step 4: Run the tests again**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
 ```
 
 Expected: still FAIL.
@@ -1024,7 +1050,7 @@ Expected: still FAIL.
 **Step 5: Commit**
 
 ```bash
-git add test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
+git add test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
 git commit -m "test(ui): define server-driven session browsing flow"
 ```
 
@@ -1035,15 +1061,16 @@ git commit -m "test(ui): define server-driven session browsing flow"
 **Files:**
 - Modify: `src/components/Sidebar.tsx`
 - Modify: `src/components/HistoryView.tsx`
+- Modify: `src/components/context-menu/ContextMenuProvider.tsx`
 - Modify: `src/App.tsx`
 
-**Step 1: Move session search and paging to HTTP**
+**Step 1: Move session search, paging, and mutation refresh to HTTP read models**
 
 Use `priority=visible` for active searches and `priority=background` for load-more.
 
 **Step 2: Add abortable request ownership**
 
-Each active query gets its own `AbortController`.
+Each active query gets its own `AbortController`. Session rename/archive/delete flows must invalidate or refetch only the active window rather than calling `GET /api/sessions`.
 
 **Step 3: Keep only small local UI state**
 
@@ -1052,7 +1079,7 @@ Local state may cover search box text, project expansion, and selected item; hea
 **Step 4: Run the tests to verify pass**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
 ```
 
 Expected: PASS.
@@ -1060,7 +1087,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/components/Sidebar.tsx src/components/HistoryView.tsx src/App.tsx
+git add src/components/Sidebar.tsx src/components/HistoryView.tsx src/components/context-menu/ContextMenuProvider.tsx src/App.tsx
 git commit -m "refactor(history): use server-owned session query windows"
 ```
 
@@ -1490,7 +1517,7 @@ Keep terminal route ownership in the existing router rather than adding a parall
 
 **Step 3: Route work through the scheduler**
 
-Viewport is visible priority. Scrollback and search are background unless the caller explicitly requests a focused jump.
+Viewport is `critical` priority. Scrollback is `background`. Search is `visible` only when the user is actively focused in terminal search; otherwise it stays `background`.
 
 **Step 4: Run the tests to verify pass**
 
@@ -1705,9 +1732,11 @@ git commit -m "refactor(transport): delete legacy bulk websocket architecture"
 Cover:
 - payload bytes and queue-depth logging exists for bootstrap, session-directory, agent timeline, terminal routes, and realtime terminal output
 - app becomes interactive before background work completes
+- shell bootstrap stays below the bootstrap byte budget and does not inline pane payloads
 - terminal restore shows current screen without replaying the full backlog
 - agent chat shows recent turns before older bodies
 - background work does not delay terminal input
+- focused-pane `critical` requests complete before queued `visible` and `background` work
 - auth-required startup still renders the login path before any protected bootstrap payload is consumed
 
 **Step 2: Run the tests to verify failure**
@@ -1750,8 +1779,9 @@ git commit -m "test(perf): define slow-network architecture regressions"
 
 Log:
 - payload bytes and durations for bootstrap and read-model HTTP routes
+- route priority lane for every scheduled read-model job
 - realtime queue depth and dropped bytes for terminal output
-- client parse/paint timing around visible bootstrap and viewport restore
+- client parse/paint timing around shell bootstrap and viewport restore
 
 **Step 2: Update the docs mock**
 
