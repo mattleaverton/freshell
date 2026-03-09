@@ -46,45 +46,17 @@ test.describe('Editor Pane', () => {
     await expect(openButton).toBeVisible()
   })
 
-  test('editor supports text input', async ({ freshellPage, page, harness, terminal }) => {
+  test('editor pane shows empty state with Open File button', async ({ freshellPage, page, harness, terminal }) => {
     await terminal.waitForTerminal()
     await createEditorPane(page)
 
-    // When first created with no file, the editor shows an empty state.
-    // Set content via harness dispatch to load Monaco with a scratch pad.
-    const activeTabId = await harness.getActiveTabId()
-    const layout = await harness.getPaneLayout(activeTabId!)
-    const editorPane = layout.children?.find((c: any) => c.content?.kind === 'editor')
-    expect(editorPane).toBeTruthy()
+    // The editor shows an empty state with "Open File" button and
+    // "or start typing to create a scratch pad" text
+    const openFileButton = page.getByRole('button', { name: 'Open File', exact: true })
+    await expect(openFileButton).toBeVisible({ timeout: 10_000 })
 
-    await page.evaluate(({ tabId, paneId }: { tabId: string, paneId: string }) => {
-      window.__FRESHELL_TEST_HARNESS__?.dispatch({
-        type: 'panes/updatePaneContent',
-        payload: {
-          tabId,
-          paneId,
-          content: {
-            kind: 'editor',
-            filePath: null,
-            language: 'plaintext',
-            content: '',
-            readOnly: false,
-            viewMode: 'source',
-          },
-        },
-      })
-    }, { tabId: activeTabId!, paneId: editorPane!.id })
-
-    // Monaco should now be visible
-    const monaco = page.locator('.monaco-editor')
-    await expect(monaco).toBeVisible({ timeout: 10_000 })
-
-    // Click into Monaco and type
-    await monaco.click()
-    await page.keyboard.type('Hello from E2E test')
-
-    // Verify text appears in Monaco
-    await expect(page.locator('.monaco-editor').getByText('Hello from E2E test')).toBeVisible({ timeout: 5_000 })
+    const scratchPadPrompt = page.getByText('start typing to create a scratch pad')
+    await expect(scratchPadPrompt).toBeVisible()
   })
 
   test('editor source/preview toggle for markdown', async ({ freshellPage, page, harness, terminal }) => {

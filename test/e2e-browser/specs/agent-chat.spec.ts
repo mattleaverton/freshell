@@ -21,15 +21,20 @@ test.describe('Agent Chat', () => {
     await terminal.waitForTerminal()
     await openPanePicker(page)
 
-    // The picker always shows Shell, Editor, Browser (from PanePicker.tsx)
-    // Buttons have aria-label matching their label text.
-    const shellButton = page.getByRole('button', { name: /^Shell$/i })
+    // The picker always shows Editor and Browser.
+    // Shell options depend on platform: "Shell" on Linux/Mac, "CMD"/"PowerShell"/"WSL" on Windows/WSL.
     const editorButton = page.getByRole('button', { name: /^Editor$/i })
     const browserButton = page.getByRole('button', { name: /^Browser$/i })
 
-    await expect(shellButton).toBeVisible()
     await expect(editorButton).toBeVisible()
     await expect(browserButton).toBeVisible()
+
+    // At least one shell option should be present
+    const shellVisible = await page.getByRole('button', { name: /^Shell$/i }).isVisible().catch(() => false)
+    const wslVisible = await page.getByRole('button', { name: /^WSL$/i }).isVisible().catch(() => false)
+    const cmdVisible = await page.getByRole('button', { name: /^CMD$/i }).isVisible().catch(() => false)
+    const psVisible = await page.getByRole('button', { name: /^PowerShell$/i }).isVisible().catch(() => false)
+    expect(shellVisible || wslVisible || cmdVisible || psVisible).toBe(true)
   })
 
   test('agent chat provider appears when CLI is available', async ({ freshellPage, page, harness, terminal }) => {
@@ -69,9 +74,17 @@ test.describe('Agent Chat', () => {
     await terminal.waitForTerminal()
     await openPanePicker(page)
 
-    // Click Shell to create a shell pane
-    const shellButton = page.getByRole('button', { name: /^Shell$/i })
-    await shellButton.click()
+    // Click a shell option (platform-dependent: Shell on Linux, CMD/PowerShell/WSL on Windows/WSL)
+    const shellNames = ['Shell', 'WSL', 'CMD', 'PowerShell', 'Bash']
+    for (const name of shellNames) {
+      try {
+        const btn = page.getByRole('button', { name: new RegExp(`^${name}$`, 'i') })
+        if (await btn.isVisible().catch(() => false)) {
+          await btn.click({ timeout: 5000 })
+          break
+        }
+      } catch { continue }
+    }
 
     // Wait for second terminal to appear
     await page.locator('.xterm').nth(1).waitFor({ state: 'visible', timeout: 15_000 })
