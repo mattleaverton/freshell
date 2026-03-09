@@ -131,19 +131,19 @@ test.describe('Tab Management', () => {
 
     const firstBox = await firstTab.boundingBox()
     const lastBox = await lastTab.boundingBox()
+    expect(firstBox).toBeTruthy()
+    expect(lastBox).toBeTruthy()
 
-    if (firstBox && lastBox) {
-      await page.mouse.move(firstBox.x + firstBox.width / 2, firstBox.y + firstBox.height / 2)
-      await page.mouse.down()
-      await page.mouse.move(lastBox.x + lastBox.width / 2, lastBox.y + lastBox.height / 2, { steps: 10 })
-      await page.mouse.up()
+    await page.mouse.move(firstBox!.x + firstBox!.width / 2, firstBox!.y + firstBox!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(lastBox!.x + lastBox!.width / 2, lastBox!.y + lastBox!.height / 2, { steps: 10 })
+    await page.mouse.up()
 
-      // Verify order changed
-      await page.waitForTimeout(500)
-      const stateAfter = await harness.getState()
-      const tabIdsAfter = stateAfter.tabs.tabs.map((t: any) => t.id)
-      // Tab order should have changed
-      expect(tabIdsAfter).not.toEqual(tabIdsBefore)
-    }
+    // Verify order changed
+    await page.waitForTimeout(500)
+    const stateAfter = await harness.getState()
+    const tabIdsAfter = stateAfter.tabs.tabs.map((t: any) => t.id)
+    // Tab order should have changed
+    expect(tabIdsAfter).not.toEqual(tabIdsBefore)
   })
 })
