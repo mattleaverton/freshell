@@ -17,12 +17,11 @@ export class TestHarness {
   /** Wait for WebSocket connection to reach 'ready' state */
   async waitForConnection(timeoutMs = 15_000): Promise<void> {
     await this.page.waitForFunction(
-      (timeout) => {
+      () => {
         const harness = window.__FRESHELL_TEST_HARNESS__
         if (!harness) return false
         return harness.getWsReadyState() === 'ready'
       },
-      timeoutMs,
       { timeout: timeoutMs + 1000 },
     )
   }
