@@ -178,7 +178,14 @@ async function main() {
   const vitePort = isDev ? Number(process.env.VITE_PORT || 5173) : undefined
   const networkManager = new NetworkManager(server, configStore, port, isDev, vitePort)
   networkManager.setWsHandler(wsHandler)
-  app.use('/api', createAgentApiRouter({ layoutStore, registry, wsHandler }))
+  app.use('/api', createAgentApiRouter({
+    layoutStore,
+    registry,
+    wsHandler,
+    configStore,
+    terminalMetadata,
+    codingCliIndexer,
+  }))
 
   // --- Extension lifecycle broadcasts ---
   extensionManager.on('server.starting', ({ name }: { name: string }) => {

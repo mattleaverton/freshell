@@ -2,12 +2,14 @@ import { Router } from 'express'
 import fs from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { nanoid } from 'nanoid'
+import { makeSessionKey } from '../coding-cli/types.js'
 import { ok, approx, fail } from './response.js'
 import { renderCapture } from './capture.js'
 import { waitForMatch } from './wait-for.js'
 import { resolveScreenshotOutputPath } from './screenshot-path.js'
 
 const truthy = (value: unknown) => value === true || value === 'true' || value === '1' || value === 'yes'
+const SYNCABLE_TERMINAL_MODES = new Set(['claude', 'codex', 'opencode', 'gemini', 'kimi'])
 
 type ResizeLayoutStore = {
   getSplitSizes?: (tabId: string | undefined, splitId: string) => [number, number] | undefined
@@ -47,7 +49,21 @@ async function writeFileAtomic(filePath: string, content: Buffer) {
   }
 }
 
-export function createAgentApiRouter({ layoutStore, registry, wsHandler }: { layoutStore: any; registry: any; wsHandler?: any }) {
+export function createAgentApiRouter({
+  layoutStore,
+  registry,
+  wsHandler,
+  configStore,
+  terminalMetadata,
+  codingCliIndexer,
+}: {
+  layoutStore: any
+  registry: any
+  wsHandler?: any
+  configStore?: any
+  terminalMetadata?: { list: () => Array<{ terminalId: string; provider?: string; sessionId?: string }> }
+  codingCliIndexer?: { refresh: () => Promise<void> }
+}) {
   const router = Router()
 
   const resolvePaneTarget = (raw: string) => {
@@ -101,6 +117,29 @@ export function createAgentApiRouter({ layoutStore, registry, wsHandler }: { lay
     }
 
     return { tabId: requestedTabId, splitId: rawTarget, message: 'split not found' }
+  }
+
+  const persistSyncableTerminalRename = async (paneSnapshot: any, title: string) => {
+    const paneContent = paneSnapshot?.paneContent
+    const terminalId = typeof paneContent?.terminalId === 'string' ? paneContent.terminalId : undefined
+    const mode = typeof paneContent?.mode === 'string' ? paneContent.mode : undefined
+
+    if (!terminalId || !mode || !SYNCABLE_TERMINAL_MODES.has(mode) || !configStore) {
+      return
+    }
+
+    await configStore.patchTerminalOverride?.(terminalId, { titleOverride: title })
+    registry.updateTitle?.(terminalId, title)
+
+    const meta = terminalMetadata?.list?.().find((entry) => entry.terminalId === terminalId)
+    if (meta?.provider && meta?.sessionId) {
+      await configStore.patchSessionOverride?.(makeSessionKey(meta.provider as any, meta.sessionId), {
+        titleOverride: title,
+      })
+      await codingCliIndexer?.refresh?.()
+    }
+
+    wsHandler?.broadcast?.({ type: 'terminal.list.updated' })
   }
 
   router.post('/tabs', (req, res) => {
@@ -520,22 +559,41 @@ export function createAgentApiRouter({ layoutStore, registry, wsHandler }: { lay
     res.json(ok({ paneId: newPaneId, terminalId }, message))
   })
 
-  router.patch('/panes/:id', (req, res) => {
-    const name = parseRequiredName(req.body?.name)
-    if (!name) return res.status(400).json(fail('name required'))
+  router.patch('/panes/:id', async (req, res) => {
+    try {
+      const name = parseRequiredName(req.body?.name)
+      if (!name) return res.status(400).json(fail('name required'))
 
-    const resolved = resolvePaneTarget(req.params.id)
-    const paneId = resolved.paneId || req.params.id
-    const result = layoutStore.renamePane(paneId, name)
+      const resolved = resolvePaneTarget(req.params.id)
+      const paneId = resolved.paneId || req.params.id
+      const paneSnapshot = layoutStore.getPaneSnapshot?.(paneId)
 
-    if (result?.tabId) {
-      wsHandler?.broadcastUiCommand({
-        command: 'pane.rename',
-        payload: { tabId: result.tabId, paneId: result.paneId || paneId, title: name },
-      })
+      await persistSyncableTerminalRename(paneSnapshot, name)
+
+      const result = layoutStore.renamePane(paneId, name)
+
+      if (result?.tabId) {
+        const tabPanes = layoutStore.listPanes?.(result.tabId) || []
+        if (tabPanes.length === 1) {
+          const tabRenameResult = layoutStore.renameTab?.(result.tabId, name)
+          if (tabRenameResult?.tabId) {
+            wsHandler?.broadcastUiCommand({
+              command: 'tab.rename',
+              payload: { id: result.tabId, title: name },
+            })
+          }
+        }
+
+        wsHandler?.broadcastUiCommand({
+          command: 'pane.rename',
+          payload: { tabId: result.tabId, paneId: result.paneId || paneId, title: name },
+        })
+      }
+
+      res.json(ok(result, resolved.message || result?.message || 'pane renamed'))
+    } catch (err: any) {
+      res.status(500).json(fail(err?.message || 'Failed to rename pane'))
     }
-
-    res.json(ok(result, resolved.message || result?.message || 'pane renamed'))
   })
 
   router.post('/panes/:id/close', (req, res) => {
