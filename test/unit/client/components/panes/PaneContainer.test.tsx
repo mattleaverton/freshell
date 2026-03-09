@@ -430,7 +430,7 @@ describe('PaneContainer', () => {
   })
 
   describe('pane rename sync', () => {
-    it('commits local pane title changes only after the pane rename API succeeds', async () => {
+    it('commits local pane and tab title changes only after the pane rename API succeeds for a single-pane tab', async () => {
       const leafNode: PaneNode = {
         type: 'leaf',
         id: 'pane-1',
@@ -460,7 +460,7 @@ describe('PaneContainer', () => {
       await waitFor(() => {
         expect(store.getState().panes.paneTitles['tab-1']?.['pane-1']).toBe('Ops desk')
       })
-      expect(store.getState().tabs.tabs[0].title).toBe('Tab 1')
+      expect(store.getState().tabs.tabs[0].title).toBe('Ops desk')
     })
 
     it('does not update local pane titles when the pane rename API rejects the request', async () => {

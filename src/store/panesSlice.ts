@@ -853,6 +853,21 @@ export const panesSlice = createSlice({
         titles[otherId] = temp
       }
 
+      if (state.paneTitleSetByUser[tabId]) {
+        const titleSetByUser = state.paneTitleSetByUser[tabId]
+        const temp = titleSetByUser[paneId]
+        if (titleSetByUser[otherId] === undefined) {
+          delete titleSetByUser[paneId]
+        } else {
+          titleSetByUser[paneId] = titleSetByUser[otherId]
+        }
+        if (temp === undefined) {
+          delete titleSetByUser[otherId]
+        } else {
+          titleSetByUser[otherId] = temp
+        }
+      }
+
       reconcileRefreshRequestsForTab(state, tabId)
     },
 

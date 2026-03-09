@@ -185,6 +185,9 @@ export default function PaneContainer({ tabId, node, hidden }: PaneContainerProp
       name: trimmed,
     }).then(() => {
       dispatch(updatePaneTitle({ tabId, paneId, title: trimmed }))
+      if (isOnlyPane) {
+        dispatch(updateTab({ id: tabId, updates: { title: trimmed } }))
+      }
       setRenameError(null)
       setRenamingPaneId(null)
       setRenameValue('')
@@ -194,7 +197,7 @@ export default function PaneContainer({ tabId, node, hidden }: PaneContainerProp
         : 'Failed to rename pane'
       setRenameError(message)
     })
-  }, [dispatch, tabId, renamingPaneId, renameValue, node])
+  }, [dispatch, isOnlyPane, tabId, renamingPaneId, renameValue, node])
 
   const handleRenameKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === 'Escape') {
