@@ -54,7 +54,7 @@ test.describe('Terminal Lifecycle', () => {
     await terminal.waitForOutput('before-switch-marker')
 
     // Create a new tab
-    const addTabButton = page.getByRole('button', { name: /new.*tab/i })
+    const addTabButton = page.locator('[data-context="tab-add"]')
     await addTabButton.click()
 
     // Wait for second tab
@@ -88,7 +88,7 @@ test.describe('Terminal Lifecycle', () => {
     await terminal.executeCommand('echo "detach-test" && sleep 0.1 && echo "still-running"')
 
     // Create new tab (detaches from current terminal)
-    const addTabButton = page.getByRole('button', { name: /new.*tab/i })
+    const addTabButton = page.locator('[data-context="tab-add"]')
     await addTabButton.click()
     await harness.waitForTabCount(2)
 
@@ -136,7 +136,7 @@ test.describe('Terminal Lifecycle', () => {
     await terminal.waitForTerminal()
 
     // Create a second tab first
-    const addTabButton = page.getByRole('button', { name: /new.*tab/i })
+    const addTabButton = page.locator('[data-context="tab-add"]')
     await addTabButton.click()
     await harness.waitForTabCount(2)
 

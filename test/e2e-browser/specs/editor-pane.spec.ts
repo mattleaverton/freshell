@@ -170,7 +170,7 @@ test.describe('Editor Pane', () => {
     await expect(monaco.getByText(marker)).toBeVisible({ timeout: 5_000 })
 
     // Create a new tab and switch to it
-    const addTabButton = page.getByRole('button', { name: /new.*tab/i })
+    const addTabButton = page.locator('[data-context="tab-add"]')
     await addTabButton.click()
     await harness.waitForTabCount(2)
 
