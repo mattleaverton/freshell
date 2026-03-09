@@ -5,7 +5,32 @@ import os from 'os'
 import { SessionRepairService } from '../../../server/session-scanner/service.js'
 import type { SessionScanResult } from '../../../server/session-scanner/types.js'
 
-const FIXTURES_DIR = path.join(__dirname, '../../fixtures/sessions')
+function createTranscript(sessionId: string, cwd: string, prompt = 'Repair this restore issue'): string {
+  return [
+    JSON.stringify({
+      type: 'queue-operation',
+      operation: 'dequeue',
+      sessionId,
+      timestamp: '2026-03-08T08:38:07.095Z',
+    }),
+    JSON.stringify({
+      type: 'user',
+      sessionId,
+      cwd,
+      timestamp: '2026-03-08T08:38:07.287Z',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: prompt }],
+      },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      sessionId,
+      message: 'On it.',
+      timestamp: '2026-03-08T08:38:17.324Z',
+    }),
+  ].join('\n')
+}
 
 describe('SessionRepairService', () => {
   let tempDir: string
@@ -34,7 +59,7 @@ describe('SessionRepairService', () => {
 
     const sessionId = 'priority-session'
     const sessionFile = path.join(projectDir, `${sessionId}.jsonl`)
-    await fs.copyFile(path.join(FIXTURES_DIR, 'healthy.jsonl'), sessionFile)
+    await fs.writeFile(sessionFile, createTranscript(sessionId, '/tmp/project'))
 
     const scanner = {
       scan: vi.fn(async (filePath: string): Promise<SessionScanResult> => ({
@@ -73,8 +98,8 @@ describe('SessionRepairService', () => {
     const targetSessionId = 'target-session'
     const slowFile = path.join(projectDir, `${slowSessionId}.jsonl`)
     const targetFile = path.join(projectDir, `${targetSessionId}.jsonl`)
-    await fs.copyFile(path.join(FIXTURES_DIR, 'healthy.jsonl'), slowFile)
-    await fs.copyFile(path.join(FIXTURES_DIR, 'healthy.jsonl'), targetFile)
+    await fs.writeFile(slowFile, createTranscript(slowSessionId, '/tmp/slow-project'))
+    await fs.writeFile(targetFile, createTranscript(targetSessionId, '/tmp/target-project'))
 
     let releaseSlow: (() => void) | undefined
     const slowGate = new Promise<void>((resolve) => {
@@ -101,8 +126,6 @@ describe('SessionRepairService', () => {
       scanner: { scan, repair: vi.fn() } as any,
     })
 
-    await service.start()
-
     const cachedResult: SessionScanResult = {
       sessionId: targetSessionId,
       filePath: targetFile,
@@ -114,6 +137,8 @@ describe('SessionRepairService', () => {
     }
     await (service as any).cache.set(targetFile, cachedResult)
 
+    await service.start()
+
     service.prioritizeSessions({ background: [slowSessionId] })
     await vi.waitFor(() => {
       expect(scan).toHaveBeenCalledWith(slowFile)
@@ -123,10 +148,57 @@ describe('SessionRepairService', () => {
       const result = await service.waitForSession(targetSessionId, 50)
       expect(result.sessionId).toBe(targetSessionId)
       expect(result.status).toBe('healthy')
-      expect(scan).toHaveBeenCalledTimes(1)
       expect(scan).toHaveBeenCalledWith(slowFile)
+
+      const historyPath = path.join(tempDir, '.claude', 'history.jsonl')
+      const history = await fs.readFile(historyPath, 'utf8')
+      expect(history).toContain(targetSessionId)
     } finally {
       releaseSlow?.()
+      await service.stop()
+    }
+  })
+
+  it('discovers top-level Claude sessions on start and skips nested subagents', async () => {
+    const projectDir = path.join(tempDir, '.claude', 'projects', 'test-project')
+    const nestedDir = path.join(projectDir, 'parent-session', 'subagents')
+    await fs.mkdir(nestedDir, { recursive: true })
+
+    const topLevelSessionId = 'top-level-session'
+    const topLevelFile = path.join(projectDir, `${topLevelSessionId}.jsonl`)
+    await fs.writeFile(topLevelFile, createTranscript(topLevelSessionId, '/tmp/project'))
+
+    const nestedSessionId = 'nested-subagent'
+    await fs.writeFile(path.join(nestedDir, `${nestedSessionId}.jsonl`), createTranscript(nestedSessionId, '/tmp/nested'))
+
+    const scan = vi.fn(async (filePath: string): Promise<SessionScanResult> => ({
+      sessionId: path.basename(filePath, '.jsonl'),
+      filePath,
+      status: 'healthy',
+      chainDepth: 1,
+      orphanCount: 0,
+      fileSize: 1,
+      messageCount: 1,
+    }))
+
+    const service = new SessionRepairService({
+      cacheDir: tempDir,
+      scanner: { scan, repair: vi.fn() } as any,
+    })
+
+    await service.start()
+    try {
+      await vi.waitFor(() => {
+        expect(scan).toHaveBeenCalledWith(topLevelFile)
+      })
+      expect(scan).not.toHaveBeenCalledWith(path.join(nestedDir, `${nestedSessionId}.jsonl`))
+      const historyPath = path.join(tempDir, '.claude', 'history.jsonl')
+      await vi.waitFor(async () => {
+        const history = await fs.readFile(historyPath, 'utf8')
+        expect(history).toContain(topLevelSessionId)
+        expect(history).not.toContain(nestedSessionId)
+      })
+    } finally {
       await service.stop()
     }
   })
