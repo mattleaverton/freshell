@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
-**Goal:** Expose deterministic orchestration commands for renaming tabs and panes, including active-target defaults and explicit identifiers, and document them in the Freshell orchestration skill.
+**Goal:** Expose orchestration operations for renaming tabs and panes, including active-target defaults and explicit identifiers, and document those operations in the Freshell orchestration skill.
 
-**Architecture:** Keep orchestration server-authoritative. Add a symmetric pane rename write path (`PATCH /api/panes/:id`) backed by `LayoutStore`, then broadcast explicit `ui.command` events so every connected UI converges immediately. Extend the CLI rename verbs so one positional argument means “rename the active target” and two positional arguments mean “rename the explicit target,” which satisfies the acceptance criteria without inventing a second orchestration surface.
+**Architecture:** Keep orchestration server-authoritative. Tab rename already has a write path; tighten it so rename requests are trimmed and blank names are rejected, then add the missing symmetric pane rename write path in `LayoutStore` and `createAgentApiRouter()`. Keep the CLI as the single orchestration surface that agents call: extend `rename-tab` so one positional argument renames the active tab, add `rename-pane` with the same grammar for panes, broadcast `ui.command` events for both rename types, and update the orchestration skill to document the exact commands and a complete create/split/rename flow.
 
 **Tech Stack:** TypeScript, Express agent API, Freshell CLI (`server/cli`), React/Redux UI command handling, Vitest, supertest, child-process CLI e2e tests.
 
@@ -12,17 +12,21 @@
 
 ## Strategy Gate
 
-- The missing steady-state capability is not “another skill wrapper”; it is a complete write path for pane titles plus a CLI grammar that can target the active tab/pane without manual UI interaction.
-- Do **not** implement pane rename by mutating browser state only. Automation has to work over HTTP against a remote Freshell instance, so the server must own the mutation and broadcast it.
-- Keep `rename-tab` and `rename-pane` as separate explicit operations. Do **not** make `pane.rename` implicitly rename the tab, even for single-pane tabs. The orchestration surface should be predictable; agents can call `rename-tab` when they want that outcome.
-- Tighten rename semantics while touching them: both rename routes and both CLI verbs should trim input and reject blank names. That matches the existing manual UI behavior, which ignores empty rename submissions instead of writing empty titles.
+- The actual missing capability is not “more skill prose”; it is a complete pane-title write path plus CLI verbs that can target either the active item or an explicit tab/pane identifier without manual UI interaction.
+- Do **not** reuse terminal/session rename APIs for this issue. Those rename override metadata for coding CLI terminals, but they do not cover editor/browser/shell panes and therefore do not satisfy “rename pane” as a layout-level orchestration primitive.
+- Do **not** solve pane rename by mutating Redux only. Orchestration must work against a remote Freshell server over HTTP, so the mutation has to be persisted in `LayoutStore` and broadcast back to connected clients.
+- Keep `rename-tab` and `rename-pane` as separate explicit operations. Do **not** auto-rename a tab when renaming a pane, even in a single-pane tab; the caller can invoke both operations when it wants both outcomes.
+- Put active-target defaults in the CLI parser, not only in docs. The skill should describe a capability that already exists in the executable surface.
+- Use a real `LayoutStore` in the CLI e2e tests for the create/split/rename flow. That is the only way to prove the plan lands the requested end state directly instead of only testing route mocks in isolation.
+- While touching rename semantics, normalize both rename routes and both CLI verbs the same way: trim incoming names and reject blank results. That matches the existing inline UI behavior and avoids storing empty titles.
 
 ## Acceptance Mapping
 
-- `rename-tab` remains the tab rename orchestration operation, but its CLI parsing is extended so it can target the active tab without requiring `-t`.
-- Add `rename-pane` as a first-class pane rename orchestration operation, with both active-pane and explicit-target forms.
-- The server agent API gains a pane rename endpoint and write primitive, so CLI, agents, and future orchestrators all share the same path.
-- The Freshell orchestration skill documents both verbs and includes a concrete create/split/rename playbook that does not rely on manual UI interaction.
+- `rename-tab` remains the tab rename orchestration operation, but the CLI grammar is extended so `rename-tab NEW_NAME` renames the active tab and `rename-tab TARGET NEW_NAME` or `rename-tab -t TARGET -n NEW_NAME` renames a specific tab.
+- Add `rename-pane` as a first-class pane rename orchestration operation, with active-pane and explicit-target forms.
+- The server agent API gains a pane rename endpoint and a `LayoutStore.renamePane()` primitive so CLI, agents, and future automation all share the same authoritative write path.
+- Connected UIs converge immediately because the server broadcasts `tab.rename` and `pane.rename` `ui.command` events after successful mutations.
+- The Freshell orchestration skill documents both rename verbs and includes a concrete new-tab/split-pane/rename flow that assigns meaningful tab and pane names without any manual UI interaction.
 
 ### Task 1: Lock Down Rename Contracts on the Server
 
@@ -30,10 +34,12 @@
 - Modify: `test/server/agent-tabs-write.test.ts`
 - Modify: `test/server/agent-panes-write.test.ts`
 - Modify: `test/unit/server/agent-layout-store-write.test.ts`
+- Modify: `server/agent-api/layout-store.ts`
+- Modify: `server/agent-api/router.ts`
 
-**Step 1: Write failing tests for rename validation and pane rename behavior**
+**Step 1: Write the failing server tests**
 
-Add tab write tests that prove blank tab names are rejected and trimmed names are forwarded:
+In `test/server/agent-tabs-write.test.ts`, add one validation test and one trimming test:
 
 ```ts
 it('rejects blank tab rename payloads', async () => {
@@ -51,16 +57,53 @@ it('rejects blank tab rename payloads', async () => {
   expect(res.status).toBe(400)
   expect(renameTab).not.toHaveBeenCalled()
 })
-```
 
-Add pane write tests that prove the new route resolves pane targets and broadcasts the rename:
-
-```ts
-it('renames a pane via PATCH /api/panes/:id', async () => {
-  const broadcastUiCommand = vi.fn()
-  const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_real' }))
+it('trims tab rename payloads before writing and broadcasting', async () => {
   const app = express()
   app.use(express.json())
+  const renameTab = vi.fn(() => ({ tabId: 'tab_1' }))
+  const broadcastUiCommand = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: { renameTab },
+    registry: {} as any,
+    wsHandler: { broadcastUiCommand },
+  }))
+
+  const res = await request(app).patch('/api/tabs/tab_1').send({ name: '  Release prep  ' })
+
+  expect(res.status).toBe(200)
+  expect(renameTab).toHaveBeenCalledWith('tab_1', 'Release prep')
+  expect(broadcastUiCommand).toHaveBeenCalledWith({
+    command: 'tab.rename',
+    payload: { id: 'tab_1', title: 'Release prep' },
+  })
+})
+```
+
+In `test/server/agent-panes-write.test.ts`, add blank-name validation plus the new pane route:
+
+```ts
+it('rejects blank pane rename payloads', async () => {
+  const app = express()
+  app.use(express.json())
+  const renamePane = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: { renamePane },
+    registry: {} as any,
+    wsHandler: { broadcastUiCommand: vi.fn() },
+  }))
+
+  const res = await request(app).patch('/api/panes/pane_1').send({ name: '   ' })
+
+  expect(res.status).toBe(400)
+  expect(renamePane).not.toHaveBeenCalled()
+})
+
+it('renames a pane via PATCH /api/panes/:id', async () => {
+  const app = express()
+  app.use(express.json())
+  const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_real' }))
+  const broadcastUiCommand = vi.fn()
   app.use('/api', createAgentApiRouter({
     layoutStore: {
       renamePane,
@@ -70,7 +113,7 @@ it('renames a pane via PATCH /api/panes/:id', async () => {
     wsHandler: { broadcastUiCommand },
   }))
 
-  const res = await request(app).patch('/api/panes/1.0').send({ name: 'Logs' })
+  const res = await request(app).patch('/api/panes/1.0').send({ name: '  Logs  ' })
 
   expect(res.status).toBe(200)
   expect(renamePane).toHaveBeenCalledWith('tab_1', 'pane_real', 'Logs')
@@ -81,7 +124,7 @@ it('renames a pane via PATCH /api/panes/:id', async () => {
 })
 ```
 
-Add `LayoutStore` write tests that prove pane rename persists into `snapshot.paneTitles` and can locate the owning tab even if `tabId` is omitted:
+In `test/unit/server/agent-layout-store-write.test.ts`, add the missing layout-level persistence coverage:
 
 ```ts
 it('renames a pane in the owning tab when tabId is omitted', () => {
@@ -113,27 +156,11 @@ npm test -- test/server/agent-tabs-write.test.ts test/server/agent-panes-write.t
 Expected:
 - FAIL because `PATCH /api/panes/:id` does not exist yet
 - FAIL because `LayoutStore.renamePane()` does not exist yet
-- FAIL because blank-name validation is not enforced on rename routes yet
+- FAIL because rename routes currently accept whitespace-only names
 
 **Step 3: Implement the server rename primitives**
 
-In `server/agent-api/layout-store.ts`, add a dedicated pane rename primitive:
-
-```ts
-renamePane(tabId: string | undefined, paneId: string, title: string) {
-  if (!this.snapshot) return { message: 'no layout snapshot' as const }
-  const target = this.getPaneSnapshot(paneId)
-  const targetTabId = tabId && target?.tabId === tabId ? tabId : target?.tabId
-  if (!targetTabId) return { message: 'pane not found' as const }
-
-  if (!this.snapshot.paneTitles) this.snapshot.paneTitles = {}
-  if (!this.snapshot.paneTitles[targetTabId]) this.snapshot.paneTitles[targetTabId] = {}
-  this.snapshot.paneTitles[targetTabId][paneId] = title
-  return { tabId: targetTabId, paneId }
-}
-```
-
-In `server/agent-api/router.ts`, extract a tiny helper used by both rename routes:
+In `server/agent-api/router.ts`, add a shared helper near `parseOptionalNumber()`:
 
 ```ts
 const parseRequiredName = (value: unknown) => {
@@ -142,33 +169,63 @@ const parseRequiredName = (value: unknown) => {
 }
 ```
 
-Use it in both routes:
+Use that helper in the existing tab route so the route rejects blank names and broadcasts the trimmed title:
 
 ```ts
 router.patch('/tabs/:id', (req, res) => {
   const name = parseRequiredName(req.body?.name)
   if (!name) return res.status(400).json(fail('name required'))
+
   const result = layoutStore.renameTab(req.params.id, name)
   wsHandler?.broadcastUiCommand({ command: 'tab.rename', payload: { id: req.params.id, title: name } })
   res.json(ok(result, result.message || 'tab renamed'))
 })
+```
 
+In `server/agent-api/layout-store.ts`, add a pane rename primitive that writes to `snapshot.paneTitles` and can recover the owning tab from the pane ID when the caller omits `tabId`:
+
+```ts
+renamePane(tabId: string | undefined, paneId: string, title: string) {
+  if (!this.snapshot) return { message: 'no layout snapshot' as const }
+
+  const pane = this.getPaneSnapshot(paneId)
+  if (!pane) return { message: 'pane not found' as const }
+
+  const targetTabId = tabId && tabId === pane.tabId ? tabId : pane.tabId
+  if (!this.snapshot.paneTitles) this.snapshot.paneTitles = {}
+  if (!this.snapshot.paneTitles[targetTabId]) this.snapshot.paneTitles[targetTabId] = {}
+  this.snapshot.paneTitles[targetTabId][paneId] = title
+  return { tabId: targetTabId, paneId }
+}
+```
+
+Still in `server/agent-api/router.ts`, add the pane rename route next to the other `/panes/:id/*` write routes:
+
+```ts
 router.patch('/panes/:id', (req, res) => {
   const name = parseRequiredName(req.body?.name)
   if (!name) return res.status(400).json(fail('name required'))
+
   const resolved = resolvePaneTarget(req.params.id)
   const paneId = resolved.paneId || req.params.id
-  const tabId = req.body?.tabId || resolved.tabId
+  const tabId = typeof req.body?.tabId === 'string' ? req.body.tabId : resolved.tabId
   const result = layoutStore.renamePane(tabId, paneId, name)
+
   if (result?.tabId) {
     wsHandler?.broadcastUiCommand({
       command: 'pane.rename',
       payload: { tabId: result.tabId, paneId, title: name },
     })
   }
+
   res.json(ok(result, resolved.message || result?.message || 'pane renamed'))
 })
 ```
+
+Important details:
+- Keep target resolution behavior consistent with existing pane endpoints by reusing `resolvePaneTarget()`.
+- Broadcast only after a resolved tab/pane result exists.
+- Leave `LayoutStore.renameTab()` simple; the route is responsible for validation and trimming, which keeps existing call sites stable.
 
 **Step 4: Re-run the targeted server tests**
 
@@ -196,6 +253,8 @@ git commit -m "feat(agent-api): add pane rename endpoint"
 
 **Step 1: Write the failing client test**
 
+In `test/unit/client/ui-commands.test.ts`, add:
+
 ```ts
 it('handles pane.rename', () => {
   const actions: any[] = []
@@ -215,7 +274,7 @@ it('handles pane.rename', () => {
 })
 ```
 
-**Step 2: Run the test and confirm failure**
+**Step 2: Run the client test and confirm failure**
 
 Run:
 
@@ -228,7 +287,7 @@ Expected:
 
 **Step 3: Implement the minimal broadcast handler**
 
-In `src/lib/ui-commands.ts`, import `updatePaneTitle` and add:
+In `src/lib/ui-commands.ts`, import `updatePaneTitle` from `@/store/panesSlice` and add the missing case:
 
 ```ts
 case 'pane.rename':
@@ -260,25 +319,68 @@ git commit -m "feat(client): apply pane rename ui commands"
 ### Task 3: Extend the CLI Rename Surface to Support Active Targets and Pane Rename
 
 **Files:**
-- Modify: `server/cli/index.ts`
 - Modify: `test/e2e/agent-cli-flow.test.ts`
+- Modify: `server/cli/index.ts`
 
-**Step 1: Write the failing end-to-end CLI tests**
+**Step 1: Write the failing CLI end-to-end tests**
 
-Add one focused rename flow that covers the acceptance criteria instead of a pile of tiny mocks:
+In `test/e2e/agent-cli-flow.test.ts`, add a real-layout helper near `startTestServer()` so these tests exercise the actual `LayoutStore` mutation path instead of a bag of route mocks:
 
 ```ts
-it('renames the active tab and explicit panes in a create/split flow', async () => {
+import { LayoutStore } from '../../server/agent-api/layout-store'
+
+async function startTestServerWithRealLayoutStore() {
+  const layoutStore = new LayoutStore()
+  const app = express()
+  app.use(express.json())
+
+  let terminalCount = 0
+  app.use('/api', createAgentApiRouter({
+    layoutStore,
+    registry: {
+      create: () => ({ terminalId: `term_${++terminalCount}` }),
+      get: () => undefined,
+      input: () => {},
+    },
+  }))
+
+  const server = http.createServer(app)
+  return await new Promise<{ url: string; layoutStore: LayoutStore; close: () => Promise<void> }>((resolve) => {
+    server.listen(0, () => {
+      const { port } = server.address() as { port: number }
+      resolve({
+        url: `http://localhost:${port}`,
+        layoutStore,
+        close: () => new Promise((done) => server.close(() => done())),
+      })
+    })
+  })
+}
+
+async function runCliJson<T>(url: string, args: string[]) {
+  const output = await runCli(url, args)
+  return JSON.parse(output.stdout) as T
+}
+```
+
+Then add one acceptance-level flow and one focused active-pane test:
+
+```ts
+it('renames the active tab and explicit panes in a create split rename flow', async () => {
   const server = await startTestServerWithRealLayoutStore()
   try {
-    const created = await runCli(server.url, ['new-tab', '-n', 'Workspace'])
-    const createdJson = JSON.parse(created.stdout)
-    const tabId = createdJson.data.tabId
-    const firstPaneId = createdJson.data.paneId
+    const created = await runCliJson<{ data: { tabId: string; paneId: string } }>(server.url, ['new-tab', '-n', 'Workspace'])
+    const tabId = created.data.tabId
+    const firstPaneId = created.data.paneId
 
-    const split = await runCli(server.url, ['split-pane', '-t', firstPaneId, '--editor', '/tmp/example.txt'])
-    const splitJson = JSON.parse(split.stdout)
-    const secondPaneId = splitJson.data.paneId
+    const split = await runCliJson<{ data: { paneId: string } }>(server.url, [
+      'split-pane',
+      '-t',
+      firstPaneId,
+      '--editor',
+      '/tmp/example.txt',
+    ])
+    const secondPaneId = split.data.paneId
 
     await runCli(server.url, ['rename-tab', 'Release prep'])
     await runCli(server.url, ['rename-pane', '-t', firstPaneId, '-n', 'Shell'])
@@ -292,15 +394,12 @@ it('renames the active tab and explicit panes in a create/split flow', async () 
     await server.close()
   }
 })
-```
 
-Add a smaller active-pane default test:
-
-```ts
 it('renames the active pane when only a new name is provided', async () => {
   const server = await startTestServerWithRealLayoutStore()
   try {
     const created = await runCliJson<{ data: { tabId: string; paneId: string } }>(server.url, ['new-tab', '-n', 'Workspace'])
+
     await runCli(server.url, ['rename-pane', 'Main shell'])
 
     const snapshot = (server.layoutStore as any).snapshot
@@ -321,11 +420,11 @@ npm test -- test/e2e/agent-cli-flow.test.ts
 
 Expected:
 - FAIL because `rename-pane` is not implemented
-- FAIL because `rename-tab NAME` currently treats `NAME` as a target instead of the active tab rename form
+- FAIL because `rename-tab NAME` currently treats the lone positional argument as a target instead of the new name for the active tab
 
-**Step 3: Implement shared rename-argument parsing and the new verb**
+**Step 3: Implement shared rename parsing and the new `rename-pane` verb**
 
-In `server/cli/index.ts`, add a small helper near `getFlag()`:
+In `server/cli/index.ts`, add a small helper near `getFlag()` so both rename commands share identical grammar:
 
 ```ts
 function resolveRenameArgs(flags: Flags, args: string[]) {
@@ -333,30 +432,71 @@ function resolveRenameArgs(flags: Flags, args: string[]) {
   const explicitName = getFlag(flags, 'n', 'name', 'title')
 
   if (typeof explicitName === 'string') {
-    return { target: typeof explicitTarget === 'string' ? explicitTarget : undefined, name: explicitName.trim() }
+    return {
+      target: typeof explicitTarget === 'string' ? explicitTarget : undefined,
+      name: explicitName.trim(),
+    }
   }
 
-  if (args.length === 1) return { target: undefined, name: args[0].trim() }
-  if (args.length >= 2) return { target: args[0], name: args[1].trim() }
-  return { target: typeof explicitTarget === 'string' ? explicitTarget : undefined, name: '' }
+  if (args.length === 1) {
+    return { target: undefined, name: args[0].trim() }
+  }
+
+  if (args.length >= 2) {
+    return { target: args[0], name: args[1].trim() }
+  }
+
+  return {
+    target: typeof explicitTarget === 'string' ? explicitTarget : undefined,
+    name: '',
+  }
 }
 ```
 
-Use it in both rename cases:
+Update `rename-tab` to use that helper:
 
 ```ts
 case 'rename-tab': {
   const { target, name } = resolveRenameArgs(flags, args)
-  if (!name) { writeError('name required'); process.exitCode = 1; return }
-  const { tab, message } = await resolveTabTarget(client, target)
-  ...
-}
+  if (!name) {
+    writeError('name required')
+    process.exitCode = 1
+    return
+  }
 
+  const { tab, message } = await resolveTabTarget(client, target)
+  if (!tab) {
+    writeError(message || 'tab not found')
+    process.exitCode = 1
+    return
+  }
+  if (message) writeError(message)
+
+  const res = await client.patch(`/api/tabs/${encodeURIComponent(tab.id)}`, { name })
+  writeJson(res)
+  return
+}
+```
+
+Add a new `rename-pane` case right after the other pane-management commands:
+
+```ts
 case 'rename-pane': {
   const { target, name } = resolveRenameArgs(flags, args)
-  if (!name) { writeError('name required'); process.exitCode = 1; return }
+  if (!name) {
+    writeError('name required')
+    process.exitCode = 1
+    return
+  }
+
   const resolved = await resolvePaneTarget(client, target)
-  if (!resolved.pane?.id) { ... }
+  if (!resolved.pane?.id) {
+    writeError(resolved.message || 'pane not found')
+    process.exitCode = 1
+    return
+  }
+  if (resolved.message) writeError(resolved.message)
+
   const res = await client.patch(`/api/panes/${encodeURIComponent(resolved.pane.id)}`, {
     tabId: resolved.tab?.id,
     name,
@@ -367,10 +507,10 @@ case 'rename-pane': {
 ```
 
 Important details:
-- Keep `-t/-n` working exactly as today for explicit automation.
-- One positional arg means active rename for both verbs.
-- Two positional args mean explicit target + new name.
-- Trim the final name before validating so whitespace-only input fails locally.
+- Preserve existing `-t/-n` behavior exactly; those forms remain the escape hatch for ambiguous targets or names with spaces.
+- One positional argument means “rename the active target”.
+- Two positional arguments mean “rename the explicit target to the provided name”.
+- Trim the final name before validating so whitespace-only input fails locally before the HTTP request is sent.
 
 **Step 4: Re-run the CLI e2e file**
 
@@ -386,7 +526,7 @@ Expected:
 **Step 5: Commit**
 
 ```bash
-git add server/cli/index.ts test/e2e/agent-cli-flow.test.ts
+git add test/e2e/agent-cli-flow.test.ts server/cli/index.ts
 git commit -m "feat(cli): add rename-pane and active rename targets"
 ```
 
@@ -395,25 +535,37 @@ git commit -m "feat(cli): add rename-pane and active rename targets"
 **Files:**
 - Modify: `.claude/skills/freshell-orchestration/SKILL.md`
 
-**Step 1: Rewrite the command reference and playbook entries**
+**Step 1: Rewrite the rename command reference**
 
-Add `rename-pane` beside `rename-tab`, and make the active-target behavior explicit:
+In the “Command reference” section, replace the ambiguous rename syntax with explicit active-target and targeted forms:
 
 ```md
 Tab commands:
-- `rename-tab [TARGET] NEW_NAME`
-- `rename-tab -n NEW_NAME`
+- `rename-tab NEW_NAME` - rename the active tab
+- `rename-tab TARGET NEW_NAME`
 - `rename-tab -t TARGET -n NEW_NAME`
 
 Pane/layout commands:
-- `rename-pane [PANE_TARGET] NEW_NAME`
-- `rename-pane -n NEW_NAME`
-- `rename-pane -t PANE_TARGET -n NEW_NAME`
+- `rename-pane NEW_NAME` - rename the active pane
+- `rename-pane TARGET NEW_NAME`
+- `rename-pane -t TARGET -n NEW_NAME`
 ```
 
-Add a playbook that proves the acceptance criteria in the docs themselves:
+Under “Targets”, add a short note so agents do not have to infer the grammar:
+
+```md
+- Omitted target on `rename-tab` means the active tab.
+- Omitted target on `rename-pane` means the active pane in the active tab.
+- If the target or new name contains spaces, prefer the flagged `-t/-n` form.
+```
+
+Add a concrete end-to-end playbook that proves the acceptance criteria in the skill itself:
 
 ```bash
+FSH="npx tsx server/cli/index.ts"
+CWD="/absolute/path/to/repo"
+FILE="/absolute/path/to/repo/README.md"
+
 WS="$($FSH new-tab -n 'Triager' --codex --cwd "$CWD")"
 TAB_ID="$(printf '%s' "$WS" | jq -r '.data.tabId')"
 P0="$(printf '%s' "$WS" | jq -r '.data.paneId')"
@@ -423,9 +575,6 @@ $FSH rename-tab -t "$TAB_ID" -n "Issue 166 work"
 $FSH rename-pane -t "$P0" -n "Codex"
 $FSH rename-pane -t "$P1" -n "Editor"
 ```
-
-Also add one short note under Targets:
-- omitted target on `rename-tab`/`rename-pane` means the active tab/pane
 
 **Step 2: Sanity-check the markdown for accuracy**
 
@@ -437,8 +586,8 @@ sed -n '1,260p' .claude/skills/freshell-orchestration/SKILL.md
 
 Expected:
 - Command reference includes `rename-pane`
-- Active-target behavior is documented clearly
-- Playbook shows create/split plus meaningful names without manual UI interaction
+- Active-target behavior is explicit for both rename commands
+- The playbook shows a create/split/rename flow with no UI interaction
 
 **Step 3: Commit**
 
@@ -476,7 +625,7 @@ Expected:
 
 **Step 3: Manual orchestration spot-check against a real dev server if needed**
 
-Run:
+Only do this after the automated suite passes. Run:
 
 ```bash
 FSH="npx tsx server/cli/index.ts"
@@ -496,6 +645,7 @@ Expected:
 
 ## Notes for the Executor
 
-- Keep this cycle tight. Do not expand the read surface with new pane-title listing tokens in this issue unless an implementation obstacle makes that unavoidable.
-- Reuse existing rename reducers instead of inventing parallel state. The new capability is a server write path and CLI exposure, not a second rename system.
-- Preserve the current tmux-style target resolution rules in `resolveTarget`; this issue only needs rename verbs to consume that resolution logic.
+- Keep this cycle tight. Do not expand the read surface with new pane-title listing tokens or unrelated rename unification work unless implementation proves that unavoidable.
+- Reuse existing reducers (`updateTab`, `updatePaneTitle`) instead of inventing parallel client state. This issue is about adding the missing server write path and exposing it through orchestration, not building a second rename system.
+- Preserve the existing tmux-style target resolution rules in `resolveTarget()`. This issue only needs rename verbs to consume those rules.
+- The CLI e2e file already has mock-based smoke coverage; the new tests should sit beside that, not replace it, because both levels are useful.
