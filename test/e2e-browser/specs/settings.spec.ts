@@ -162,7 +162,10 @@ test.describe('Settings', () => {
     await openSettings(page)
 
     // The Appearance section has theme controls (SegmentedControl for system/light/dark)
-    // SegmentedControl renders buttons with text labels
     await expect(page.getByText('Appearance').first()).toBeVisible()
+    // Verify at least one theme mode button is present
+    await expect(
+      page.getByRole('button', { name: /system|light|dark/i }).first()
+    ).toBeVisible()
   })
 })
