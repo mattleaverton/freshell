@@ -511,6 +511,7 @@ export const panesSlice = createSlice({
         content: normalized,
       }
       state.activePane[tabId] = paneId
+      state.paneTitles[tabId] = { [paneId]: derivePaneTitle(normalized) }
       reconcileRefreshRequestsForTab(state, tabId)
     },
 

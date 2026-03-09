@@ -354,7 +354,7 @@ describe('cli e2e flow', () => {
       const snapshot = (server.layoutStore as any).snapshot
       expect(renamed.stderr).toContain('active tab used')
       expect(snapshot.paneTitles[created.data.tabId][created.data.paneId]).toBe('Main shell')
-      expect(snapshot.tabs.find((tab: any) => tab.id === created.data.tabId)?.title).toBe('Workspace')
+      expect(snapshot.tabs.find((tab: any) => tab.id === created.data.tabId)?.title).toBe('Main shell')
     } finally {
       await server.close()
     }

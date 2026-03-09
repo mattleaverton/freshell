@@ -141,6 +141,9 @@ export function createAgentApiRouter({
     const meta = terminalId
       ? terminalMetadata?.list?.().find((entry) => entry.terminalId === terminalId)
       : undefined
+    const resumeSessionId = typeof paneContent?.resumeSessionId === 'string'
+      ? paneContent.resumeSessionId
+      : undefined
     const modeCandidates = [
       typeof paneContent?.mode === 'string' ? paneContent.mode : undefined,
       terminalId ? registry.get?.(terminalId)?.mode : undefined,
@@ -158,9 +161,11 @@ export function createAgentApiRouter({
       await configStore.patchTerminalOverride?.(terminalId, { titleOverride: title })
       registry.updateTitle?.(terminalId, title)
 
-      if (meta?.provider && meta?.sessionId) {
+      const sessionProvider = typeof meta?.provider === 'string' ? meta.provider : mode
+      const sessionId = typeof meta?.sessionId === 'string' ? meta.sessionId : resumeSessionId
+      if (sessionProvider && sessionId) {
         try {
-          await configStore.patchSessionOverride?.(makeSessionKey(meta.provider as any, meta.sessionId), {
+          await configStore.patchSessionOverride?.(makeSessionKey(sessionProvider as any, sessionId), {
             titleOverride: title,
           })
           await codingCliIndexer?.refresh?.()
@@ -610,6 +615,17 @@ export function createAgentApiRouter({
       if (result?.tabId) {
         await persistSyncableTerminalRename(paneSnapshot, name)
 
+        const tabPanes = layoutStore.listPanes?.(result.tabId) || []
+        if (tabPanes.length === 1) {
+          const tabRenameResult = layoutStore.renameTab?.(result.tabId, name)
+          if (tabRenameResult?.tabId) {
+            wsHandler?.broadcastUiCommand({
+              command: 'tab.rename',
+              payload: { id: result.tabId, title: name },
+            })
+          }
+        }
+
         wsHandler?.broadcastUiCommand({
           command: 'pane.rename',
           payload: { tabId: result.tabId, paneId: result.paneId || paneId, title: name },
@@ -768,7 +784,7 @@ export function createAgentApiRouter({
       terminalId,
       status: 'running',
       mode: req.body?.mode || attachedTerminal?.mode || 'shell',
-      shell: req.body?.shell || 'system',
+      shell: req.body?.shell || attachedTerminal?.shell || 'system',
       createRequestId: nanoid(),
     }
     layoutStore.attachPaneContent(tabId, paneId, content)

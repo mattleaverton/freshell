@@ -150,6 +150,31 @@ it('preserves coding CLI mode across attach so a later rename-pane persists over
   expect(patchSessionOverride).toHaveBeenCalledWith('codex:session-1', { titleOverride: 'Attached agent' })
 })
 
+it('preserves attached shell metadata for non-system terminals', async () => {
+  const app = express()
+  app.use(express.json())
+  const attachPaneContent = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: {
+      attachPaneContent,
+      resolveTarget: () => ({ tabId: 'tab_1', paneId: 'pane_1' }),
+    } as any,
+    registry: {
+      get: () => ({ mode: 'shell', shell: 'powershell' }),
+    } as any,
+    wsHandler: { broadcastUiCommand: vi.fn() },
+  }))
+
+  const res = await request(app).post('/api/panes/pane_1/attach').send({ terminalId: 'term_1' })
+
+  expect(res.status).toBe(200)
+  expect(attachPaneContent).toHaveBeenCalledWith('tab_1', 'pane_1', expect.objectContaining({
+    terminalId: 'term_1',
+    mode: 'shell',
+    shell: 'powershell',
+  }))
+})
+
 it('renames a resolved pane via PATCH /api/panes/:id', async () => {
   const app = express()
   app.use(express.json())
@@ -174,14 +199,16 @@ it('renames a resolved pane via PATCH /api/panes/:id', async () => {
   })
 })
 
-it('does not rename the tab when renaming the only pane in a tab', async () => {
+it('syncs the tab title when renaming the only pane in a tab', async () => {
   const app = express()
   app.use(express.json())
   const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_1' }))
+  const renameTab = vi.fn(() => ({ tabId: 'tab_1' }))
   const broadcastUiCommand = vi.fn()
   app.use('/api', createAgentApiRouter({
     layoutStore: {
       renamePane,
+      renameTab,
       listPanes: () => [{ id: 'pane_1' }],
       getPaneSnapshot: () => ({
         tabId: 'tab_1',
@@ -197,13 +224,15 @@ it('does not rename the tab when renaming the only pane in a tab', async () => {
 
   expect(res.status).toBe(200)
   expect(renamePane).toHaveBeenCalledWith('pane_1', 'Docs')
+  expect(renameTab).toHaveBeenCalledWith('tab_1', 'Docs')
   expect(broadcastUiCommand).toHaveBeenCalledWith({
     command: 'pane.rename',
     payload: { tabId: 'tab_1', paneId: 'pane_1', title: 'Docs' },
   })
-  expect(broadcastUiCommand).not.toHaveBeenCalledWith(expect.objectContaining({
+  expect(broadcastUiCommand).toHaveBeenCalledWith({
     command: 'tab.rename',
-  }))
+    payload: { id: 'tab_1', title: 'Docs' },
+  })
 })
 
 it('persists syncable coding CLI pane renames through terminal overrides and session overrides', async () => {
@@ -230,6 +259,50 @@ it('persists syncable coding CLI pane renames through terminal overrides and ses
     configStore: { patchTerminalOverride, patchSessionOverride } as any,
     terminalMetadata: {
       list: () => [{ terminalId: 'term_1', provider: 'codex', sessionId: 'session-1' }],
+    } as any,
+    codingCliIndexer: { refresh } as any,
+  }))
+
+  const res = await request(app).patch('/api/panes/pane_1').send({ name: 'Agent' })
+
+  expect(res.status).toBe(200)
+  expect(renamePane).toHaveBeenCalledWith('pane_1', 'Agent')
+  expect(patchTerminalOverride).toHaveBeenCalledWith('term_1', { titleOverride: 'Agent' })
+  expect(updateTitle).toHaveBeenCalledWith('term_1', 'Agent')
+  expect(patchSessionOverride).toHaveBeenCalledWith('codex:session-1', { titleOverride: 'Agent' })
+  expect(refresh).toHaveBeenCalledOnce()
+  expect(broadcast).toHaveBeenCalledWith({ type: 'terminal.list.updated' })
+})
+
+it('falls back to pane resumeSessionId when terminal metadata is not ready yet', async () => {
+  const app = express()
+  app.use(express.json())
+  const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_1' }))
+  const patchTerminalOverride = vi.fn().mockResolvedValue({})
+  const patchSessionOverride = vi.fn().mockResolvedValue({})
+  const updateTitle = vi.fn()
+  const refresh = vi.fn().mockResolvedValue(undefined)
+  const broadcast = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: {
+      renamePane,
+      listPanes: () => [{ id: 'pane_1' }, { id: 'pane_2' }],
+      getPaneSnapshot: () => ({
+        tabId: 'tab_1',
+        paneId: 'pane_1',
+        paneContent: {
+          kind: 'terminal',
+          mode: 'codex',
+          terminalId: 'term_1',
+          resumeSessionId: 'session-1',
+        },
+      }),
+    } as any,
+    registry: { updateTitle } as any,
+    wsHandler: { broadcastUiCommand: vi.fn(), broadcast },
+    configStore: { patchTerminalOverride, patchSessionOverride } as any,
+    terminalMetadata: {
+      list: () => [],
     } as any,
     codingCliIndexer: { refresh } as any,
   }))

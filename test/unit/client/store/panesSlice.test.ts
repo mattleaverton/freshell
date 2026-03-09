@@ -141,6 +141,16 @@ describe('panesSlice', () => {
       expect(state.activePane['tab-1']).toBe(leaf.id)
     })
 
+    it('seeds paneTitles from the initialized pane content', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'codex', status: 'running' } })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(state.paneTitles['tab-1'][leaf.id]).toBe('Codex CLI')
+    })
+
     it('uses the provided paneId when supplied', () => {
       const state = panesReducer(
         initialState,
