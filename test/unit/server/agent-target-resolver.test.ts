@@ -48,4 +48,26 @@ describe('resolveTarget', () => {
     expect(res.tabId).toBe('tab_plain')
     expect(res.paneId).toBe('pane_1')
   })
+
+  it('prefers documented selectors over pane title collisions', () => {
+    const resIndex = resolveTarget('0', {
+      ...snapshot,
+      paneTitles: {
+        tab_dot: { pane_dot: '0' },
+      },
+    } as any)
+
+    expect(resIndex.tabId).toBe('tab_plain')
+    expect(resIndex.paneId).toBe('pane_0')
+
+    const resTab = resolveTarget('alpha.1', {
+      ...snapshot,
+      paneTitles: {
+        tab_plain: { pane_1: 'alpha.1' },
+      },
+    } as any)
+
+    expect(resTab.tabId).toBe('tab_dot')
+    expect(resTab.paneId).toBe('pane_dot')
+  })
 })

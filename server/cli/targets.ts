@@ -23,11 +23,6 @@ export function resolveTarget(target: string, ctx: TargetContext): ResolveResult
     if (pane) return { tabId, paneId: paneIdOf(pane) }
   }
 
-  for (const [tabId, panes] of Object.entries(ctx.panesByTab)) {
-    const pane = panes.find((entry) => paneTitleOf(entry) === clean)
-    if (pane) return { tabId, paneId: paneIdOf(pane) }
-  }
-
   const tabMatch = ctx.tabs.find((t) => t.id === clean || t.title === clean)
   if (tabMatch) {
     return {
@@ -62,6 +57,11 @@ export function resolveTarget(target: string, ctx: TargetContext): ResolveResult
       const panes = ctx.panesByTab[activeTabId] || []
       return { tabId: activeTabId, paneId: paneIdOf(panes[idx]), message: 'active tab used' }
     }
+  }
+
+  for (const [tabId, panes] of Object.entries(ctx.panesByTab)) {
+    const pane = panes.find((entry) => paneTitleOf(entry) === clean)
+    if (pane) return { tabId, paneId: paneIdOf(pane) }
   }
 
   return { message: 'target not resolved' }

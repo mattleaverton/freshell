@@ -47,11 +47,6 @@ export function resolveTarget(target: string, snapshot: LayoutSnapshot): Resolve
   const paneTabId = paneToTab.get(clean)
   if (paneTabId) return { tabId: paneTabId, paneId: clean }
 
-  for (const [tabId, leaves] of panesByTab.entries()) {
-    const titledPane = leaves.find((leaf) => snapshot.paneTitles?.[tabId]?.[leaf.id] === clean)
-    if (titledPane) return { tabId, paneId: titledPane.id }
-  }
-
   // exact tab id or title
   const tabMatch = snapshot.tabs.find((t) => t.id === clean || t.title === clean)
   if (tabMatch) {
@@ -82,6 +77,11 @@ export function resolveTarget(target: string, snapshot: LayoutSnapshot): Resolve
       const pane = leaves[idx]
       return { tabId: activeTabId, paneId: pane?.id, message: 'active tab used' }
     }
+  }
+
+  for (const [tabId, leaves] of panesByTab.entries()) {
+    const titledPane = leaves.find((leaf) => snapshot.paneTitles?.[tabId]?.[leaf.id] === clean)
+    if (titledPane) return { tabId, paneId: titledPane.id }
   }
 
   return { message: 'target not resolved' }

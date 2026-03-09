@@ -289,3 +289,43 @@ it('does not broadcast pane.rename when the pane does not exist', async () => {
   expect(renamePane).toHaveBeenCalledWith('missing', 'Ghost')
   expect(broadcastUiCommand).not.toHaveBeenCalled()
 })
+
+it('does not persist terminal rename side effects when the authoritative pane rename fails', async () => {
+  const app = express()
+  app.use(express.json())
+  const renamePane = vi.fn(() => ({ message: 'pane not found' }))
+  const patchTerminalOverride = vi.fn().mockResolvedValue({})
+  const patchSessionOverride = vi.fn().mockResolvedValue({})
+  const updateTitle = vi.fn()
+  const refresh = vi.fn().mockResolvedValue(undefined)
+  const broadcast = vi.fn()
+  const broadcastUiCommand = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: {
+      renamePane,
+      getPaneSnapshot: () => ({
+        tabId: 'tab_1',
+        paneId: 'pane_1',
+        paneContent: { kind: 'terminal', mode: 'codex', terminalId: 'term_1' },
+      }),
+    } as any,
+    registry: { updateTitle } as any,
+    wsHandler: { broadcastUiCommand, broadcast },
+    configStore: { patchTerminalOverride, patchSessionOverride } as any,
+    terminalMetadata: {
+      list: () => [{ terminalId: 'term_1', provider: 'codex', sessionId: 'session-1' }],
+    } as any,
+    codingCliIndexer: { refresh } as any,
+  }))
+
+  const res = await request(app).patch('/api/panes/pane_1').send({ name: 'Ghost' })
+
+  expect(res.status).toBe(200)
+  expect(renamePane).toHaveBeenCalledWith('pane_1', 'Ghost')
+  expect(patchTerminalOverride).not.toHaveBeenCalled()
+  expect(updateTitle).not.toHaveBeenCalled()
+  expect(patchSessionOverride).not.toHaveBeenCalled()
+  expect(refresh).not.toHaveBeenCalled()
+  expect(broadcast).not.toHaveBeenCalled()
+  expect(broadcastUiCommand).not.toHaveBeenCalled()
+})

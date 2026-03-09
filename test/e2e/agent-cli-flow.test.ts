@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { spawn } from 'child_process'
 import path from 'path'
 import { createRequire } from 'module'
@@ -127,6 +127,33 @@ describe('cli e2e flow', () => {
       const output = await runCli(url, ['display', '-p', '#I'])
 
       expect(output.stdout.trim()).toBe('tab_2')
+    } finally {
+      await close()
+    }
+  })
+
+  it('uses the first pane in the active tab when pane commands omit a target and tabs omit activePaneId', async () => {
+    const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_1' }))
+    const { url, close } = await startTestServer({
+      listTabs: () => ([
+        { id: 'tab_1', title: 'Alpha' },
+      ]),
+      listPanes: () => ([
+        { id: 'pane_1', index: 0, kind: 'terminal', terminalId: 'term_1', title: 'Shell' },
+      ]),
+      renamePane,
+      getPaneSnapshot: () => ({
+        tabId: 'tab_1',
+        paneId: 'pane_1',
+        paneContent: { kind: 'terminal', mode: 'shell', terminalId: 'term_1' },
+      }),
+    })
+    try {
+      const output = await runCli(url, ['rename-pane', 'Renamed shell'])
+      const parsed = JSON.parse(output.stdout) as { status: string }
+
+      expect(parsed.status).toBe('ok')
+      expect(renamePane).toHaveBeenCalledWith('pane_1', 'Renamed shell')
     } finally {
       await close()
     }

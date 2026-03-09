@@ -576,12 +576,11 @@ export function createAgentApiRouter({
       const resolved = resolvePaneTarget(req.params.id)
       const paneId = resolved.paneId || req.params.id
       const paneSnapshot = layoutStore.getPaneSnapshot?.(paneId)
-
-      await persistSyncableTerminalRename(paneSnapshot, name)
-
       const result = layoutStore.renamePane(paneId, name)
 
       if (result?.tabId) {
+        await persistSyncableTerminalRename(paneSnapshot, name)
+
         const tabPanes = layoutStore.listPanes?.(result.tabId) || []
         if (tabPanes.length === 1) {
           const tabRenameResult = layoutStore.renameTab?.(result.tabId, name)

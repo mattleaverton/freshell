@@ -116,7 +116,7 @@ async function resolvePaneTarget(client: ReturnType<typeof createHttpClient>, ta
 
   if (!target) {
     const fallbackTab = tabs.find((t) => t.id === effectiveActiveTabId) || tabs[0]
-    const paneId = fallbackTab?.activePaneId || (fallbackTab ? panesByTab[fallbackTab.id]?.[0] : undefined)
+    const paneId = fallbackTab?.activePaneId || (fallbackTab ? panesByTab[fallbackTab.id]?.[0]?.id : undefined)
     return { tab: fallbackTab, pane: paneId ? paneInfoById[paneId] : undefined, message: 'active tab used' }
   }
 
