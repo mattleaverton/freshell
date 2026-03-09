@@ -21,13 +21,15 @@ The right fix is a direct cutover:
 3. Serve visible windows from server-owned read models.
 4. Make realtime traffic small, prioritized, and bounded.
 
-This revision replaces the earlier draft rather than lightly editing it. The earlier draft had the right architectural direction, but it was not excellent yet for five reasons:
+This revision replaces the earlier draft rather than lightly editing it. The earlier draft had the right architectural direction, but it was not excellent yet for seven reasons:
 
 1. The tasks were still too coarse for disciplined red-green-refactor execution.
 2. It treated all ordering/filtering as server-owned, even when some ordering depends on client-only state such as open tabs and local activity pinning.
 3. It did not explicitly simplify websocket ownership on the client, so the startup race that currently forces reconciliation logic could survive the transport rewrite under a different name.
 4. It did not explicitly account for several existing test surfaces that encode the old transport contract, especially `test/unit/client/ws-client-sdk.test.ts`, `test/e2e/auth-required-bootstrap-flow.test.tsx`, `test/unit/server/ws-chunking.test.ts`, and `test/server/ws-sessions-patch.test.ts`.
 5. It reused legacy "session search" naming for the new server-owned directory read model, which makes it too easy for the execution agent to preserve the wrong API shape or keep duplicate endpoints alive.
+6. It did not explicitly move read-model fetch ownership out of leaf components and into the store/API layer, which would let client-side orchestration sprawl survive even after the server becomes authoritative.
+7. It did not explicitly carry `server/cli/index.ts` and its tests off `/api/sessions` and `/api/sessions/search`, which means the old routes could remain alive as hidden compatibility debt.
 
 The direct end state is still correct. What changes here is the execution shape and a sharper boundary:
 
@@ -35,6 +37,7 @@ The direct end state is still correct. What changes here is the execution shape 
 2. Small visible-window adornment based on client-only state may stay in the client.
 3. `App.tsx` becomes the sole websocket owner; child components stop calling `ws.connect()`.
 4. Focused-pane HTTP hydration must begin immediately after shell bootstrap and must not wait for websocket `ready`.
+5. Read-model fetch orchestration lives in store thunks or shared client transport helpers, not in leaf components.
 
 ## Codebase Findings
 
@@ -70,6 +73,11 @@ The direct end state is still correct. What changes here is the execution shape 
    - `test/unit/client/ws-client-sdk.test.ts`, `test/unit/client/components/App.test.tsx`, `test/unit/client/store/sessionsSlice.test.ts`, `test/unit/server/ws-chunking.test.ts`, `test/server/ws-sessions-patch.test.ts`, and `test/e2e/auth-required-bootstrap-flow.test.tsx` will all need direct rewrites or deletion as part of the cutover.
    - Leaving those suites outside the plan would create predictable red bars late in execution and invite accidental compatibility shims.
    - `src/components/context-menu/ContextMenuProvider.tsx` also still calls `GET /api/sessions` after rename/archive/delete actions, so the plan must cut mutation refresh flows over as well or the old snapshot route will survive through a side door.
+
+8. **The CLI and some remaining UI surfaces still depend on the legacy sessions routes.**
+   - `server/cli/index.ts` still uses `/api/sessions` and `/api/sessions/search` for `list-sessions` and `search-sessions`.
+   - Several `App` and session-browsing test files still stub `/api/sessions` as part of bootstrap, including `test/unit/client/components/App.lazy-views.test.tsx`, `test/unit/client/components/App.mobile.test.tsx`, `test/unit/client/components/App.mobile-landscape.test.tsx`, `test/unit/client/components/App.swipe-sidebar.test.tsx`, and `test/unit/client/components/App.swipe-tabs.test.tsx`.
+   - If those paths are not called out explicitly, the execution agent will either leave the legacy routes in place or discover the failures too late.
 
 ## End-State Architecture
 
@@ -123,6 +131,7 @@ The direct end state is still correct. What changes here is the execution shape 
 4. The server owns agent turn folding and turn-body hydration.
 5. The server owns terminal viewport serialization, scrollback paging, and terminal search.
 6. `App.tsx` owns websocket lifecycle. Child components and thunks stop calling `ws.connect()`.
+7. Leaf React components dispatch intents and render selectors; they do not build read-model URLs, own fetch cancellation policy, or reconcile revision state locally.
 
 ### Cutover Invariants
 
@@ -137,6 +146,7 @@ The direct end state is still correct. What changes here is the execution shape 
 9. Session and terminal search are server-side only.
 10. Session rename/archive/delete flows refetch or invalidate only the active directory window, never a full session snapshot.
 11. When state is uncertain, refetch the active visible window instead of rebuilding large client reconciliation logic.
+12. CLI list/search flows use the same server-owned session-directory read model family rather than keeping `/api/sessions` and `/api/sessions/search` alive as shadow APIs.
 
 ## Budgets And Invariants
 
@@ -182,7 +192,10 @@ Every task below follows red-green-refactor and adds coverage at the seam being 
 7. Legacy cleanup tests proving:
    - no test or runtime path still imports `server/ws-chunking.ts`
    - no route test still exercises `/api/sessions/search` as the sidebar/history source of truth
-8. Final verification:
+8. CLI tests proving:
+   - `list-sessions` and `search-sessions` no longer call `/api/sessions` or `/api/sessions/search`
+   - CLI output still exposes the server-owned directory/search results users expect
+9. Final verification:
 
 ```bash
 npm run lint
@@ -663,6 +676,12 @@ git commit -m "feat(api): add shell-only bootstrap route"
 **Files:**
 - Modify: `test/unit/client/components/App.test.tsx`
 - Modify: `test/unit/client/components/App.ws-bootstrap.test.tsx`
+- Modify: `test/unit/client/components/App.lazy-views.test.tsx`
+- Modify: `test/unit/client/components/App.mobile.test.tsx`
+- Modify: `test/unit/client/components/App.mobile-landscape.test.tsx`
+- Modify: `test/unit/client/components/App.swipe-sidebar.test.tsx`
+- Modify: `test/unit/client/components/App.swipe-tabs.test.tsx`
+- Modify: `test/unit/client/components/App.sidebar-resize.test.tsx`
 
 **Step 1: Write the failing tests**
 
@@ -673,11 +692,12 @@ Cover:
 - `version` and network status are demoted to background work
 - `App.tsx` owns websocket connection lifecycle
 - child components no longer need to call `ws.connect()`
+- all app bootstrap-oriented tests stop treating `/api/sessions` as a startup prerequisite
 
 **Step 2: Run the tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/App.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/App.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/App.lazy-views.test.tsx test/unit/client/components/App.mobile.test.tsx test/unit/client/components/App.mobile-landscape.test.tsx test/unit/client/components/App.swipe-sidebar.test.tsx test/unit/client/components/App.swipe-tabs.test.tsx test/unit/client/components/App.sidebar-resize.test.tsx
 ```
 
 Expected: FAIL because startup is still a waterfall and connection ownership is fragmented.
@@ -689,7 +709,7 @@ Shell bootstrap must finish before focused-pane hydration and websocket connect 
 **Step 4: Run the tests again**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/App.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/App.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/App.lazy-views.test.tsx test/unit/client/components/App.mobile.test.tsx test/unit/client/components/App.mobile-landscape.test.tsx test/unit/client/components/App.swipe-sidebar.test.tsx test/unit/client/components/App.swipe-tabs.test.tsx test/unit/client/components/App.sidebar-resize.test.tsx
 ```
 
 Expected: still FAIL.
@@ -697,7 +717,7 @@ Expected: still FAIL.
 **Step 5: Commit**
 
 ```bash
-git add test/unit/client/components/App.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx
+git add test/unit/client/components/App.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/App.lazy-views.test.tsx test/unit/client/components/App.mobile.test.tsx test/unit/client/components/App.mobile-landscape.test.tsx test/unit/client/components/App.swipe-sidebar.test.tsx test/unit/client/components/App.swipe-tabs.test.tsx test/unit/client/components/App.sidebar-resize.test.tsx
 git commit -m "test(app): define single-owner websocket bootstrap flow"
 ```
 
@@ -736,15 +756,19 @@ await wsReadyPromise
 
 Run `GET /api/version` and network status in the background after shell bootstrap; do not let them wait on websocket `ready`, and do not let websocket `ready` gate focused-pane paint. Let sidebar/history, terminal viewport, and agent timeline fetch through their own read-model requests based on what is actually visible, with the focused pane dispatched first in the `critical` lane and secondary on-screen surfaces in the `visible` lane.
 
-**Step 4: Run the tests to verify pass**
+**Step 4: Remove bootstrap-time `/api/sessions` assumptions from the remaining App surfaces**
+
+`App.lazy-views`, mobile, swipe, and resize paths must read the new bootstrap contract and visible-surface hydration flow instead of a preloaded sessions snapshot.
+
+**Step 5: Run the tests to verify pass**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/App.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/App.test.tsx test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/App.lazy-views.test.tsx test/unit/client/components/App.mobile.test.tsx test/unit/client/components/App.mobile-landscape.test.tsx test/unit/client/components/App.swipe-sidebar.test.tsx test/unit/client/components/App.swipe-tabs.test.tsx test/unit/client/components/App.sidebar-resize.test.tsx
 ```
 
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
 git add src/App.tsx src/components/Sidebar.tsx src/components/OverviewView.tsx src/components/BackgroundSessions.tsx src/components/SessionView.tsx src/components/TerminalView.tsx src/store/codingCliThunks.ts
@@ -938,6 +962,7 @@ git commit -m "feat(sessions): serve session-directory windows and revision inva
 - Modify: `test/unit/client/sessionsSlice.pagination.test.ts`
 - Modify: `test/unit/client/store/selectors/sidebarSelectors.test.ts`
 - Modify: `test/unit/client/store/selectors/sidebarSelectors.visibility.test.ts`
+- Create: `test/unit/client/store/sessionsThunks.test.ts`
 
 **Step 1: Write the failing tests**
 
@@ -945,11 +970,12 @@ Cover:
 - state stores query window data instead of `ProjectGroup[]`
 - invalidation refreshes the visible window instead of merging snapshots
 - selectors annotate visible items without reconstructing full project trees
+- store-owned thunks own fetch, cursor, abort, and revision refresh policy instead of leaf components
 
 **Step 2: Run the tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts test/unit/client/store/selectors/sidebarSelectors.test.ts test/unit/client/store/selectors/sidebarSelectors.visibility.test.ts
+NODE_ENV=test npx vitest run test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts test/unit/client/store/selectors/sidebarSelectors.test.ts test/unit/client/store/selectors/sidebarSelectors.visibility.test.ts test/unit/client/store/sessionsThunks.test.ts
 ```
 
 Expected: FAIL because the slice and selectors still assume full snapshots.
@@ -961,7 +987,7 @@ Keep tests for tab pinning and visibility filters on the visible window only.
 **Step 4: Run the tests again**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts test/unit/client/store/selectors/sidebarSelectors.test.ts test/unit/client/store/selectors/sidebarSelectors.visibility.test.ts
+NODE_ENV=test npx vitest run test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts test/unit/client/store/selectors/sidebarSelectors.test.ts test/unit/client/store/selectors/sidebarSelectors.visibility.test.ts test/unit/client/store/sessionsThunks.test.ts
 ```
 
 Expected: still FAIL.
@@ -969,7 +995,7 @@ Expected: still FAIL.
 **Step 5: Commit**
 
 ```bash
-git add test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts test/unit/client/store/selectors/sidebarSelectors.test.ts test/unit/client/store/selectors/sidebarSelectors.visibility.test.ts
+git add test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts test/unit/client/store/selectors/sidebarSelectors.test.ts test/unit/client/store/selectors/sidebarSelectors.visibility.test.ts test/unit/client/store/sessionsThunks.test.ts
 git commit -m "test(client): define visible-window sessions state"
 ```
 
@@ -980,6 +1006,7 @@ git commit -m "test(client): define visible-window sessions state"
 **Files:**
 - Modify: `src/store/sessionsSlice.ts`
 - Modify: `src/store/selectors/sidebarSelectors.ts`
+- Create: `src/store/sessionsThunks.ts`
 
 **Step 1: Replace snapshot state with query-window state**
 
@@ -1000,22 +1027,32 @@ type SessionsState = {
 
 Delete chunk-buffer assumptions and snapshot patch application from the slice.
 
-**Step 3: Keep selectors narrow**
+**Step 3: Move fetch orchestration into store thunks**
+
+`src/store/sessionsThunks.ts` should own:
+- initial visible-window fetch
+- load-more
+- refresh-on-revision
+- request abort wiring through `AbortSignal`
+
+Components should dispatch these thunks and stop owning transport details.
+
+**Step 4: Keep selectors narrow**
 
 Selectors may annotate and locally pin already-fetched visible items, but must not perform search or deep pagination.
 
-**Step 4: Run the tests to verify pass**
+**Step 5: Run the tests to verify pass**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts test/unit/client/store/selectors/sidebarSelectors.test.ts test/unit/client/store/selectors/sidebarSelectors.visibility.test.ts
+NODE_ENV=test npx vitest run test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts test/unit/client/store/selectors/sidebarSelectors.test.ts test/unit/client/store/selectors/sidebarSelectors.visibility.test.ts test/unit/client/store/sessionsThunks.test.ts
 ```
 
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
-git add src/store/sessionsSlice.ts src/store/selectors/sidebarSelectors.ts
+git add src/store/sessionsSlice.ts src/store/selectors/sidebarSelectors.ts src/store/sessionsThunks.ts
 git commit -m "refactor(client): store session directory windows instead of snapshots"
 ```
 
@@ -1025,6 +1062,7 @@ git commit -m "refactor(client): store session directory windows instead of snap
 
 **Files:**
 - Modify: `test/unit/client/components/Sidebar.test.tsx`
+- Modify: `test/unit/client/components/Sidebar.mobile.test.tsx`
 - Modify: `test/unit/client/components/Sidebar.render-stability.test.tsx`
 - Modify: `test/unit/client/components/HistoryView.a11y.test.tsx`
 - Modify: `test/unit/client/components/HistoryView.mobile.test.tsx`
@@ -1041,11 +1079,12 @@ Cover:
 - `sessions.changed` triggers a bounded refresh of the active window
 - `HistoryView` keeps only UI expansion state locally
 - rename/archive/delete actions refresh only the active directory window and never call `GET /api/sessions`
+- sidebar and history views dispatch store intents instead of owning fetch choreography directly
 
 **Step 2: Run the tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.mobile.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
 ```
 
 Expected: FAIL because both components still derive from local snapshots.
@@ -1057,7 +1096,7 @@ The transport rewrite must not degrade discoverability or keyboard access.
 **Step 4: Run the tests again**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.mobile.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
 ```
 
 Expected: still FAIL.
@@ -1065,7 +1104,7 @@ Expected: still FAIL.
 **Step 5: Commit**
 
 ```bash
-git add test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
+git add test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.mobile.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
 git commit -m "test(ui): define server-driven session browsing flow"
 ```
 
@@ -1078,31 +1117,36 @@ git commit -m "test(ui): define server-driven session browsing flow"
 - Modify: `src/components/HistoryView.tsx`
 - Modify: `src/components/context-menu/ContextMenuProvider.tsx`
 - Modify: `src/App.tsx`
+- Modify: `src/store/sessionsThunks.ts`
 
-**Step 1: Move session search, paging, and mutation refresh to HTTP read models**
+**Step 1: Move session search, paging, and mutation refresh to store-owned HTTP read models**
 
 Use `priority=visible` for active searches and `priority=background` for load-more.
 
-**Step 2: Add abortable request ownership**
+**Step 2: Keep components thin**
+
+`Sidebar.tsx`, `HistoryView.tsx`, and `ContextMenuProvider.tsx` should dispatch session-directory intents and render selector output; they must not build request URLs or own revision reconciliation.
+
+**Step 3: Add abortable request ownership**
 
 Each active query gets its own `AbortController`. Session rename/archive/delete flows must invalidate or refetch only the active window rather than calling `GET /api/sessions`.
 
-**Step 3: Keep only small local UI state**
+**Step 4: Keep only small local UI state**
 
 Local state may cover search box text, project expansion, and selected item; heavy query results stay server-authored.
 
-**Step 4: Run the tests to verify pass**
+**Step 5: Run the tests to verify pass**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.mobile.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/HistoryView.mobile.test.tsx test/unit/client/components/ContextMenuProvider.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/refresh-context-menu-flow.test.tsx
 ```
 
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
-git add src/components/Sidebar.tsx src/components/HistoryView.tsx src/components/context-menu/ContextMenuProvider.tsx src/App.tsx
+git add src/components/Sidebar.tsx src/components/HistoryView.tsx src/components/context-menu/ContextMenuProvider.tsx src/App.tsx src/store/sessionsThunks.ts
 git commit -m "refactor(history): use server-owned session query windows"
 ```
 
@@ -1292,6 +1336,7 @@ git commit -m "feat(agent-chat): serve timelines and snapshot-based attach"
 - Modify: `test/unit/client/lib/sdk-message-handler.session-lost.test.ts`
 - Modify: `test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx`
 - Modify: `test/unit/client/ws-client-sdk.test.ts`
+- Create: `test/unit/client/store/agentChatThunks.test.ts`
 
 **Step 1: Write the failing tests**
 
@@ -1301,11 +1346,12 @@ Cover:
 - switching sessions aborts stale timeline fetches
 - session loss still triggers immediate recovery handling
 - `ws-client` dispatches snapshot/live events without replay-history fallback
+- store-owned thunks own timeline/body fetch cancellation instead of `AgentChatView` doing transport choreography inline
 
 **Step 2: Run the tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/ws-client-sdk.test.ts
+NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/ws-client-sdk.test.ts test/unit/client/store/agentChatThunks.test.ts
 ```
 
 Expected: FAIL because the client still expects replay arrays.
@@ -1317,7 +1363,7 @@ Collapsed turns must fetch bodies only when opened.
 **Step 4: Run the tests again**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/ws-client-sdk.test.ts
+NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/ws-client-sdk.test.ts test/unit/client/store/agentChatThunks.test.ts
 ```
 
 Expected: still FAIL.
@@ -1325,7 +1371,7 @@ Expected: still FAIL.
 **Step 5: Commit**
 
 ```bash
-git add test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/ws-client-sdk.test.ts
+git add test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/ws-client-sdk.test.ts test/unit/client/store/agentChatThunks.test.ts
 git commit -m "test(agent-chat): define visible-first timeline client state"
 ```
 
@@ -1339,6 +1385,7 @@ git commit -m "test(agent-chat): define visible-first timeline client state"
 - Modify: `src/lib/sdk-message-handler.ts`
 - Modify: `src/components/agent-chat/AgentChatView.tsx`
 - Modify: `src/components/agent-chat/CollapsedTurn.tsx`
+- Create: `src/store/agentChatThunks.ts`
 
 **Step 1: Replace replay-based state**
 
@@ -1358,22 +1405,32 @@ type ChatSessionState = {
 
 It should seed metadata and live status without loading historical bodies.
 
-**Step 3: Fetch older pages and turn bodies only on scroll or expand**
+**Step 3: Move HTTP timeline/body fetches into store thunks**
+
+`src/store/agentChatThunks.ts` should own:
+- initial timeline page fetch for the visible session
+- older-page fetches
+- on-demand turn-body hydration
+- abort-on-session-switch behavior
+
+`AgentChatView.tsx` should dispatch intents and render selector state rather than managing request lifecycle directly.
+
+**Step 4: Fetch older pages and turn bodies only on scroll or expand**
 
 Abort stale requests on session switch.
 
-**Step 4: Run the tests to verify pass**
+**Step 5: Run the tests to verify pass**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/store/agentChatThunks.test.ts
 ```
 
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
-git add src/store/agentChatTypes.ts src/store/agentChatSlice.ts src/lib/sdk-message-handler.ts src/components/agent-chat/AgentChatView.tsx src/components/agent-chat/CollapsedTurn.tsx
+git add src/store/agentChatTypes.ts src/store/agentChatSlice.ts src/lib/sdk-message-handler.ts src/components/agent-chat/AgentChatView.tsx src/components/agent-chat/CollapsedTurn.tsx src/store/agentChatThunks.ts
 git commit -m "refactor(agent-chat): hydrate visible turns instead of replaying history"
 ```
 
@@ -1649,6 +1706,10 @@ git commit -m "refactor(terminal): paint viewport before replay and search serve
 - Modify: `test/unit/server/ws-chunking.test.ts`
 - Modify: `test/server/ws-sessions-patch.test.ts`
 - Modify: `test/unit/server/sessions-router-pagination.test.ts`
+- Modify: `test/unit/cli/http.test.ts`
+- Modify: `test/unit/cli/commands.test.ts`
+- Create: `test/integration/session-directory-e2e.test.ts`
+- Delete: `test/integration/session-search-e2e.test.ts`
 
 **Step 1: Write the failing tests**
 
@@ -1657,11 +1718,13 @@ Cover:
 - session sync emits revisions only
 - websocket chunking code is no longer used
 - no route test treats `/api/sessions/search` as the authoritative sidebar/history contract
+- CLI list/search commands no longer call legacy session snapshot routes
 
 **Step 2: Run the tests to verify failure**
 
 ```bash
 npm run test:server -- test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts test/unit/server/sessions-sync/service.test.ts test/unit/server/ws-chunking.test.ts test/server/ws-sessions-patch.test.ts test/unit/server/sessions-router-pagination.test.ts
+NODE_ENV=test npx vitest run test/unit/cli/http.test.ts test/unit/cli/commands.test.ts test/integration/session-directory-e2e.test.ts
 ```
 
 Expected: FAIL because the legacy paths still exist.
@@ -1674,6 +1737,7 @@ Make the tests fail if old chunking helpers or snapshot broadcasts are reintrodu
 
 ```bash
 npm run test:server -- test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts test/unit/server/sessions-sync/service.test.ts test/unit/server/ws-chunking.test.ts test/server/ws-sessions-patch.test.ts test/unit/server/sessions-router-pagination.test.ts
+NODE_ENV=test npx vitest run test/unit/cli/http.test.ts test/unit/cli/commands.test.ts test/integration/session-directory-e2e.test.ts
 ```
 
 Expected: still FAIL.
@@ -1681,7 +1745,8 @@ Expected: still FAIL.
 **Step 5: Commit**
 
 ```bash
-git add test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts test/unit/server/sessions-sync/service.test.ts test/unit/server/ws-chunking.test.ts test/server/ws-sessions-patch.test.ts test/unit/server/sessions-router-pagination.test.ts
+git add test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts test/unit/server/sessions-sync/service.test.ts test/unit/server/ws-chunking.test.ts test/server/ws-sessions-patch.test.ts test/unit/server/sessions-router-pagination.test.ts test/unit/cli/http.test.ts test/unit/cli/commands.test.ts test/integration/session-directory-e2e.test.ts
+git rm test/integration/session-search-e2e.test.ts
 git commit -m "test(transport): forbid legacy bulk websocket flows"
 ```
 
@@ -1692,6 +1757,7 @@ git commit -m "test(transport): forbid legacy bulk websocket flows"
 **Files:**
 - Modify: `server/ws-handler.ts`
 - Modify: `src/App.tsx`
+- Modify: `server/cli/index.ts`
 - Delete: `server/ws-chunking.ts`
 - Delete: `server/routes/sessions.ts`
 - Modify: `server/session-pagination.ts`
@@ -1709,22 +1775,27 @@ Remove:
 
 Delete `server/ws-chunking.ts` and the duplicate unused `server/routes/sessions.ts` module. Remove `/api/sessions/search` if no runtime callers remain. Reduce `server/session-pagination.ts` to only what still supports HTTP read-model cursoring, or delete the dead parts if nothing remains.
 
-**Step 3: Simplify client startup and message handling**
+**Step 3: Carry the CLI onto the new session-directory contract**
+
+`server/cli/index.ts` must use the server-owned directory/search routes for `list-sessions` and `search-sessions` so the legacy endpoints can actually die.
+
+**Step 4: Simplify client startup and message handling**
 
 `src/App.tsx` must no longer buffer chunked session snapshots or reconcile them after connect.
 
-**Step 4: Run the tests to verify pass**
+**Step 5: Run the tests to verify pass**
 
 ```bash
 npm run test:server -- test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts test/unit/server/sessions-sync/service.test.ts test/unit/server/ws-chunking.test.ts test/server/ws-sessions-patch.test.ts test/unit/server/sessions-router-pagination.test.ts
+NODE_ENV=test npx vitest run test/unit/cli/http.test.ts test/unit/cli/commands.test.ts test/integration/session-directory-e2e.test.ts
 ```
 
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
-git add server/ws-handler.ts src/App.tsx server/session-pagination.ts
+git add server/ws-handler.ts src/App.tsx server/cli/index.ts server/session-pagination.ts
 git rm server/ws-chunking.ts server/routes/sessions.ts
 git commit -m "refactor(transport): delete legacy bulk websocket architecture"
 ```
@@ -1736,6 +1807,7 @@ git commit -m "refactor(transport): delete legacy bulk websocket architecture"
 **Files:**
 - Create: `test/e2e/slow-network-end-to-end.test.tsx`
 - Modify: `test/e2e/agent-chat-polish-flow.test.tsx`
+- Modify: `test/e2e/agent-cli-flow.test.ts`
 - Modify: `test/e2e/terminal-search-flow.test.tsx`
 - Modify: `test/e2e/sidebar-click-opens-pane.test.tsx`
 - Modify: `test/e2e/auth-required-bootstrap-flow.test.tsx`
@@ -1753,11 +1825,12 @@ Cover:
 - background work does not delay terminal input
 - focused-pane `critical` requests complete before queued `visible` and `background` work
 - auth-required startup still renders the login path before any protected bootstrap payload is consumed
+- CLI session discovery/search still works over the new server-owned directory/search contract
 
 **Step 2: Run the tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/e2e/slow-network-end-to-end.test.tsx test/e2e/agent-chat-polish-flow.test.tsx test/e2e/terminal-search-flow.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/auth-required-bootstrap-flow.test.tsx test/unit/server/perf-logger.test.ts test/unit/client/lib/perf-logger.test.ts
+NODE_ENV=test npx vitest run test/e2e/slow-network-end-to-end.test.tsx test/e2e/agent-chat-polish-flow.test.tsx test/e2e/agent-cli-flow.test.ts test/e2e/terminal-search-flow.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/auth-required-bootstrap-flow.test.tsx test/unit/server/perf-logger.test.ts test/unit/client/lib/perf-logger.test.ts
 ```
 
 Expected: FAIL until instrumentation and the full cutover are in place.
@@ -1769,7 +1842,7 @@ Do not settle for generic "faster" checks.
 **Step 4: Run the tests again**
 
 ```bash
-NODE_ENV=test npx vitest run test/e2e/slow-network-end-to-end.test.tsx test/e2e/agent-chat-polish-flow.test.tsx test/e2e/terminal-search-flow.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/auth-required-bootstrap-flow.test.tsx test/unit/server/perf-logger.test.ts test/unit/client/lib/perf-logger.test.ts
+NODE_ENV=test npx vitest run test/e2e/slow-network-end-to-end.test.tsx test/e2e/agent-chat-polish-flow.test.tsx test/e2e/agent-cli-flow.test.ts test/e2e/terminal-search-flow.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/auth-required-bootstrap-flow.test.tsx test/unit/server/perf-logger.test.ts test/unit/client/lib/perf-logger.test.ts
 ```
 
 Expected: still FAIL.
@@ -1777,7 +1850,7 @@ Expected: still FAIL.
 **Step 5: Commit**
 
 ```bash
-git add test/e2e/slow-network-end-to-end.test.tsx test/e2e/agent-chat-polish-flow.test.tsx test/e2e/terminal-search-flow.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/auth-required-bootstrap-flow.test.tsx test/unit/server/perf-logger.test.ts test/unit/client/lib/perf-logger.test.ts
+git add test/e2e/slow-network-end-to-end.test.tsx test/e2e/agent-chat-polish-flow.test.tsx test/e2e/agent-cli-flow.test.ts test/e2e/terminal-search-flow.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/auth-required-bootstrap-flow.test.tsx test/unit/server/perf-logger.test.ts test/unit/client/lib/perf-logger.test.ts
 git commit -m "test(perf): define slow-network architecture regressions"
 ```
 
