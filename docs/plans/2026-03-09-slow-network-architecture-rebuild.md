@@ -1,109 +1,139 @@
 # Slow-Network Architecture Rebuild Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task. Use `@trycycle-executing` for execution handoff.
 
-**Goal:** Replace Freshell's client-heavy, bulk-data transport with a server-authoritative, viewport-first architecture that remains responsive on slow links by sending only immediately visible, latency-sensitive data over WebSocket and paging/searching everything else on demand.
+**Goal:** Replace Freshell's client-heavy, bulk-replay transport with a server-authoritative, viewport-first architecture that stays responsive on slow links by shipping only visible, latency-sensitive state immediately and paging everything else on demand.
 
-**Architecture:** Hard-cut to WebSocket protocol v4. The realtime socket carries only small, latency-sensitive messages: terminal live output after a viewport snapshot, terminal input, attach/detach lifecycle, SDK live deltas, status, permissions, questions, and invalidation hints. All bulk data moves to server-authored HTTP read models: one bootstrap document, one session directory query surface, one agent timeline query surface, and one terminal viewport/scrollback/search surface. The server owns shaping, sorting, summarizing, searching, and pagination; the client holds only the current visible windows and cursors.
+**Architecture:** Hard-cut to WebSocket protocol v4 with one responsibility: realtime delivery of small, latency-sensitive events. Move bulky state onto explicit HTTP read models that match UI needs directly: one bootstrap document, one session directory surface, one agent timeline surface, and one terminal viewport/search surface. Back those read models with incremental server-side indices and mirrors plus a visible-vs-background work scheduler so visible state, terminal input, and live deltas cannot be starved by offscreen fetches.
 
-**Tech Stack:** Node.js, Express, `ws`, React 18, Redux Toolkit, TypeScript, Zod, Vitest, xterm, `@xterm/headless`, `@xterm/addon-serialize`.
+**Tech Stack:** Node.js, Express, `ws`, React 18, Redux Toolkit, TypeScript, Zod, Vitest, existing `session-scanner`/`session-search` infrastructure, existing `terminal-stream/broker`, `xterm`, `@xterm/headless`, `@xterm/addon-serialize`.
 
 ---
 
 ## Strategy Gate
 
-The current system already has point fixes for chunking, replay, and pagination, but those fixes preserve the wrong architecture:
+The real problem is not "chunk better." The real problem is that WebSocket is still carrying read models: large session snapshots, full SDK histories, and replay-oriented terminal restore behavior. That architecture guarantees that slow-link pain comes back in new forms even if individual payloads get smaller.
 
-1. `src/App.tsx` still bootstraps with multiple HTTP requests plus a socket snapshot path, then buffers `sessions.updated` chunks in the browser.
-2. `server/ws-handler.ts` still uses WebSocket as a bulk transport for sessions and SDK history, which means low-priority payloads can occupy the same queue as high-priority terminal input/output and attach lifecycle.
-3. `src/store/sessionsSlice.ts`, `src/components/Sidebar.tsx`, and `src/components/HistoryView.tsx` still make the browser own too much session shaping, filtering, and merge behavior.
-4. `server/ws-handler.ts` + `src/lib/sdk-message-handler.ts` + `src/store/agentChatSlice.ts` still replay full `sdk.history` arrays into Redux on attach/reconnect.
-5. `src/components/TerminalView.tsx` still uses client-side xterm search against whatever backlog happened to arrive, which is the opposite of slow-link design.
+The simplest architecture that directly lands the user's requested end state is:
 
-Do not preserve that model. The correct end state is:
+1. WebSocket becomes a realtime lane only.
+2. The server owns shaping, searching, summarizing, pagination, and prioritization.
+3. The client stores only visible windows plus cursors, not full histories.
+4. Offscreen data is fetched later, cancelled when stale, and never replayed before visible state.
 
-1. WebSocket is a realtime lane only.
-2. All bulky data is server-paginated and explicitly requested.
-3. The server exposes read models that match UI needs directly.
-4. Reconnect restores what the user can see now, not the full historical transcript first.
+Do not preserve the old model behind compatibility shims. The old socket bulk paths are the defect. The user explicitly asked for a real rearchitecture and authorized the extra planning depth, so this plan chooses the direct cutover instead of an incremental "stabilize first" migration.
 
-## Hard-Cutover Rules
+## Acceptance Criteria
 
-1. Bump `WS_PROTOCOL_VERSION` from `3` to `4`.
-2. Remove v3 bulk session transport from the socket for v4 clients:
-   - no `sessions.updated`
-   - no `sessions.page`
-   - no `sessions.patch`
-3. Remove `sdk.history` replay from `sdk.create` and `sdk.attach` in v4.
-4. Bootstrap uses one HTTP request: `GET /api/bootstrap`.
-5. Title search is no longer client-side; all session search tiers are server-side.
-6. Terminal search is no longer client-side xterm addon search; results come from the server.
-7. Realtime socket messages must stay small. Any payload that would routinely exceed the realtime budget belongs on HTTP instead.
-8. No backward-compatibility shim after the cutover. Old clients fail fast with `PROTOCOL_MISMATCH`.
+1. App startup uses exactly one HTTP bootstrap document before opening the realtime socket.
+2. WebSocket v4 carries no bulk session directory payloads, no socket pagination for sessions, and no `sdk.history` arrays.
+3. Reconnect restores what the user can see now:
+   - terminal: current screen first, then optional older scrollback/search on demand
+   - agent chat: recent turns first, older turn bodies later or on expand
+   - session views: current query window only
+4. Search is server-side for session title, session messages, session full text, and terminal content.
+5. Background fetches are abortable and do not block terminal input, terminal live output, or visible-window fetches.
+6. Server read models are incremental and bounded; they do not rebuild full client-shaped payloads on every request.
+7. Realtime message size is explicitly budgeted and enforced.
+8. The full regression suite proves slow/flaky-network behavior, not just unit-level correctness.
+
+## End-State Architecture
+
+### Transport Lanes
+
+1. **Realtime WebSocket lane**
+   - `ready`
+   - terminal lifecycle and live output
+   - lightweight SDK live events, status, permissions, questions
+   - `sessions.changed` invalidation
+   - terminal metadata deltas
+   - errors and extension lifecycle
+2. **Visible HTTP lane**
+   - `/api/bootstrap`
+   - `/api/session-directory`
+   - `/api/agent-sessions/:sessionId/timeline`
+   - `/api/agent-sessions/:sessionId/turns/:turnId`
+   - `/api/terminals/:terminalId/viewport`
+3. **Background HTTP lane**
+   - older session pages
+   - older agent timeline pages
+   - terminal scrollback pages
+   - terminal search pages
+
+### Server Authority
+
+1. Session directory data comes from the server's indexed session inventory, not from client-side filtering of `ProjectGroup[]`.
+2. Agent chat lives on the server as turns, not only as flat message arrays.
+3. Terminal restore/search uses a server-side mirror of terminal state, not client-side search across whatever backlog happened to arrive.
+4. The client may cache visible windows briefly, but the server is authoritative for ordering, filtering, snippets, summaries, cursors, and revision numbers.
+
+### Priority and Cancellation
+
+1. Introduce a server `ReadModelWorkScheduler` with reserved visible capacity and capped background capacity.
+2. Visible requests always outrank background requests.
+3. Background requests must listen for request abort and stop work when the user changes query/view.
+4. Client components use `AbortController` plus generation checks so stale background responses never overwrite current visible state.
+
+### Direct Cutover Rules
+
+1. Bump `WS_PROTOCOL_VERSION` to `4`.
+2. Reject older clients with close code `4010` and `PROTOCOL_MISMATCH`.
+3. Remove runtime use of:
+   - `sessions.updated`
+   - `sessions.page`
+   - `sessions.patch`
+   - `sessions.fetch`
+   - `sdk.history`
+4. Keep no backward-compatibility shim after the cutover. Old clients fail fast.
 
 ## System Invariants
 
-1. Terminal input must never wait behind session snapshots, chat history, or search results.
-2. Attach/reconnect must restore a visible screen or visible recent turns first, never replay an entire historical backlog first.
-3. The client may cache visible windows, but the server is authoritative for ordering, filtering, cursoring, and search.
-4. Offscreen data must be paged, cancellable, and fetched only when the user asks for it or scrolls into it.
-5. Slow-link correctness beats local cleverness: if a view needs reconciliation, refetch the current server window instead of rebuilding large client-side state machines.
+1. Terminal input must never wait behind session queries, history hydration, or search.
+2. Any payload that routinely exceeds the realtime budget belongs on HTTP, not WebSocket.
+3. Offscreen data is paged and fetched only after visible state is rendered or when the user explicitly asks for it.
+4. Client restore logic must never count upward through old history before showing the current visible state.
+5. Search, snippets, summaries, and title matching are server-side concerns.
+6. When state becomes uncertain, refetch the active server window instead of rebuilding large client-side reconciliation logic.
 
-## Normative Read Models
+## Normative Contracts
 
-### Bootstrap
+### Realtime Budget
 
 ```ts
-type BootstrapResponse = {
-  settings: AppSettings
-  platform: {
-    platform: string
-    availableClis: Record<string, boolean>
-    hostName?: string
-    featureFlags?: Record<string, boolean>
-  }
-  version: VersionInfo
-  network: NetworkStatus
-  sessionDirectory: SessionDirectoryPage
-  terminalMeta: TerminalMetaRecord[]
-  perfLogging: boolean
-  configFallback?: {
-    reason: 'PARSE_ERROR' | 'VERSION_MISMATCH' | 'READ_ERROR' | 'ENOENT'
-    backupExists: boolean
-  }
-}
+const MAX_REALTIME_MESSAGE_BYTES = 16 * 1024
 ```
+
+If a message would routinely exceed that size, redesign the transport. Do not chunk it onto the realtime socket.
 
 ### Session Directory
 
 ```ts
+type SessionDirectoryQuery = {
+  text: string
+  tier: 'title' | 'userMessages' | 'fullText'
+  view: 'sidebar' | 'history'
+}
+
 type SessionDirectoryItem = {
-  key: string // `${provider}:${sessionId}`
+  key: string
   provider: CodingCliProviderName
   sessionId: string
   projectPath: string
   projectName: string
-  projectColor?: string
   title: string
-  subtitle?: string
   summary?: string
-  cwd?: string
+  snippet?: string
   updatedAt: number
   createdAt?: number
   archived: boolean
-  sessionType?: string
   isRunning: boolean
   runningTerminalId?: string
-  snippet?: string
+  cwd?: string
 }
 
 type SessionDirectoryPage = {
   revision: number
-  query: {
-    text: string
-    tier: 'title' | 'userMessages' | 'fullText'
-    view: 'sidebar' | 'history'
-  }
+  query: SessionDirectoryQuery
   items: SessionDirectoryItem[]
   nextCursor?: string
   totalItems: number
@@ -179,14 +209,15 @@ type TerminalSearchResponse = {
 
 ## Heavy Test Matrix
 
-Every task below must add targeted red/green tests. The final cutover must also pass all of the following:
+The execution agent must add red-green coverage at every task, then run the full matrix below before declaring the work done:
 
-1. Protocol tests proving v4 rejects old clients and never emits legacy bulk history/session messages.
-2. Server unit tests for each read model service:
-   - session directory query/cursoring/search
-   - agent timeline turn materialization
-   - terminal viewport/scrollback/search generation
-3. Server integration tests for each HTTP surface:
+1. Protocol tests proving v4 rejects old clients and never emits legacy bulk messages.
+2. Server unit tests for:
+   - read-model scheduler priority and cancellation
+   - session directory cursoring and search
+   - agent timeline turn folding
+   - terminal mirror serialization/search correctness
+3. Server integration tests for:
    - `/api/bootstrap`
    - `/api/session-directory`
    - `/api/agent-sessions/:sessionId/timeline`
@@ -195,57 +226,56 @@ Every task below must add targeted red/green tests. The final cutover must also 
    - `/api/terminals/:terminalId/scrollback`
    - `/api/terminals/:terminalId/search`
 4. Client unit tests proving:
-   - `App` bootstraps from one HTTP document
-   - Sidebar/HistoryView no longer do local title filtering
-   - Agent chat no longer stores full history arrays on attach
-   - Terminal search uses server results, not `SearchAddon`
-5. E2E tests on mocked slow/flaky transport proving:
-   - startup becomes interactive before offscreen history loads
-   - reconnect restores latest visible state without historical playback
-   - terminal input remains responsive while background bulk fetches are in flight
-   - session search returns results without shipping full datasets to the client
-6. Full suite before merge:
+   - App bootstraps from one HTTP document
+   - Sidebar and HistoryView no longer do local title filtering
+   - agent chat no longer restores from full `sdk.history`
+   - terminal search no longer uses `SearchAddon`
+5. Slow-network e2e tests proving:
+   - startup becomes interactive before offscreen data loads
+   - terminal reconnect shows current screen without replaying entire history
+   - agent chat reload shows recent visible turns before older ones
+   - session search works without shipping the full dataset to the browser
+   - background bulk requests do not delay terminal input
+6. Final verification commands:
 
 ```bash
 npm run lint
-npm run typecheck
+npm run check
 npm test
-npm run build
+npm run verify
 ```
 
 ---
 
-### Task 1: Define WebSocket V4 As A Realtime-Only Transport
+### Task 1: Define WebSocket V4 As A Realtime-Only Contract
 
 **Files:**
 - Modify: `shared/ws-protocol.ts`
 - Modify: `server/ws-handler.ts`
 - Modify: `src/lib/ws-client.ts`
-- Test: `test/server/ws-protocol-v4.test.ts`
-- Test: `test/unit/client/lib/ws-client.v4.test.ts`
+- Test: `test/server/ws-protocol.test.ts`
+- Test: `test/unit/client/lib/ws-client-error-code.test.ts`
 
-**Step 1: Write failing protocol tests**
+**Step 1: Write the failing protocol tests**
 
 Add tests that require:
+- `hello.protocolVersion === 4`
+- v4 rejects older clients with close code `4010`
+- v4 server messages do not model `sessions.updated`, `sessions.page`, `sessions.patch`, or `sdk.history`
+- `sessions.changed` and `sdk.session.snapshot` exist in the v4 unions
 
-1. `hello.protocolVersion === 4`
-2. v4 server never emits `sessions.updated`, `sessions.page`, `sessions.patch`, or `sdk.history`
-3. `sdk.attach` returns a lightweight snapshot/status path only
-4. `sessions.changed` invalidation exists for v4
-5. protocol mismatch remains fatal with close code `4010`
-
-**Step 2: Run targeted tests to verify failure**
+**Step 2: Run tests to verify failure**
 
 ```bash
-npm run test:server -- test/server/ws-protocol-v4.test.ts
-NODE_ENV=test npx vitest run test/unit/client/lib/ws-client.v4.test.ts
+npm run test:server -- test/server/ws-protocol.test.ts
+NODE_ENV=test npx vitest run test/unit/client/lib/ws-client-error-code.test.ts
 ```
 
 Expected: FAIL because protocol v4 contracts do not exist yet.
 
 **Step 3: Implement the v4 contract**
 
-In `shared/ws-protocol.ts`:
+In `shared/ws-protocol.ts`, define the new primitives:
 
 ```ts
 export const WS_PROTOCOL_VERSION = 4 as const
@@ -262,93 +292,17 @@ export type SdkSessionSnapshotMessage = {
   cliSessionId?: string
   model?: string
   cwd?: string
-  tools?: Array<{ name: string }>
+  tools: Array<{ name: string }>
 }
 ```
 
-Update the server/client unions so v4 no longer models `sdk.history` or socket session snapshot paging as active transport behavior.
-
-In `src/lib/ws-client.ts`, send `protocolVersion: 4` and treat `4010` as fatal.
-
-In `server/ws-handler.ts`, reject non-v4 clients and stop emitting the legacy bulk session/history messages for v4 paths.
-
-**Step 4: Run targeted tests to verify pass**
-
-```bash
-npm run test:server -- test/server/ws-protocol-v4.test.ts
-NODE_ENV=test npx vitest run test/unit/client/lib/ws-client.v4.test.ts
-```
-
-Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-git add shared/ws-protocol.ts server/ws-handler.ts src/lib/ws-client.ts test/server/ws-protocol-v4.test.ts test/unit/client/lib/ws-client.v4.test.ts
-git commit -m "feat(protocol): make websocket v4 realtime-only"
-```
-
----
-
-### Task 2: Build The Server-Authored Session Directory Read Model
-
-**Files:**
-- Create: `server/session-directory/types.ts`
-- Create: `server/session-directory/service.ts`
-- Create: `server/session-directory/router.ts`
-- Modify: `server/index.ts`
-- Modify: `server/coding-cli/types.ts`
-- Modify: `server/sessions-router.ts`
-- Test: `test/unit/server/session-directory/service.test.ts`
-- Test: `test/integration/server/session-directory-router.test.ts`
-
-**Step 1: Write failing query/cursor/search tests**
-
-Cover:
-
-1. stable cursor ordering by recency + composite key
-2. server-side title search replacing client-side title filter
-3. `userMessages` and `fullText` search reuse the same server path
-4. running-terminal metadata is joined server-side
-5. result snippets are server-authored and bounded
-
-**Step 2: Run targeted server tests**
-
-```bash
-npm run test:server -- test/unit/server/session-directory/service.test.ts test/integration/server/session-directory-router.test.ts
-```
-
-Expected: FAIL because the directory read model and endpoint do not exist.
-
-**Step 3: Implement the read model and router**
-
-Create `server/session-directory/service.ts` with one entry point:
-
-```ts
-export function querySessionDirectory(input: {
-  projects: ProjectGroup[]
-  terminalMeta: TerminalMeta[]
-  query: { text: string; tier: 'title' | 'userMessages' | 'fullText'; view: 'sidebar' | 'history' }
-  cursor?: string
-  limit: number
-}): Promise<SessionDirectoryPage>
-```
-
-Rules:
-
-1. all searching lives on the server, including title search
-2. output items are flat, already sorted, and already joined with running-terminal state
-3. snippets are pre-trimmed server-side
-4. cursor parsing/validation lives here, not in the client
-
-Expose `GET /api/session-directory`.
-
-Keep `server/sessions-router.ts` only for rename/delete/session metadata mutation paths; stop treating it as the primary session list/query surface.
+In `src/lib/ws-client.ts`, always send `protocolVersion: 4` and treat `4010` as fatal. In `server/ws-handler.ts`, reject clients whose `hello.protocolVersion` does not match `4`.
 
 **Step 4: Run tests to verify pass**
 
 ```bash
-npm run test:server -- test/unit/server/session-directory/service.test.ts test/integration/server/session-directory-router.test.ts
+npm run test:server -- test/server/ws-protocol.test.ts
+NODE_ENV=test npx vitest run test/unit/client/lib/ws-client-error-code.test.ts
 ```
 
 Expected: PASS.
@@ -356,65 +310,195 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add server/session-directory/types.ts server/session-directory/service.ts server/session-directory/router.ts server/index.ts server/coding-cli/types.ts server/sessions-router.ts test/unit/server/session-directory/service.test.ts test/integration/server/session-directory-router.test.ts
+git add shared/ws-protocol.ts server/ws-handler.ts src/lib/ws-client.ts test/server/ws-protocol.test.ts test/unit/client/lib/ws-client-error-code.test.ts
+git commit -m "feat(protocol): define websocket v4 realtime-only contract"
+```
+
+---
+
+### Task 2: Add A Server Read-Model Scheduler With Visible And Background Lanes
+
+**Files:**
+- Create: `server/read-model/work-scheduler.ts`
+- Test: `test/unit/server/read-model/work-scheduler.test.ts`
+
+**Step 1: Write the failing scheduler tests**
+
+Cover:
+- visible jobs start before queued background jobs
+- background jobs are capped
+- aborted background jobs do not keep running
+- a long-running background job does not block a later visible job from starting
+
+**Step 2: Run tests to verify failure**
+
+```bash
+npm run test:server -- test/unit/server/read-model/work-scheduler.test.ts
+```
+
+Expected: FAIL because the scheduler does not exist.
+
+**Step 3: Implement the minimal scheduler**
+
+Create `server/read-model/work-scheduler.ts`:
+
+```ts
+export type ReadModelPriority = 'visible' | 'background'
+
+export class ReadModelWorkScheduler {
+  run<T>(
+    priority: ReadModelPriority,
+    job: (signal: AbortSignal) => Promise<T>,
+    options?: { signal?: AbortSignal }
+  ): Promise<T> {
+    // Reserve visible capacity and cap background work.
+  }
+}
+```
+
+Rules:
+- reserve at least one execution slot for visible work
+- allow at most one concurrent background job by default
+- drop queued background jobs immediately if the request aborts
+- expose cheap queue-depth metrics for logging/assertions
+
+**Step 4: Run tests to verify pass**
+
+```bash
+npm run test:server -- test/unit/server/read-model/work-scheduler.test.ts
+```
+
+Expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+git add server/read-model/work-scheduler.ts test/unit/server/read-model/work-scheduler.test.ts
+git commit -m "feat(server): add read-model scheduler for visible and background work"
+```
+
+---
+
+### Task 3: Build The Server Session Directory Read Model
+
+**Files:**
+- Create: `server/session-directory/types.ts`
+- Create: `server/session-directory/service.ts`
+- Modify: `server/session-search.ts`
+- Modify: `server/coding-cli/types.ts`
+- Test: `test/unit/server/session-directory/service.test.ts`
+
+**Step 1: Write the failing read-model tests**
+
+Cover:
+- stable ordering by `updatedAt desc` plus deterministic tiebreaker
+- title search is server-side
+- `userMessages` and `fullText` searches come back with bounded snippets
+- running terminal metadata is joined server-side
+- cursor parsing is deterministic and rejects invalid cursors
+
+**Step 2: Run tests to verify failure**
+
+```bash
+npm run test:server -- test/unit/server/session-directory/service.test.ts
+```
+
+Expected: FAIL because the read model does not exist.
+
+**Step 3: Implement the session directory service**
+
+Create `server/session-directory/service.ts` around the existing indexed project inventory:
+
+```ts
+export async function querySessionDirectory(input: {
+  projects: ProjectGroup[]
+  query: SessionDirectoryQuery
+  cursor?: string
+  limit: number
+  terminalMeta: TerminalMeta[]
+  priority: ReadModelPriority
+  signal?: AbortSignal
+}): Promise<SessionDirectoryPage> {
+  // Flatten, search, join terminal state, cursor, and trim snippets here.
+}
+```
+
+Implementation requirements:
+- reuse `server/session-search.ts` for message/full-text search instead of inventing a second search engine
+- keep title search here, not in the client
+- return already-sorted, already-joined flat items
+- bound snippets and page size on the server
+
+**Step 4: Run tests to verify pass**
+
+```bash
+npm run test:server -- test/unit/server/session-directory/service.test.ts
+```
+
+Expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+git add server/session-directory/types.ts server/session-directory/service.ts server/session-search.ts server/coding-cli/types.ts test/unit/server/session-directory/service.test.ts
 git commit -m "feat(server): add session directory read model"
 ```
 
 ---
 
-### Task 3: Replace Multi-Request Bootstrap With A Single Server Bootstrap Document
+### Task 4: Define Shared HTTP Contracts And A Single Bootstrap Document
 
 **Files:**
 - Create: `shared/http-contracts.ts`
 - Create: `server/bootstrap-router.ts`
 - Modify: `server/index.ts`
-- Modify: `src/lib/api.ts`
-- Modify: `src/App.tsx`
 - Test: `test/integration/server/bootstrap-router.test.ts`
-- Test: `test/unit/client/components/App.bootstrap.test.tsx`
 
-**Step 1: Write failing bootstrap tests**
+**Step 1: Write the failing bootstrap tests**
 
 Cover:
-
-1. `GET /api/bootstrap` returns settings, platform, version, network, session directory first page, terminal meta, perf logging, and config fallback
-2. `App` does one bootstrap HTTP request instead of separate settings/platform/version/sessions requests
-3. socket readiness no longer depends on an HTTP `/api/sessions?limit=100` race
+- `GET /api/bootstrap` returns settings, platform, version, network, first session directory page, terminal metadata, perf logging, and config fallback
+- bootstrap returns the session directory shape, not raw `ProjectGroup[]`
 
 **Step 2: Run tests to verify failure**
 
 ```bash
 npm run test:server -- test/integration/server/bootstrap-router.test.ts
-NODE_ENV=test npx vitest run test/unit/client/components/App.bootstrap.test.tsx
 ```
 
-Expected: FAIL because the bootstrap route and client cutover do not exist.
+Expected: FAIL because the route and shared contract do not exist.
 
-**Step 3: Implement the bootstrap aggregator**
+**Step 3: Implement the shared contract and router**
 
-Create `shared/http-contracts.ts` for shared REST response types and Zod schemas.
-
-Create `server/bootstrap-router.ts`:
+In `shared/http-contracts.ts` define:
 
 ```ts
-router.get('/bootstrap', async (_req, res) => {
-  res.json(await buildBootstrapResponse())
-})
+export type BootstrapResponse = {
+  settings: AppSettings
+  platform: {
+    platform: string
+    availableClis: Record<string, boolean>
+    hostName?: string
+    featureFlags?: Record<string, boolean>
+  }
+  version: VersionInfo
+  network: NetworkStatus
+  sessionDirectory: SessionDirectoryPage
+  terminalMeta: TerminalMeta[]
+  perfLogging: boolean
+  configFallback?: {
+    reason: 'PARSE_ERROR' | 'VERSION_MISMATCH' | 'READ_ERROR' | 'ENOENT'
+    backupExists: boolean
+  }
+}
 ```
 
-In `src/App.tsx`, replace the multi-request bootstrap sequence with:
-
-1. `GET /api/bootstrap`
-2. apply settings/platform/version/network/session directory/terminal meta from that one payload
-3. connect WebSocket
-
-Delete the browser-side chunked session bootstrap buffering path from startup; that path belongs to legacy socket snapshots and must not survive the cutover.
+Create `server/bootstrap-router.ts` and wire it from `server/index.ts`. Build the first session page by calling `querySessionDirectory(...)` with `priority: 'visible'`.
 
 **Step 4: Run tests to verify pass**
 
 ```bash
 npm run test:server -- test/integration/server/bootstrap-router.test.ts
-NODE_ENV=test npx vitest run test/unit/client/components/App.bootstrap.test.tsx
 ```
 
 Expected: PASS.
@@ -422,147 +506,54 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add shared/http-contracts.ts server/bootstrap-router.ts server/index.ts src/lib/api.ts src/App.tsx test/integration/server/bootstrap-router.test.ts test/unit/client/components/App.bootstrap.test.tsx
-git commit -m "feat(bootstrap): aggregate startup data server-side"
+git add shared/http-contracts.ts server/bootstrap-router.ts server/index.ts test/integration/server/bootstrap-router.test.ts
+git commit -m "feat(bootstrap): serve a single startup document"
 ```
 
 ---
 
-### Task 4: Rewire Sidebar And HistoryView To The Session Directory Query Surface
+### Task 5: Cut App Startup Over To One Bootstrap Request
 
 **Files:**
-- Modify: `src/store/sessionsSlice.ts`
-- Modify: `src/store/selectors/sidebarSelectors.ts`
-- Modify: `src/components/Sidebar.tsx`
-- Modify: `src/components/HistoryView.tsx`
-- Modify: `src/components/context-menu/ContextMenuProvider.tsx`
-- Modify: `src/App.tsx`
 - Modify: `src/lib/api.ts`
-- Test: `test/unit/client/components/Sidebar.test.tsx`
-- Test: `test/unit/client/components/HistoryView.a11y.test.tsx`
+- Modify: `src/App.tsx`
+- Test: `test/unit/client/components/App.ws-bootstrap.test.tsx`
 - Test: `test/unit/client/components/App.test.tsx`
-- Test: `test/e2e/sidebar-click-opens-pane.test.tsx`
 
-**Step 1: Write failing client tests**
-
-Cover:
-
-1. title search goes through `GET /api/session-directory`, not local filtering
-2. infinite scroll uses server cursors
-3. `sessions.changed` invalidation triggers a bounded refetch of the current query window
-4. `HistoryView` refresh uses the new query surface
-5. rename/delete still work without reintroducing the old raw-project bootstrap
-
-**Step 2: Run targeted client tests**
-
-```bash
-NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/App.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
-```
-
-Expected: FAIL because the UI still depends on raw `ProjectGroup[]` snapshots and local search.
-
-**Step 3: Implement the client cutover**
-
-In `src/store/sessionsSlice.ts`, replace bulk-project snapshot semantics with query-window state:
-
-```ts
-type SessionsState = {
-  query: { text: string; tier: 'title' | 'userMessages' | 'fullText'; view: 'sidebar' | 'history' }
-  items: SessionDirectoryItem[]
-  nextCursor?: string
-  totalItems: number
-  loading: boolean
-  loadingMore: boolean
-  revision?: number
-}
-```
-
-In `src/components/Sidebar.tsx` and `src/components/HistoryView.tsx`:
-
-1. fetch server pages via `searchSessionDirectory(...)`
-2. drop local title filtering
-3. preserve only UI-local concerns client-side: expansion state, selection state, scroll position
-
-In `src/App.tsx`, handle `sessions.changed` by refetching the active query window after a short debounce.
-
-**Step 4: Run targeted tests to verify pass**
-
-```bash
-NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/App.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
-```
-
-Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-git add src/store/sessionsSlice.ts src/store/selectors/sidebarSelectors.ts src/components/Sidebar.tsx src/components/HistoryView.tsx src/components/context-menu/ContextMenuProvider.tsx src/App.tsx src/lib/api.ts test/unit/client/components/Sidebar.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/unit/client/components/App.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
-git commit -m "refactor(client): use server session directory queries"
-```
-
----
-
-### Task 5: Materialize Agent Sessions As A Server Timeline With Summaries And Bodies
-
-**Files:**
-- Create: `server/agent-timeline/types.ts`
-- Create: `server/agent-timeline/service.ts`
-- Create: `server/agent-timeline/router.ts`
-- Modify: `server/sdk-bridge-types.ts`
-- Modify: `server/sdk-bridge.ts`
-- Modify: `server/session-history-loader.ts`
-- Modify: `server/index.ts`
-- Test: `test/unit/server/agent-timeline/service.test.ts`
-- Test: `test/integration/server/agent-timeline-router.test.ts`
-- Test: `test/server/ws-handler-sdk.test.ts`
-
-**Step 1: Write failing timeline tests**
+**Step 1: Write the failing startup tests**
 
 Cover:
+- App performs one bootstrap request instead of separate settings/platform/version/sessions requests
+- bootstrap data seeds session directory and terminal metadata
+- the app no longer depends on a websocket session snapshot race during startup
 
-1. SDK messages are grouped into stable turn records
-2. older turns are returned as summaries, not full bodies, by default
-3. recent turns are returned hydrated
-4. resumed sessions loaded from `.jsonl` are normalized into the same turn model
-5. timeline/body endpoints are cursorable and deterministic
-6. `sdk.attach` no longer requires `sdk.history`
-
-**Step 2: Run targeted tests**
+**Step 2: Run tests to verify failure**
 
 ```bash
-npm run test:server -- test/unit/server/agent-timeline/service.test.ts test/integration/server/agent-timeline-router.test.ts test/server/ws-handler-sdk.test.ts
+NODE_ENV=test npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/App.test.tsx
 ```
 
-Expected: FAIL because the server still stores plain message arrays and replays them wholesale.
+Expected: FAIL because `App.tsx` still performs a multi-request startup waterfall.
 
-**Step 3: Implement the timeline service**
+**Step 3: Implement the startup cutover**
 
-Extend `SdkSessionState` so the server stores turns, not only flat messages:
+In `src/lib/api.ts`, add `getBootstrap()`. In `src/App.tsx`:
 
 ```ts
-interface SdkSessionState {
-  ...
-  turns: AgentTurnRecord[]
-  timelineRevision: number
-}
+const bootstrap = await api.get<BootstrapResponse>('/api/bootstrap')
+dispatch(seedBootstrap(bootstrap))
+await ws.connect()
 ```
 
-Create `server/agent-timeline/service.ts` to:
-
-1. fold live SDK events into turns
-2. produce `AgentTimelinePage`
-3. return `AgentTurnBody`
-4. build summaries server-side so `CollapsedTurn` stops inventing them from locally replayed full messages
-
-Expose:
-
-1. `GET /api/agent-sessions/:sessionId/timeline`
-2. `GET /api/agent-sessions/:sessionId/turns/:turnId`
+Rules:
+- delete the separate `/api/settings`, `/api/platform`, `/api/version`, and `/api/sessions?limit=100` startup fetches
+- stop requesting terminal metadata separately during initial bootstrap
+- preserve auth-failure handling and websocket fatal-error handling
 
 **Step 4: Run tests to verify pass**
 
 ```bash
-npm run test:server -- test/unit/server/agent-timeline/service.test.ts test/integration/server/agent-timeline-router.test.ts test/server/ws-handler-sdk.test.ts
+NODE_ENV=test npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/App.test.tsx
 ```
 
 Expected: PASS.
@@ -570,16 +561,268 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add server/agent-timeline/types.ts server/agent-timeline/service.ts server/agent-timeline/router.ts server/sdk-bridge-types.ts server/sdk-bridge.ts server/session-history-loader.ts server/index.ts test/unit/server/agent-timeline/service.test.ts test/integration/server/agent-timeline-router.test.ts test/server/ws-handler-sdk.test.ts
-git commit -m "feat(agent-chat): add server timeline read model"
+git add src/lib/api.ts src/App.tsx test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/App.test.tsx
+git commit -m "refactor(app): bootstrap from one server-authored document"
 ```
 
 ---
 
-### Task 6: Remove Full `sdk.history` Replay And Make AgentChatView Viewport-First
+### Task 6: Expose Session Directory Queries Over HTTP And Store Query Windows Client-Side
 
 **Files:**
-- Modify: `server/ws-handler.ts`
+- Create: `server/session-directory/router.ts`
+- Modify: `server/index.ts`
+- Modify: `src/store/sessionsSlice.ts`
+- Modify: `src/lib/api.ts`
+- Test: `test/integration/server/session-search-api.test.ts`
+- Test: `test/unit/client/store/sessionsSlice.test.ts`
+- Test: `test/unit/client/sessionsSlice.pagination.test.ts`
+
+**Step 1: Write the failing session query tests**
+
+Cover:
+- `/api/session-directory` returns cursorable query windows
+- invalid cursor/query params are rejected server-side
+- client state stores only query windows, revision, and cursors
+- local title filtering is no longer part of the slice
+
+**Step 2: Run tests to verify failure**
+
+```bash
+npm run test:server -- test/integration/server/session-search-api.test.ts
+NODE_ENV=test npx vitest run test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts
+```
+
+Expected: FAIL because the new endpoint and query-window state do not exist.
+
+**Step 3: Implement the router and client state**
+
+Create `server/session-directory/router.ts`:
+
+```ts
+router.get('/session-directory', async (req, res) => {
+  const page = await querySessionDirectory({
+    ...parseDirectoryRequest(req),
+    priority: req.query.priority === 'background' ? 'background' : 'visible',
+    signal: requestAbortSignal(req),
+  })
+  res.json(page)
+})
+```
+
+Replace the slice shape in `src/store/sessionsSlice.ts` with:
+
+```ts
+type SessionsState = {
+  query: SessionDirectoryQuery
+  items: SessionDirectoryItem[]
+  nextCursor?: string
+  totalItems: number
+  revision?: number
+  loading: boolean
+  loadingMore: boolean
+}
+```
+
+**Step 4: Run tests to verify pass**
+
+```bash
+npm run test:server -- test/integration/server/session-search-api.test.ts
+NODE_ENV=test npx vitest run test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts
+```
+
+Expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+git add server/session-directory/router.ts server/index.ts src/store/sessionsSlice.ts src/lib/api.ts test/integration/server/session-search-api.test.ts test/unit/client/store/sessionsSlice.test.ts test/unit/client/sessionsSlice.pagination.test.ts
+git commit -m "feat(session-directory): expose query windows over http"
+```
+
+---
+
+### Task 7: Rewire Sidebar And HistoryView To Server Queries And Abortable Background Fetches
+
+**Files:**
+- Modify: `src/components/Sidebar.tsx`
+- Modify: `src/components/HistoryView.tsx`
+- Modify: `src/App.tsx`
+- Modify: `src/store/selectors/sidebarSelectors.ts`
+- Test: `test/unit/client/components/Sidebar.test.tsx`
+- Test: `test/unit/client/components/Sidebar.render-stability.test.tsx`
+- Test: `test/unit/client/components/HistoryView.a11y.test.tsx`
+- Test: `test/e2e/sidebar-click-opens-pane.test.tsx`
+
+**Step 1: Write the failing view tests**
+
+Cover:
+- search sends `/api/session-directory` requests instead of filtering in memory
+- scrolling loads more using the returned cursor
+- stale load-more/search requests are aborted when the query changes
+- `sessions.changed` invalidation causes a bounded refetch of the current visible window
+
+**Step 2: Run tests to verify failure**
+
+```bash
+NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
+```
+
+Expected: FAIL because the views still depend on local filtering and raw project snapshots.
+
+**Step 3: Implement the view cutover**
+
+In `Sidebar.tsx` and `HistoryView.tsx`:
+- fetch the first page with `priority=visible`
+- fetch older pages with `priority=background`
+- keep one `AbortController` per active query and cancel it before starting the next request
+- keep only expansion state, selection state, and scroll state locally
+
+In `src/App.tsx`, debounce `sessions.changed` and refetch only the active query window.
+
+**Step 4: Run tests to verify pass**
+
+```bash
+NODE_ENV=test npx vitest run test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
+```
+
+Expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+git add src/components/Sidebar.tsx src/components/HistoryView.tsx src/App.tsx src/store/selectors/sidebarSelectors.ts test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.render-stability.test.tsx test/unit/client/components/HistoryView.a11y.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
+git commit -m "refactor(client): render session views from server query windows"
+```
+
+---
+
+### Task 8: Store SDK Sessions As Turns Instead Of Flat Replay Arrays
+
+**Files:**
+- Create: `server/agent-timeline/types.ts`
+- Modify: `server/sdk-bridge-types.ts`
+- Modify: `server/sdk-bridge.ts`
+- Modify: `server/session-history-loader.ts`
+- Test: `test/unit/server/sdk-bridge-types.test.ts`
+- Test: `test/unit/server/sdk-bridge.test.ts`
+- Test: `test/unit/server/session-history-loader.test.ts`
+
+**Step 1: Write the failing turn-model tests**
+
+Cover:
+- live SDK events fold into deterministic turn records
+- resumed `.jsonl` history normalizes into the same turn structure
+- recent turns can be marked hydrated while older turns remain summary-only
+- `sdk.attach` no longer depends on replaying full history arrays
+
+**Step 2: Run tests to verify failure**
+
+```bash
+npm run test:server -- test/unit/server/sdk-bridge-types.test.ts test/unit/server/sdk-bridge.test.ts test/unit/server/session-history-loader.test.ts
+```
+
+Expected: FAIL because server state is still centered on flat `messages: ChatMessage[]`.
+
+**Step 3: Implement the turn model**
+
+Extend `SdkSessionState`:
+
+```ts
+interface SdkSessionState {
+  sessionId: string
+  turns: AgentTurnRecord[]
+  timelineRevision: number
+  recentExpandedTurnIds: string[]
+  // existing status, permissions, questions, and live session metadata remain
+}
+```
+
+Update `server/session-history-loader.ts` so resumed history is normalized once into turn records, not replay arrays.
+
+**Step 4: Run tests to verify pass**
+
+```bash
+npm run test:server -- test/unit/server/sdk-bridge-types.test.ts test/unit/server/sdk-bridge.test.ts test/unit/server/session-history-loader.test.ts
+```
+
+Expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+git add server/agent-timeline/types.ts server/sdk-bridge-types.ts server/sdk-bridge.ts server/session-history-loader.ts test/unit/server/sdk-bridge-types.test.ts test/unit/server/sdk-bridge.test.ts test/unit/server/session-history-loader.test.ts
+git commit -m "refactor(sdk): store session state as turns"
+```
+
+---
+
+### Task 9: Expose Agent Timeline And Turn Bodies As Read Models
+
+**Files:**
+- Create: `server/agent-timeline/service.ts`
+- Create: `server/agent-timeline/router.ts`
+- Modify: `server/index.ts`
+- Test: `test/unit/server/agent-timeline/service.test.ts`
+- Test: `test/integration/server/agent-timeline-router.test.ts`
+- Test: `test/unit/server/ws-handler-sdk.test.ts`
+
+**Step 1: Write the failing timeline endpoint tests**
+
+Cover:
+- timeline pages are cursorable and deterministic
+- recent turns are hydrated first
+- older turns return summaries by default
+- turn body fetch returns only the requested turn
+- websocket attach/create emits `sdk.session.snapshot`, status, permissions, and questions, but not `sdk.history`
+
+**Step 2: Run tests to verify failure**
+
+```bash
+npm run test:server -- test/unit/server/agent-timeline/service.test.ts test/integration/server/agent-timeline-router.test.ts test/unit/server/ws-handler-sdk.test.ts
+```
+
+Expected: FAIL because the timeline read model and lightweight attach path do not exist.
+
+**Step 3: Implement the timeline service and router**
+
+Create service entry points:
+
+```ts
+export function getAgentTimelinePage(input: {
+  session: SdkSessionState
+  cursor?: string
+  limit: number
+}): AgentTimelinePage
+
+export function getAgentTurnBody(session: SdkSessionState, turnId: string): AgentTurnBody
+```
+
+Wire `server/agent-timeline/router.ts` and update `server/ws-handler.ts` behavior indirectly through the SDK state model:
+- `sdk.create` sends `sdk.created`, `sdk.session.snapshot`, and live status
+- `sdk.attach` sends `sdk.session.snapshot`, live status, pending permissions/questions, and subscribes to live deltas
+- neither path sends `sdk.history`
+
+**Step 4: Run tests to verify pass**
+
+```bash
+npm run test:server -- test/unit/server/agent-timeline/service.test.ts test/integration/server/agent-timeline-router.test.ts test/unit/server/ws-handler-sdk.test.ts
+```
+
+Expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+git add server/agent-timeline/service.ts server/agent-timeline/router.ts server/index.ts test/unit/server/agent-timeline/service.test.ts test/integration/server/agent-timeline-router.test.ts test/unit/server/ws-handler-sdk.test.ts
+git commit -m "feat(agent-chat): expose timeline and turn-body read models"
+```
+
+---
+
+### Task 10: Make AgentChatView Viewport-First Instead Of Replay-First
+
+**Files:**
 - Modify: `src/lib/sdk-message-handler.ts`
 - Modify: `src/store/agentChatTypes.ts`
 - Modify: `src/store/agentChatSlice.ts`
@@ -589,56 +832,49 @@ git commit -m "feat(agent-chat): add server timeline read model"
 - Test: `test/unit/client/agentChatSlice.test.ts`
 - Test: `test/unit/client/lib/sdk-message-handler.session-lost.test.ts`
 - Test: `test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx`
-- Test: `test/e2e/agent-chat-slow-network-hydration.test.tsx`
+- Test: `test/unit/client/components/agent-chat/CollapsedTurn.test.tsx`
+- Test: `test/e2e/agent-chat-polish-flow.test.tsx`
 
-**Step 1: Write failing client tests**
+**Step 1: Write the failing agent-chat client tests**
 
 Cover:
+- reload shows recent visible turns without counting upward through old history
+- expanding older turns fetches bodies on demand
+- `sdk.session.snapshot` seeds the live session without `replayHistory`
+- stale timeline requests are cancelled on session switch
 
-1. attach/reload shows recent visible turns without waiting for full history replay
-2. older turns expand by fetching turn bodies from HTTP
-3. session restore no longer dispatches `replayHistory`
-4. reconnect keeps live status/permission behavior intact
-5. the UI no longer shows old turns "counting up" during restore
-
-**Step 2: Run targeted tests**
+**Step 2: Run tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/e2e/agent-chat-slow-network-hydration.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/components/agent-chat/CollapsedTurn.test.tsx test/e2e/agent-chat-polish-flow.test.tsx
 ```
 
-Expected: FAIL because the client still expects full `sdk.history`.
+Expected: FAIL because the client still expects `sdk.history` replay semantics.
 
-**Step 3: Implement the attach/reload cutover**
+**Step 3: Implement viewport-first agent chat**
 
-In `server/ws-handler.ts`:
-
-1. `sdk.create` and `sdk.attach` send `sdk.session.snapshot`, status, pending permissions, pending questions, and model info
-2. they do not send `sdk.history`
-
-In `src/store/agentChatSlice.ts`, replace `messages: ChatMessage[]` as the primary restore representation with:
+Replace restore state with timeline windows:
 
 ```ts
 type ChatSessionState = {
-  ...
   timeline: AgentTurnSummary[]
   hydratedTurnBodies: Record<string, AgentTurnBody>
-  timelineLoaded?: boolean
+  nextCursor?: string
+  revision?: number
+  timelineLoaded: boolean
 }
 ```
 
-In `AgentChatView.tsx`:
+Rules:
+- fetch the latest timeline page first with `priority=visible`
+- fetch older pages and turn bodies only when the user scrolls up or expands
+- render `CollapsedTurn` from server-authored summary strings
+- keep websocket live status, permission, and question events unchanged
 
-1. fetch `/api/agent-sessions/:sessionId/timeline?cursor=tail`
-2. keep recent turns expanded
-3. fetch `/turns/:turnId` only when the user expands an older turn or scrolls into older history
-
-`CollapsedTurn.tsx` should render the server-authored summary string instead of inventing one from already-loaded full bodies.
-
-**Step 4: Run targeted tests to verify pass**
+**Step 4: Run tests to verify pass**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/e2e/agent-chat-slow-network-hydration.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/components/agent-chat/CollapsedTurn.test.tsx test/e2e/agent-chat-polish-flow.test.tsx
 ```
 
 Expected: PASS.
@@ -646,80 +882,63 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add server/ws-handler.ts src/lib/sdk-message-handler.ts src/store/agentChatTypes.ts src/store/agentChatSlice.ts src/components/agent-chat/AgentChatView.tsx src/components/agent-chat/CollapsedTurn.tsx src/lib/api.ts test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/e2e/agent-chat-slow-network-hydration.test.tsx
-git commit -m "refactor(agent-chat): restore timeline windows instead of full history replay"
+git add src/lib/sdk-message-handler.ts src/store/agentChatTypes.ts src/store/agentChatSlice.ts src/components/agent-chat/AgentChatView.tsx src/components/agent-chat/CollapsedTurn.tsx src/lib/api.ts test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/components/agent-chat/CollapsedTurn.test.tsx test/e2e/agent-chat-polish-flow.test.tsx
+git commit -m "refactor(agent-chat): hydrate visible turns before older history"
 ```
 
 ---
 
-### Task 7: Build A Server Terminal Viewport, Scrollback, And Search Service
+### Task 11: Mirror Terminal State On The Server
 
 **Files:**
 - Modify: `package.json`
 - Create: `server/terminal-view/types.ts`
 - Create: `server/terminal-view/mirror.ts`
-- Create: `server/terminal-view/service.ts`
-- Create: `server/terminal-view/router.ts`
-- Modify: `server/terminal-registry.ts`
 - Modify: `server/terminal-stream/broker.ts`
-- Modify: `server/index.ts`
+- Modify: `server/terminal-registry.ts`
 - Test: `test/unit/server/terminal-view/mirror.test.ts`
-- Test: `test/integration/server/terminal-view-router.test.ts`
+- Test: `test/unit/server/terminal-registry.test.ts`
 
-**Step 1: Write failing terminal-view tests**
+**Step 1: Write the failing terminal mirror tests**
 
 Cover:
+- PTY output is mirrored into a headless terminal model
+- serialized snapshots are bounded and deterministic
+- alternate screen and ANSI-heavy output do not corrupt the mirror
+- tail sequence aligns with the broker's live stream
 
-1. PTY output is mirrored into a server-side terminal model
-2. viewport snapshots return bounded serialized content plus `tailSeq`
-3. scrollback pages are bounded and cursorable
-4. search results come from server-side mirrored content
-5. ANSI-heavy output and alternate-screen transitions do not corrupt the mirror
-
-**Step 2: Run targeted tests**
+**Step 2: Run tests to verify failure**
 
 ```bash
-npm run test:server -- test/unit/server/terminal-view/mirror.test.ts test/integration/server/terminal-view-router.test.ts
+npm run test:server -- test/unit/server/terminal-view/mirror.test.ts test/unit/server/terminal-registry.test.ts
 ```
 
-Expected: FAIL because no terminal view service exists.
+Expected: FAIL because no terminal mirror exists.
 
-**Step 3: Implement the mirror/service/router**
+**Step 3: Implement the terminal mirror**
 
-Add dependencies:
+Add the required packages:
 
 ```json
 "@xterm/headless": "^6.0.0",
 "@xterm/addon-serialize": "^0.14.0"
 ```
 
-In `server/terminal-view/mirror.ts`, maintain a headless terminal mirror per terminal and feed it from `terminal.output.raw`.
-
-Expose:
-
-1. `GET /api/terminals/:terminalId/viewport?cols=...&rows=...`
-2. `GET /api/terminals/:terminalId/scrollback?cursor=...`
-3. `GET /api/terminals/:terminalId/search?q=...&cursor=...`
-
-The viewport path must return serialized content plus the sequence watermark the client should attach from:
+Create `server/terminal-view/mirror.ts` with one mirror per terminal fed from raw broker output:
 
 ```ts
-return {
-  terminalId,
-  revision,
-  cols,
-  rows,
-  tailSeq,
-  serialized,
-  hasOlderScrollback,
-  scrollbackCursor,
+export class TerminalMirrorRegistry {
+  applyOutput(terminalId: string, seqStart: number, data: string): void
+  getViewportSnapshot(input: { terminalId: string; cols: number; rows: number }): TerminalViewportSnapshot
 }
 ```
 
-**Step 4: Run targeted tests to verify pass**
+Attach mirror updates where terminal output already becomes sequenced in `server/terminal-stream/broker.ts`.
+
+**Step 4: Run tests to verify pass**
 
 ```bash
-npm run test:server -- test/unit/server/terminal-view/mirror.test.ts test/integration/server/terminal-view-router.test.ts
+npm run test:server -- test/unit/server/terminal-view/mirror.test.ts test/unit/server/terminal-registry.test.ts
 ```
 
 Expected: PASS.
@@ -727,56 +946,130 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add package.json server/terminal-view/types.ts server/terminal-view/mirror.ts server/terminal-view/service.ts server/terminal-view/router.ts server/terminal-registry.ts server/terminal-stream/broker.ts server/index.ts test/unit/server/terminal-view/mirror.test.ts test/integration/server/terminal-view-router.test.ts
-git commit -m "feat(terminal): add server viewport and scrollback read model"
+git add package.json server/terminal-view/types.ts server/terminal-view/mirror.ts server/terminal-stream/broker.ts server/terminal-registry.ts test/unit/server/terminal-view/mirror.test.ts test/unit/server/terminal-registry.test.ts
+git commit -m "feat(terminal): mirror terminal state server-side"
 ```
 
 ---
 
-### Task 8: Rework TerminalView To Fetch Viewports And Use Server-Side Search
+### Task 12: Expose Terminal Viewport, Scrollback, And Search Read Models
+
+**Files:**
+- Create: `server/terminal-view/service.ts`
+- Create: `server/terminal-view/router.ts`
+- Modify: `server/index.ts`
+- Test: `test/integration/server/terminal-view-router.test.ts`
+- Test: `test/server/terminals-api.test.ts`
+
+**Step 1: Write the failing terminal read-model tests**
+
+Cover:
+- `/api/terminals/:terminalId/viewport` returns the current visible screen and `tailSeq`
+- `/api/terminals/:terminalId/scrollback` returns bounded older pages
+- `/api/terminals/:terminalId/search` returns cursorable server-side search results
+- aborted scrollback/search requests stop work early
+
+**Step 2: Run tests to verify failure**
+
+```bash
+npm run test:server -- test/integration/server/terminal-view-router.test.ts test/server/terminals-api.test.ts
+```
+
+Expected: FAIL because the router and service do not exist.
+
+**Step 3: Implement the terminal view service and router**
+
+Create `server/terminal-view/service.ts`:
+
+```ts
+export function getTerminalViewport(input: {
+  terminalId: string
+  cols: number
+  rows: number
+}): TerminalViewportSnapshot
+
+export function getTerminalScrollbackPage(input: {
+  terminalId: string
+  cursor?: string
+}): TerminalScrollbackPage
+
+export function searchTerminalView(input: {
+  terminalId: string
+  query: string
+  cursor?: string
+  signal?: AbortSignal
+}): Promise<TerminalSearchResponse>
+```
+
+Run viewport work in the visible lane. Run scrollback/search work in the background lane unless the request is for an actively focused search result.
+
+**Step 4: Run tests to verify pass**
+
+```bash
+npm run test:server -- test/integration/server/terminal-view-router.test.ts test/server/terminals-api.test.ts
+```
+
+Expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+git add server/terminal-view/service.ts server/terminal-view/router.ts server/index.ts test/integration/server/terminal-view-router.test.ts test/server/terminals-api.test.ts
+git commit -m "feat(terminal): expose viewport scrollback and search read models"
+```
+
+---
+
+### Task 13: Rework TerminalView To Restore The Viewport First And Search Server-Side
 
 **Files:**
 - Modify: `src/components/TerminalView.tsx`
 - Modify: `src/components/terminal/terminal-runtime.ts`
 - Modify: `src/lib/api.ts`
 - Modify: `src/lib/ws-client.ts`
-- Test: `test/unit/client/components/TerminalView.search.test.tsx`
 - Test: `test/unit/client/components/TerminalView.lifecycle.test.tsx`
+- Test: `test/unit/client/components/TerminalView.search.test.tsx`
+- Test: `test/unit/client/components/terminal/terminal-runtime.test.ts`
 - Test: `test/e2e/terminal-search-flow.test.tsx`
 - Test: `test/e2e/terminal-flaky-network-responsiveness.test.tsx`
 
-**Step 1: Write failing terminal client tests**
+**Step 1: Write the failing terminal client tests**
 
 Cover:
+- mount/reattach fetches `/viewport` first, then attaches from `tailSeq`
+- search UI calls the server instead of `SearchAddon`
+- stale scrollback/search requests are aborted on terminal switch
+- terminal input stays live while background fetches are in flight
 
-1. mount/reattach fetches `/api/terminals/:id/viewport` first, then sends `terminal.attach` with `sinceSeq = tailSeq`
-2. search UI hits the server endpoint, not `SearchAddon`
-3. live output continues from the fetched watermark without replaying the old buffer
-4. while a scrollback/search request is in flight, terminal input still sends immediately
-
-**Step 2: Run targeted tests**
+**Step 2: Run tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/e2e/terminal-search-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/e2e/terminal-search-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
 ```
 
-Expected: FAIL because TerminalView still uses client-side search and replay-oriented attach logic.
+Expected: FAIL because restore and search are still replay-oriented and client-side.
 
-**Step 3: Implement the viewport-first client flow**
+**Step 3: Implement the viewport-first flow**
 
-In `TerminalView.tsx`:
+Rules:
+- fetch `/api/terminals/:terminalId/viewport` before `terminal.attach`
+- write the serialized viewport into xterm, then attach with `sinceSeq = tailSeq`
+- remove `@xterm/addon-search` from `terminal-runtime.ts`
+- fetch older scrollback or search results only on explicit scroll/search actions
 
-1. fetch viewport before attach
-2. reset the browser xterm instance and write `serialized`
-3. attach from `tailSeq`
-4. on scrollback/search result selection, fetch bounded server snapshots instead of trying to replay everything locally
+Minimal attach flow:
 
-In `terminal-runtime.ts`, remove `@xterm/addon-search` usage from the runtime contract. Searching becomes an async API call from the component layer.
+```ts
+const snapshot = await api.getTerminalViewport(terminalId, cols, rows)
+terminal.reset()
+terminal.write(snapshot.serialized)
+ws.send({ type: 'terminal.attach', terminalId, cols, rows, sinceSeq: snapshot.tailSeq })
+```
 
-**Step 4: Run targeted tests to verify pass**
+**Step 4: Run tests to verify pass**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/e2e/terminal-search-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/e2e/terminal-search-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
 ```
 
 Expected: PASS.
@@ -784,67 +1077,61 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/components/TerminalView.tsx src/components/terminal/terminal-runtime.ts src/lib/api.ts src/lib/ws-client.ts test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/e2e/terminal-search-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
-git commit -m "refactor(terminal): hydrate viewport first and move search server-side"
+git add src/components/TerminalView.tsx src/components/terminal/terminal-runtime.ts src/lib/api.ts src/lib/ws-client.ts test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/e2e/terminal-search-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
+git commit -m "refactor(terminal): restore visible viewport before bulk history"
 ```
 
 ---
 
-### Task 9: Delete Legacy Bulk Socket Paths And Enforce Realtime Queue Budgets
+### Task 14: Delete Legacy Bulk Socket Paths And Enforce Payload Budgets
 
 **Files:**
 - Modify: `server/ws-handler.ts`
 - Modify: `server/sessions-sync/service.ts`
-- Modify: `server/session-pagination.ts`
 - Modify: `server/ws-chunking.ts`
-- Modify: `server/session-history-loader.ts`
 - Modify: `src/App.tsx`
-- Modify: `src/store/sessionsSlice.ts`
 - Test: `test/server/ws-handshake-snapshot.test.ts`
 - Test: `test/server/ws-edge-cases.test.ts`
-- Test: `test/unit/client/components/App.test.tsx`
+- Test: `test/unit/server/sessions-sync/service.test.ts`
 
-**Step 1: Write failing cleanup tests**
+**Step 1: Write the failing cleanup tests**
 
 Cover:
+- no v4 handshake or runtime path emits `sessions.updated`, `sessions.page`, or `sessions.patch`
+- `sessions.fetch` is gone
+- `sdk.history` is absent from create/attach flows
+- oversized non-realtime payloads are rejected by design instead of being chunked onto the realtime socket
 
-1. no v4 handshake/session bootstrap path emits chunked session snapshots
-2. `sdk.history` is absent from attach/create flows
-3. oversized non-realtime payloads are rejected by design instead of being chunked onto the realtime socket
-4. `App` no longer contains the chunked session buffer/reconciliation logic
-
-**Step 2: Run targeted tests**
+**Step 2: Run tests to verify failure**
 
 ```bash
-npm run test:server -- test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts
-NODE_ENV=test npx vitest run test/unit/client/components/App.test.tsx
+npm run test:server -- test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts test/unit/server/sessions-sync/service.test.ts
 ```
 
-Expected: FAIL because legacy transport code is still present.
+Expected: FAIL because the legacy runtime still exists.
 
 **Step 3: Remove the legacy paths**
 
-Delete or dead-code-eliminate the following concepts from the active runtime:
+Delete or dead-code-eliminate:
+- socket session snapshot paging
+- `sessions.fetch`
+- `broadcastSessionsPatch`
+- `broadcastSessionsUpdated`
+- `sdk.history` replay
+- active runtime use of `server/ws-chunking.ts`
 
-1. chunked `sessions.updated` transport
-2. `sessions.page` socket pagination
-3. browser-side chunk buffer assembly in `App.tsx`
-4. `sdk.history` replay on create/attach
-5. realtime use of `server/ws-chunking.ts` and `server/session-pagination.ts`
-
-Add a strict realtime payload budget in `server/ws-handler.ts`:
+In `server/ws-handler.ts`, enforce:
 
 ```ts
 const MAX_REALTIME_MESSAGE_BYTES = 16 * 1024
 ```
 
-Anything that cannot meet that budget belongs on HTTP.
+Any payload that cannot meet that budget must move to HTTP.
 
-**Step 4: Run targeted tests to verify pass**
+**Step 4: Run tests to verify pass**
 
 ```bash
-npm run test:server -- test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts
-NODE_ENV=test npx vitest run test/unit/client/components/App.test.tsx
+npm run test:server -- test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts test/unit/server/sessions-sync/service.test.ts
 ```
 
 Expected: PASS.
@@ -852,32 +1139,32 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add server/ws-handler.ts server/sessions-sync/service.ts server/session-pagination.ts server/ws-chunking.ts server/session-history-loader.ts src/App.tsx src/store/sessionsSlice.ts test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts test/unit/client/components/App.test.tsx
-git commit -m "refactor(transport): remove legacy bulk websocket paths"
+git add server/ws-handler.ts server/sessions-sync/service.ts server/ws-chunking.ts src/App.tsx test/server/ws-handshake-snapshot.test.ts test/server/ws-edge-cases.test.ts test/unit/server/sessions-sync/service.test.ts
+git commit -m "refactor(transport): remove legacy bulk websocket runtime"
 ```
 
 ---
 
-### Task 10: Update Docs, Add Slow-Link Regression Coverage, And Run Full Verification
+### Task 15: Update Docs, Add Slow-Network Regressions, And Run Full Verification
 
 **Files:**
 - Modify: `docs/index.html`
 - Create: `test/e2e/slow-network-end-to-end.test.tsx`
-- Modify: `test/e2e/agent-chat-slow-network-hydration.test.tsx`
-- Modify: `test/e2e/terminal-flaky-network-responsiveness.test.tsx`
 - Modify: `test/e2e/sidebar-click-opens-pane.test.tsx`
+- Modify: `test/e2e/agent-chat-polish-flow.test.tsx`
+- Modify: `test/e2e/terminal-search-flow.test.tsx`
+- Modify: `test/e2e/terminal-flaky-network-responsiveness.test.tsx`
 
-**Step 1: Write the final failing regression tests**
+**Step 1: Write the final failing regression test**
 
-Add one end-to-end regression that covers the actual product promise:
+Add one end-to-end regression that proves the full product promise:
+- bootstrap loads from one HTTP document
+- session search stays responsive on large datasets
+- agent chat restore shows recent turns before older ones
+- terminal restore shows current screen without replaying all output
+- background history/search requests do not delay terminal input
 
-1. bootstrap loads from one HTTP document
-2. sidebar search stays responsive on large datasets
-3. agent chat restore shows recent visible turns before older data
-4. terminal reconnect shows current screen without replaying all output
-5. background bulk requests do not delay terminal input
-
-**Step 2: Run the new regression test**
+**Step 2: Run the new regression to verify failure**
 
 ```bash
 NODE_ENV=test npx vitest run test/e2e/slow-network-end-to-end.test.tsx
@@ -885,36 +1172,40 @@ NODE_ENV=test npx vitest run test/e2e/slow-network-end-to-end.test.tsx
 
 Expected: FAIL until the full cutover is complete.
 
-**Step 3: Update the docs/mock and finalize verification**
+**Step 3: Update docs and finish regression coverage**
 
 Update `docs/index.html` so the mock reflects:
+- server-side session search
+- recent-turn-first agent chat restore
+- viewport-first terminal restore and server-side terminal search
 
-1. server-side search
-2. recent-turn-first restore in agent chat
-3. viewport-first terminal restore/search
+Strengthen the existing e2e tests to assert abortability and visible-first behavior, not just happy-path rendering.
 
-Then run the full verification suite:
+**Step 4: Run full verification**
 
 ```bash
 npm run lint
-npm run typecheck
+npm run check
 npm test
-npm run build
+npm run verify
 ```
 
 Expected: all PASS.
 
-**Step 4: Commit**
+**Step 5: Commit**
 
 ```bash
-git add docs/index.html test/e2e/slow-network-end-to-end.test.tsx test/e2e/agent-chat-slow-network-hydration.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx
-git commit -m "test(docs): lock in slow-network architecture cutover"
+git add docs/index.html test/e2e/slow-network-end-to-end.test.tsx test/e2e/sidebar-click-opens-pane.test.tsx test/e2e/agent-chat-polish-flow.test.tsx test/e2e/terminal-search-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
+git commit -m "test(docs): lock in slow-network visible-first architecture"
 ```
 
 ## Final Architecture Notes For The Implementer
 
-1. Resist partial compatibility work. The old socket bulk paths are the bug, not an asset.
-2. Keep the server read models narrow and explicit. If the UI needs a new field, add it on the server instead of rebuilding local derivation logic.
-3. Favor refetching the active window over keeping a giant client cache synchronized.
-4. Measure every bulk response size and every realtime message size while implementing. Slow-network architecture without observability is guesswork.
-5. Do not stop after targeted tests. The value of this plan is the final slow-link behavior under full-suite verification.
+1. Build on the existing server-side strengths already in the repo:
+   - `session-scanner` and `session-search` for session inventory and search
+   - `terminal-stream/broker` for sequenced terminal output
+   - `sdk-bridge` for live SDK session state
+2. Do not recreate client-side derivation logic after introducing server read models. If the UI needs a field, add it to the server response.
+3. Prefer refetching the current server window over carrying large client caches and diff logic.
+4. Measure response sizes and queue times while implementing. Slow-network work without payload and queue instrumentation is guesswork.
+5. Execute tasks in order. The plan assumes direct cutover, not a mixed architecture.
