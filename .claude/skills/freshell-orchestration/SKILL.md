@@ -45,7 +45,8 @@ Targets:
 - Omitted target on `rename-tab` means the active tab.
 - Omitted target on `rename-pane` means the active pane in the active tab.
 - Omitted target falls back to active pane in active tab when command supports it.
-- If a target contains spaces, or if you want an active-target rename with an unquoted multi-word name, prefer the flagged `-t/-n` form.
+- If a target or name contains spaces, quote it.
+- Use the flagged `-t/-n` form when you want to make the target and name explicit.
 
 Tab commands:
 - `new-tab [-n NAME] [--claude|--codex|--mode MODE] [--shell SHELL] [--cwd DIR] [--browser URL] [--editor FILE] [--resume SESSION_ID] [--prompt TEXT]`
