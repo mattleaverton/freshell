@@ -158,6 +158,68 @@ it('persists syncable coding CLI pane renames through terminal overrides and ses
   expect(broadcast).toHaveBeenCalledWith({ type: 'terminal.list.updated' })
 })
 
+it('does not fail the pane rename when coding CLI session cascade refresh fails', async () => {
+  const app = express()
+  app.use(express.json())
+  const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_1' }))
+  const patchTerminalOverride = vi.fn().mockResolvedValue({})
+  const patchSessionOverride = vi.fn().mockResolvedValue({})
+  const updateTitle = vi.fn()
+  const refresh = vi.fn().mockRejectedValue(new Error('refresh failed'))
+  const broadcast = vi.fn()
+  const broadcastUiCommand = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: {
+      renamePane,
+      listPanes: () => [{ id: 'pane_1' }, { id: 'pane_2' }],
+      getPaneSnapshot: () => ({
+        tabId: 'tab_1',
+        paneId: 'pane_1',
+        paneContent: { kind: 'terminal', mode: 'codex', terminalId: 'term_1' },
+      }),
+    } as any,
+    registry: { updateTitle } as any,
+    wsHandler: { broadcastUiCommand, broadcast },
+    configStore: { patchTerminalOverride, patchSessionOverride } as any,
+    terminalMetadata: {
+      list: () => [{ terminalId: 'term_1', provider: 'codex', sessionId: 'session-1' }],
+    } as any,
+    codingCliIndexer: { refresh } as any,
+  }))
+
+  const res = await request(app).patch('/api/panes/pane_1').send({ name: 'Agent' })
+
+  expect(res.status).toBe(200)
+  expect(renamePane).toHaveBeenCalledWith('pane_1', 'Agent')
+  expect(patchTerminalOverride).toHaveBeenCalledWith('term_1', { titleOverride: 'Agent' })
+  expect(updateTitle).toHaveBeenCalledWith('term_1', 'Agent')
+  expect(patchSessionOverride).toHaveBeenCalledWith('codex:session-1', { titleOverride: 'Agent' })
+  expect(broadcast).toHaveBeenCalledWith({ type: 'terminal.list.updated' })
+  expect(broadcastUiCommand).toHaveBeenCalledWith({
+    command: 'pane.rename',
+    payload: { tabId: 'tab_1', paneId: 'pane_1', title: 'Agent' },
+  })
+})
+
+it('rejects pane rename payloads longer than the terminal title override limit', async () => {
+  const app = express()
+  app.use(express.json())
+  const renamePane = vi.fn()
+  const patchTerminalOverride = vi.fn()
+  app.use('/api', createAgentApiRouter({
+    layoutStore: { renamePane, getPaneSnapshot: vi.fn() } as any,
+    registry: {} as any,
+    wsHandler: { broadcastUiCommand: vi.fn(), broadcast: vi.fn() },
+    configStore: { patchTerminalOverride } as any,
+  }))
+
+  const res = await request(app).patch('/api/panes/pane_1').send({ name: 'a'.repeat(501) })
+
+  expect(res.status).toBe(400)
+  expect(renamePane).not.toHaveBeenCalled()
+  expect(patchTerminalOverride).not.toHaveBeenCalled()
+})
+
 it('does not broadcast pane.rename when the pane does not exist', async () => {
   const app = express()
   app.use(express.json())

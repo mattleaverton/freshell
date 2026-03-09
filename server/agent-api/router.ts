@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { nanoid } from 'nanoid'
 import { makeSessionKey } from '../coding-cli/types.js'
+import { MAX_TERMINAL_TITLE_OVERRIDE_LENGTH } from '../terminals-router.js'
 import { ok, approx, fail } from './response.js'
 import { renderCapture } from './capture.js'
 import { waitForMatch } from './wait-for.js'
@@ -133,10 +134,15 @@ export function createAgentApiRouter({
 
     const meta = terminalMetadata?.list?.().find((entry) => entry.terminalId === terminalId)
     if (meta?.provider && meta?.sessionId) {
-      await configStore.patchSessionOverride?.(makeSessionKey(meta.provider as any, meta.sessionId), {
-        titleOverride: title,
-      })
-      await codingCliIndexer?.refresh?.()
+      try {
+        await configStore.patchSessionOverride?.(makeSessionKey(meta.provider as any, meta.sessionId), {
+          titleOverride: title,
+        })
+        await codingCliIndexer?.refresh?.()
+      } catch {
+        // Match terminals-router semantics: terminal rename persistence is authoritative,
+        // but session-title cascade/index refresh is best-effort.
+      }
     }
 
     wsHandler?.broadcast?.({ type: 'terminal.list.updated' })
@@ -563,6 +569,9 @@ export function createAgentApiRouter({
     try {
       const name = parseRequiredName(req.body?.name)
       if (!name) return res.status(400).json(fail('name required'))
+      if (name.length > MAX_TERMINAL_TITLE_OVERRIDE_LENGTH) {
+        return res.status(400).json(fail(`name must be ${MAX_TERMINAL_TITLE_OVERRIDE_LENGTH} characters or fewer`))
+      }
 
       const resolved = resolvePaneTarget(req.params.id)
       const paneId = resolved.paneId || req.params.id
