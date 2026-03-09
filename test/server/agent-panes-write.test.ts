@@ -135,7 +135,7 @@ it('renames a resolved pane via PATCH /api/panes/:id', async () => {
   })
 })
 
-it('keeps pane rename distinct from tab rename even for single-pane tabs', async () => {
+it('syncs the tab title when renaming the only pane in a tab', async () => {
   const app = express()
   app.use(express.json())
   const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_1' }))
@@ -160,10 +160,14 @@ it('keeps pane rename distinct from tab rename even for single-pane tabs', async
 
   expect(res.status).toBe(200)
   expect(renamePane).toHaveBeenCalledWith('pane_1', 'Docs')
-  expect(renameTab).not.toHaveBeenCalled()
+  expect(renameTab).toHaveBeenCalledWith('tab_1', 'Docs')
   expect(broadcastUiCommand).toHaveBeenCalledWith({
     command: 'pane.rename',
     payload: { tabId: 'tab_1', paneId: 'pane_1', title: 'Docs' },
+  })
+  expect(broadcastUiCommand).toHaveBeenCalledWith({
+    command: 'tab.rename',
+    payload: { id: 'tab_1', title: 'Docs' },
   })
 })
 

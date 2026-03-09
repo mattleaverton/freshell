@@ -27,6 +27,78 @@ export class LayoutStore {
   private snapshot: UiSnapshot | null = null
   private sourceConnectionId: string | null = null
 
+  private derivePaneTitle(content: any): string | undefined {
+    if (!content || typeof content !== 'object') return undefined
+
+    if (content.kind === 'editor') {
+      if (typeof content.filePath !== 'string' || !content.filePath) return 'Editor'
+      const parts = content.filePath.replace(/\\/g, '/').split('/')
+      return parts[parts.length - 1] || 'Editor'
+    }
+
+    if (content.kind === 'browser') {
+      if (typeof content.url !== 'string' || !content.url) return 'Browser'
+      try {
+        const url = new URL(content.url)
+        return url.hostname || 'Browser'
+      } catch {
+        return 'Browser'
+      }
+    }
+
+    if (content.kind === 'agent-chat') {
+      switch (content.provider) {
+        case 'claude':
+          return 'Claude'
+        case 'codex':
+          return 'Codex'
+        default:
+          return 'Agent'
+      }
+    }
+
+    if (content.kind === 'extension') {
+      return typeof content.extensionName === 'string' && content.extensionName
+        ? content.extensionName
+        : 'Extension'
+    }
+
+    if (content.kind !== 'terminal') return undefined
+
+    switch (content.mode) {
+      case 'claude':
+        return 'Claude CLI'
+      case 'codex':
+        return 'Codex CLI'
+      case 'gemini':
+        return 'Gemini'
+      case 'opencode':
+        return 'OpenCode'
+      case 'kimi':
+        return 'Kimi'
+      default:
+        switch (content.shell) {
+          case 'powershell':
+            return 'PowerShell'
+          case 'cmd':
+            return 'Command Prompt'
+          case 'wsl':
+            return 'WSL'
+          case 'system':
+          default:
+            return 'Shell'
+        }
+    }
+  }
+
+  private seedPaneTitle(tabId: string, paneId: string, content: any) {
+    const title = this.derivePaneTitle(content)
+    if (!title || !this.snapshot) return
+    if (!this.snapshot.paneTitles) this.snapshot.paneTitles = {}
+    if (!this.snapshot.paneTitles[tabId]) this.snapshot.paneTitles[tabId] = {}
+    this.snapshot.paneTitles[tabId][paneId] = title
+  }
+
   updateFromUi(snapshot: UiSnapshot, connectionId: string) {
     this.snapshot = snapshot
     this.sourceConnectionId = connectionId
@@ -246,14 +318,16 @@ export class LayoutStore {
     const snapshot = this.ensureSnapshot()
     const tabId = nanoid()
     const paneId = nanoid()
+    const content = this.buildContent({ terminalId, browser, editor })
     snapshot.tabs.push({ id: tabId, title })
     snapshot.layouts[tabId] = {
       type: 'leaf',
       id: paneId,
-      content: this.buildContent({ terminalId, browser, editor }),
+      content,
     }
     snapshot.activeTabId = tabId
     snapshot.activePane[tabId] = paneId
+    this.seedPaneTitle(tabId, paneId, content)
     return { tabId, paneId }
   }
 
@@ -266,6 +340,7 @@ export class LayoutStore {
       if (!leaves.find((leaf) => leaf.id === opts.paneId)) continue
 
       const newPaneId = nanoid()
+      const newContent = this.buildContent({ terminalId: opts.terminalId, browser: opts.browser, editor: opts.editor })
       const splitNode = {
         type: 'split',
         id: nanoid(),
@@ -273,7 +348,7 @@ export class LayoutStore {
         sizes: [50, 50],
         children: [
           { type: 'leaf', id: opts.paneId, content: (leaves.find((leaf) => leaf.id === opts.paneId) as any)?.content },
-          { type: 'leaf', id: newPaneId, content: this.buildContent({ terminalId: opts.terminalId, browser: opts.browser, editor: opts.editor }) },
+          { type: 'leaf', id: newPaneId, content: newContent },
         ],
       }
 
@@ -281,6 +356,7 @@ export class LayoutStore {
       if (replaced) {
         snapshot.layouts[tab.id] = replaced
         snapshot.activePane[tab.id] = newPaneId
+        this.seedPaneTitle(tab.id, newPaneId, newContent)
         return { tabId: tab.id, newPaneId }
       }
     }
@@ -433,6 +509,7 @@ export class LayoutStore {
       return { ...node, children: [update(node.children[0]), update(node.children[1])] }
     }
     this.snapshot.layouts[tabId] = update(root)
+    this.seedPaneTitle(tabId, paneId, content)
     return { tabId, paneId }
   }
 }

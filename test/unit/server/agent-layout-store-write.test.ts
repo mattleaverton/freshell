@@ -58,3 +58,27 @@ it('lists pane titles from the public pane snapshot', () => {
     },
   ])
 })
+
+it('seeds derived titles for server-created, split, and attached panes', () => {
+  const store = new LayoutStore()
+  const created = store.createTab({ terminalId: 'term_1' })
+  const split = store.splitPane({ paneId: created.paneId, direction: 'horizontal', editor: '/tmp/example.txt' })
+
+  expect(store.listPanes(created.tabId)).toEqual([
+    expect.objectContaining({ id: created.paneId, title: 'Shell' }),
+    expect.objectContaining({ id: split.newPaneId, title: 'example.txt' }),
+  ])
+
+  store.attachPaneContent(created.tabId, created.paneId, {
+    kind: 'terminal',
+    terminalId: 'term_2',
+    mode: 'codex',
+    shell: 'system',
+    status: 'running',
+  })
+
+  expect(store.listPanes(created.tabId)).toEqual([
+    expect.objectContaining({ id: created.paneId, title: 'Codex CLI' }),
+    expect.objectContaining({ id: split.newPaneId, title: 'example.txt' }),
+  ])
+})

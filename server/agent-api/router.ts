@@ -585,6 +585,17 @@ export function createAgentApiRouter({
       if (result?.tabId) {
         await persistSyncableTerminalRename(paneSnapshot, name)
 
+        const tabPanes = layoutStore.listPanes?.(result.tabId) || []
+        if (tabPanes.length === 1) {
+          const tabRenameResult = layoutStore.renameTab?.(result.tabId, name)
+          if (tabRenameResult?.tabId) {
+            wsHandler?.broadcastUiCommand({
+              command: 'tab.rename',
+              payload: { id: result.tabId, title: name },
+            })
+          }
+        }
+
         wsHandler?.broadcastUiCommand({
           command: 'pane.rename',
           payload: { tabId: result.tabId, paneId: result.paneId || paneId, title: name },

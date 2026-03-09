@@ -324,7 +324,51 @@ describe('cli e2e flow', () => {
 
       const snapshot = (server.layoutStore as any).snapshot
       expect(snapshot.paneTitles[created.data.tabId][created.data.paneId]).toBe('Main shell')
-      expect(snapshot.tabs.find((tab: any) => tab.id === created.data.tabId)?.title).toBe('Workspace')
+      expect(snapshot.tabs.find((tab: any) => tab.id === created.data.tabId)?.title).toBe('Main shell')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('lists and resolves derived pane titles without an explicit rename', async () => {
+    const server = await startTestServerWithRealLayoutStore()
+    try {
+      const created = await runCliJson<{ data: { tabId: string; paneId: string } }>(server.url, [
+        'new-tab',
+        '-n',
+        'Workspace',
+        '--codex',
+        '--cwd',
+        process.cwd(),
+      ])
+      const tabId = created.data.tabId
+      const firstPaneId = created.data.paneId
+
+      const split = await runCliJson<{ data: { paneId: string } }>(server.url, [
+        'split-pane',
+        '-t',
+        firstPaneId,
+        '--editor',
+        '/tmp/example.txt',
+      ])
+
+      const listed = await runCliJson<{ data: { panes: Array<{ id: string; title?: string }> } }>(server.url, [
+        'list-panes',
+        '--json',
+      ])
+      expect(listed.data.panes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: firstPaneId, title: 'Codex CLI' }),
+        expect.objectContaining({ id: split.data.paneId, title: 'example.txt' }),
+      ]))
+
+      const listedText = await runCli(server.url, ['list-panes'])
+      expect(listedText.stdout).toContain('Codex CLI')
+      expect(listedText.stdout).toContain('example.txt')
+
+      await runCli(server.url, ['select-pane', '-t', 'example.txt'])
+
+      const snapshot = (server.layoutStore as any).snapshot
+      expect(snapshot.activePane[tabId]).toBe(split.data.paneId)
     } finally {
       await server.close()
     }
