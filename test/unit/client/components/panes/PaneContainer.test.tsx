@@ -1738,7 +1738,7 @@ describe('PaneContainer', () => {
         store,
       )
 
-      const meta = screen.getByText('freshell (main*)  25%')
+      const meta = screen.getByText(/freshell \(main\*\)\s+25%/)
       expect(meta).toHaveAttribute(
         'title',
         'Directory: /home/user/code/freshell/.worktrees/issue-163\nbranch: main*\nTokens: 15/60(25% full)',
@@ -1749,7 +1749,7 @@ describe('PaneContainer', () => {
         usage: { input_tokens: 999999, output_tokens: 999999 },
       }))
 
-      expect(screen.getByText('freshell (main*)  25%')).toBeInTheDocument()
+      expect(screen.getByText(/freshell \(main\*\)\s+25%/)).toBeInTheDocument()
 
       store.dispatch(applySessionsPatch({
         upsertProjects: [
@@ -1761,7 +1761,7 @@ describe('PaneContainer', () => {
         removeProjectPaths: [],
       }))
 
-      expect(screen.queryByText('freshell (main*)  25%')).not.toBeInTheDocument()
+      expect(screen.queryByText(/freshell \(main\*\)\s+25%/)).not.toBeInTheDocument()
 
       store.dispatch(turnResult({
         sessionId: 'sdk-session-1',
@@ -1862,12 +1862,74 @@ describe('PaneContainer', () => {
         store,
       )
 
-      const meta = screen.getByText('freshell (main*)  25%')
+      const meta = screen.getByText(/freshell \(main\*\)\s+25%/)
       expect(meta).toHaveAttribute(
         'title',
         'Directory: /home/user/code/freshell\nbranch: main*\nTokens: 15/60(25% full)',
       )
-      expect(screen.queryByText('other (stale)  10%')).not.toBeInTheDocument()
+      expect(screen.queryByText(/other \(stale\)\s+10%/)).not.toBeInTheDocument()
+    })
+
+    it('falls back to resumeSessionId for FreshClaude panes before sdk.session.init arrives', () => {
+      const node: PaneNode = {
+        type: 'leaf',
+        id: 'pane-fresh',
+        content: {
+          kind: 'agent-chat',
+          provider: 'freshclaude',
+          createRequestId: 'req-fresh',
+          status: 'starting',
+          resumeSessionId: 'claude-session-restored',
+        },
+      }
+
+      const store = createStore(
+        {
+          layouts: { 'tab-1': node },
+          activePane: { 'tab-1': 'pane-fresh' },
+        },
+        {},
+        {
+          projects: [
+            {
+              projectPath: '/home/user/code/freshell',
+              sessions: [
+                {
+                  provider: 'claude',
+                  sessionType: 'freshclaude',
+                  sessionId: 'claude-session-restored',
+                  projectPath: '/home/user/code/freshell',
+                  cwd: '/home/user/code/freshell/.worktrees/issue-163',
+                  gitBranch: 'main',
+                  isDirty: false,
+                  updatedAt: 1,
+                  tokenUsage: {
+                    inputTokens: 10,
+                    outputTokens: 5,
+                    cachedTokens: 0,
+                    totalTokens: 15,
+                    contextTokens: 15,
+                    compactThresholdTokens: 60,
+                    compactPercent: 25,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        {
+          sessions: {},
+          pendingCreates: {},
+          availableModels: [],
+        },
+      )
+
+      renderWithStore(
+        <PaneContainer tabId="tab-1" node={node} />,
+        store,
+      )
+
+      expect(screen.getByText(/freshell \(main\)\s+25%/)).toBeInTheDocument()
     })
 
     it('does not add the token-budget indicator to kilroy panes', () => {
