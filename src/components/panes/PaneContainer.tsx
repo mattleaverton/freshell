@@ -183,7 +183,10 @@ export default function PaneContainer({ tabId, node, hidden }: PaneContainerProp
     if (node.type !== 'leaf') return
     api.patch(`/api/panes/${encodeURIComponent(paneId)}`, {
       name: trimmed,
-    }).then(() => {
+    }).then((response: { data?: { paneId?: string }; message?: string } | null | undefined) => {
+      if (response?.data?.paneId !== paneId) {
+        throw new Error(response?.message || 'Failed to rename pane')
+      }
       dispatch(updatePaneTitle({ tabId, paneId, title: trimmed }))
       if (isOnlyPane) {
         dispatch(updateTab({ id: tabId, updates: { title: trimmed } }))

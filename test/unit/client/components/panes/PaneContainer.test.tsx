@@ -431,6 +431,12 @@ describe('PaneContainer', () => {
 
   describe('pane rename sync', () => {
     it('commits local pane and tab title changes only after the pane rename API succeeds for a single-pane tab', async () => {
+      mockApiPatch.mockResolvedValueOnce({
+        status: 'ok',
+        data: { tabId: 'tab-1', paneId: 'pane-1' },
+        message: 'pane renamed',
+      })
+
       const leafNode: PaneNode = {
         type: 'leaf',
         id: 'pane-1',
@@ -461,6 +467,44 @@ describe('PaneContainer', () => {
         expect(store.getState().panes.paneTitles['tab-1']?.['pane-1']).toBe('Ops desk')
       })
       expect(store.getState().tabs.tabs[0].title).toBe('Ops desk')
+    })
+
+    it('keeps the rename editor open and does not update local titles when the server reports pane not found in a 200 response', async () => {
+      mockApiPatch.mockResolvedValueOnce({
+        status: 'ok',
+        message: 'pane not found',
+      })
+
+      const leafNode: PaneNode = {
+        type: 'leaf',
+        id: 'pane-1',
+        content: createTerminalContent({ terminalId: 'term-1' }),
+      }
+
+      const store = createStore({
+        layouts: { 'tab-1': leafNode },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        renameRequestTabId: 'tab-1',
+        renameRequestPaneId: 'pane-1',
+      })
+
+      renderWithStore(
+        <PaneContainer tabId="tab-1" node={leafNode} />,
+        store
+      )
+
+      const renameInput = await screen.findByLabelText('Rename pane')
+      fireEvent.change(renameInput, { target: { value: 'Ops desk' } })
+      fireEvent.blur(renameInput)
+
+      await waitFor(() => {
+        expect(mockApiPatch).toHaveBeenCalledWith('/api/panes/pane-1', { name: 'Ops desk' })
+      })
+      expect(await screen.findByLabelText('Rename pane')).toHaveValue('Ops desk')
+      expect(screen.getByRole('alert')).toHaveTextContent('pane not found')
+      expect(store.getState().panes.paneTitles['tab-1']?.['pane-1']).toBe('Shell')
+      expect(store.getState().tabs.tabs[0].title).toBe('Tab 1')
     })
 
     it('does not update local pane titles when the pane rename API rejects the request', async () => {
