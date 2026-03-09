@@ -156,11 +156,11 @@ export class TestHarness {
     })
   }
 
-  /** Get settings from Redux */
+  /** Get settings from Redux (returns the inner AppSettings object) */
   async getSettings(): Promise<any> {
     return this.page.evaluate(() => {
       const state = window.__FRESHELL_TEST_HARNESS__?.getState()
-      return state?.settings ?? null
+      return state?.settings?.settings ?? null
     })
   }
 
