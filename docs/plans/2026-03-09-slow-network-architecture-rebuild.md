@@ -21,7 +21,7 @@ The right fix is a direct cutover:
 3. Serve visible windows from server-owned read models.
 4. Make realtime traffic small, prioritized, and bounded.
 
-This revision replaces the earlier draft rather than lightly editing it. The earlier draft had the right architectural direction, but it was not excellent yet for thirteen reasons:
+This revision replaces the earlier draft rather than lightly editing it. The earlier draft had the right architectural direction, but it was not excellent yet for seventeen reasons:
 
 1. The tasks were still too coarse for disciplined red-green-refactor execution.
 2. It treated all ordering/filtering as server-owned, even when some ordering depends on client-only state such as open tabs and local activity pinning.
@@ -36,6 +36,10 @@ This revision replaces the earlier draft rather than lightly editing it. The ear
 11. It did not explicitly remove the duplicate terminal REST wiring in `server/routes/terminals.ts`, so the transport cleanup could still leave two route stacks and two invalidation sources alive.
 12. It did not call out several existing test surfaces that still encode the old terminal snapshot contract, especially `test/e2e/pane-header-runtime-meta-flow.test.tsx`, `test/server/ws-terminal-meta.test.ts`, `test/server/ws-terminal-create-session-repair.test.ts`, `test/server/ws-terminal-create-reuse-running-claude.test.ts`, and `test/server/ws-terminal-create-reuse-running-codex.test.ts`.
 13. It did not call out bootstrap-adjacent tests that still stub `/api/sessions`, especially `test/unit/client/components/App.ws-extensions.test.tsx`, `test/e2e/terminal-font-settings.test.tsx`, and `test/e2e/mobile-sidebar-fullwidth-flow.test.tsx`, which invites late failures or pressure to keep the old startup API alive.
+14. It did not explicitly move terminal-directory query ownership into client store thunks or a shared transport helper, which would let `Sidebar.tsx`, `OverviewView.tsx`, and `BackgroundSessions.tsx` keep building `/api/terminals` requests and preserving leaf-owned transport choreography.
+15. It did not explicitly carry `server/ws-schemas.ts`, `test/unit/client/lib/ws-client.test.ts`, or the `hello.capabilities` cleanup needed to remove `sessionsPatchV1` and `sessionsPaginationV1`, which would leave negotiation state for a bulk-session protocol the app is deleting.
+16. It did not call out `test/unit/client/components/agent-chat/AgentChatView.split-pane.test.tsx`, which still models attach recovery around `sdk.history` and would either fail late or pressure execution into a replay compatibility shim.
+17. It named a new startup router without explicitly separating it from the existing `server/bootstrap.ts` pre-dotenv environment bootstrap module, which creates avoidable risk of execution touching the wrong bootstrap seam.
 
 The direct end state is still correct. What changes here is the execution shape and a sharper boundary:
 
@@ -90,6 +94,18 @@ The direct end state is still correct. What changes here is the execution shape 
    - `server/ws-handler.ts`, `server/terminals-router.ts`, and `server/routes/terminals.ts` still broadcast `terminal.list.updated`.
    - `test/server/ws-terminal-meta.test.ts`, `test/e2e/pane-header-runtime-meta-flow.test.tsx`, `test/server/ws-terminal-create-session-repair.test.ts`, `test/server/ws-terminal-create-reuse-running-claude.test.ts`, and `test/server/ws-terminal-create-reuse-running-codex.test.ts` still assume the global terminal-meta snapshot and legacy terminal-directory invalidation path.
    - Without an explicit revision invalidation contract plus targeted runtime metadata deltas, execution could easily preserve the old snapshot model under a different name.
+
+10. **Terminal directory reads are still component-owned.**
+   - `src/components/Sidebar.tsx`, `src/components/OverviewView.tsx`, and `src/components/BackgroundSessions.tsx` still build terminal-directory fetch behavior directly instead of dispatching store-owned query-window intents.
+   - If this is not fixed in the plan, the transport rewrite would still leave leaf components responsible for abort policy, refresh policy, and invalidation choreography.
+
+11. **The websocket handshake still negotiates dead session transport features.**
+   - `shared/ws-protocol.ts`, `server/ws-schemas.ts`, `src/lib/ws-client.ts`, and `server/ws-handler.ts` still advertise or track `sessionsPatchV1` and `sessionsPaginationV1`.
+   - Those flags are specific to the bulk session snapshot architecture and should not survive websocket v4.
+
+12. **The codebase already has a different concept called bootstrap.**
+   - `server/bootstrap.ts` is the pre-dotenv environment bootstrap module and must remain separate from the new shell bootstrap HTTP route.
+   - The plan must name and wire the HTTP route clearly enough that execution does not blur those concerns.
 
 ## End-State Architecture
 
@@ -149,6 +165,8 @@ The direct end state is still correct. What changes here is the execution shape 
 7. The server also owns terminal-directory invalidation revisions and the targeted runtime metadata deltas for already-visible terminals.
 8. `App.tsx` owns websocket lifecycle. Child components and thunks stop calling `ws.connect()`.
 9. Leaf React components dispatch intents and render selectors; they do not build read-model URLs, own fetch cancellation policy, or reconcile revision state locally.
+10. Terminal directory query windows and revision refresh policy live in store thunks/selectors or a shared client transport helper, not in `Sidebar.tsx`, `OverviewView.tsx`, or `BackgroundSessions.tsx`.
+11. `hello.capabilities` advertises only still-live websocket features; legacy session snapshot and pagination capability flags are removed.
 
 ### Cutover Invariants
 
@@ -168,6 +186,8 @@ The direct end state is still correct. What changes here is the execution shape 
 14. Terminal patch/delete/create flows invalidate only active terminal-directory windows through `terminals.changed`, never through websocket list snapshots.
 15. When state is uncertain, refetch the active visible window instead of rebuilding large client reconciliation logic.
 16. CLI list/search flows use the same server-owned session-directory read model family rather than keeping `/api/sessions` and `/api/sessions/search` alive as shadow APIs.
+17. No client hello advertises `sessionsPatchV1` or `sessionsPaginationV1`; if `capabilities` remains, it is limited to still-live independent features such as `uiScreenshotV1`.
+18. No leaf component constructs `/api/terminals` requests or owns terminal-directory invalidation, cursoring, or abort policy directly.
 
 ## Budgets And Invariants
 
@@ -245,11 +265,13 @@ Every task below follows red-green-refactor and adds coverage at the seam being 
    - `App.tsx` performs one shell bootstrap request and then hydrates only the actually visible surfaces
    - focused-pane HTTP hydration starts after bootstrap without waiting for websocket `ready`
    - child components no longer own websocket connection setup
+   - `hello.capabilities` no longer advertises session snapshot or pagination features
    - startup does not request `terminal.meta.list` or any websocket terminal directory snapshot
    - sessions state is visible-window oriented, not snapshot oriented
    - agent chat no longer depends on `sdk.history`
+   - split-pane attach recovery no longer depends on `sdk.history`
    - terminal search no longer depends on `SearchAddon`
-   - overview/background terminal summaries fetch through `GET /api/terminals` only when visible
+   - terminal directory state is store-owned, and `Sidebar.tsx`, `OverviewView.tsx`, and `BackgroundSessions.tsx` fetch through `GET /api/terminals` only by dispatching store-owned intents when visible
    - terminal-directory invalidation uses `terminals.changed`, not `terminal.list.updated`
    - pane-header runtime metadata comes from viewport payloads plus targeted runtime deltas, not a global terminal-meta snapshot
    - session rename/archive/delete flows never call `GET /api/sessions`
@@ -293,6 +315,7 @@ npm run verify
 **Files:**
 - Modify: `test/server/ws-protocol.test.ts`
 - Modify: `test/unit/client/lib/ws-client-error-code.test.ts`
+- Modify: `test/unit/client/lib/ws-client.test.ts`
 
 **Step 1: Write the failing tests**
 
@@ -301,12 +324,13 @@ Cover:
 - mismatched clients close with `4010`
 - legacy bulk message types are absent from the v4 runtime contract
 - new lightweight messages `sessions.changed`, `terminals.changed`, `terminal.runtime.updated`, and `sdk.session.snapshot` are present
+- `hello.capabilities` no longer advertises `sessionsPatchV1` or `sessionsPaginationV1`
 
 **Step 2: Run the tests to verify failure**
 
 ```bash
 npm run test:server -- test/server/ws-protocol.test.ts
-NODE_ENV=test npx vitest run test/unit/client/lib/ws-client-error-code.test.ts
+NODE_ENV=test npx vitest run test/unit/client/lib/ws-client-error-code.test.ts test/unit/client/lib/ws-client.test.ts
 ```
 
 Expected: FAIL because protocol v4 does not exist yet.
@@ -319,7 +343,7 @@ Add explicit assertions that no successful attach/create path ever expects `sess
 
 ```bash
 npm run test:server -- test/server/ws-protocol.test.ts
-NODE_ENV=test npx vitest run test/unit/client/lib/ws-client-error-code.test.ts
+NODE_ENV=test npx vitest run test/unit/client/lib/ws-client-error-code.test.ts test/unit/client/lib/ws-client.test.ts
 ```
 
 Expected: still FAIL, but now for the correct missing contract.
@@ -327,7 +351,7 @@ Expected: still FAIL, but now for the correct missing contract.
 **Step 5: Commit**
 
 ```bash
-git add test/server/ws-protocol.test.ts test/unit/client/lib/ws-client-error-code.test.ts
+git add test/server/ws-protocol.test.ts test/unit/client/lib/ws-client-error-code.test.ts test/unit/client/lib/ws-client.test.ts
 git commit -m "test(protocol): define websocket v4 slow-network contract"
 ```
 
@@ -337,6 +361,7 @@ git commit -m "test(protocol): define websocket v4 slow-network contract"
 
 **Files:**
 - Modify: `shared/ws-protocol.ts`
+- Modify: `server/ws-schemas.ts`
 - Modify: `server/ws-handler.ts`
 - Modify: `src/lib/ws-client.ts`
 
@@ -378,27 +403,33 @@ export type SdkSessionSnapshotMessage = {
 }
 ```
 
-**Step 2: Make the server reject mismatched clients immediately**
+Also prune `HelloSchema.capabilities` to only still-live websocket features.
+
+**Step 2: Remove bulk-session capability negotiation**
+
+Delete `sessionsPatchV1` and `sessionsPaginationV1` from client hello generation, schema validation, and handler state. Keep unrelated websocket capabilities only if they still serve a live v4 feature.
+
+**Step 3: Make the server reject mismatched clients immediately**
 
 Close mismatches with `4010` and `PROTOCOL_MISMATCH`.
 
-**Step 3: Make the client speak only v4 and treat `4010` as fatal**
+**Step 4: Make the client speak only v4 and treat `4010` as fatal**
 
 `src/lib/ws-client.ts` must stop retrying protocol-mismatch connections.
 
-**Step 4: Run the tests to verify pass**
+**Step 5: Run the tests to verify pass**
 
 ```bash
 npm run test:server -- test/server/ws-protocol.test.ts
-NODE_ENV=test npx vitest run test/unit/client/lib/ws-client-error-code.test.ts
+NODE_ENV=test npx vitest run test/unit/client/lib/ws-client-error-code.test.ts test/unit/client/lib/ws-client.test.ts
 ```
 
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
-git add shared/ws-protocol.ts server/ws-handler.ts src/lib/ws-client.ts
+git add shared/ws-protocol.ts server/ws-schemas.ts server/ws-handler.ts src/lib/ws-client.ts
 git commit -m "feat(protocol): ship websocket v4 realtime-only contract"
 ```
 
@@ -728,7 +759,7 @@ git commit -m "test(api): define first-paint bootstrap route"
 ### Task 10: Implement The Bootstrap Route And Wire It Into The Server
 
 **Files:**
-- Create: `server/startup-router.ts`
+- Create: `server/shell-bootstrap-router.ts`
 - Modify: `server/index.ts`
 
 **Step 1: Implement `GET /api/bootstrap`**
@@ -749,7 +780,11 @@ Do not include version/update checks or network diagnostics.
 
 Use the existing app wiring style; do not introduce a parallel boot path.
 
-**Step 4: Run the test to verify pass**
+**Step 4: Keep it separate from environment bootstrap**
+
+Do not repurpose or rename `server/bootstrap.ts`; that file is the pre-dotenv environment bootstrap seam, not the HTTP shell bootstrap route.
+
+**Step 5: Run the test to verify pass**
 
 ```bash
 npm run test:server -- test/integration/server/bootstrap-router.test.ts
@@ -757,10 +792,10 @@ npm run test:server -- test/integration/server/bootstrap-router.test.ts
 
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
-git add server/startup-router.ts server/index.ts
+git add server/shell-bootstrap-router.ts server/index.ts
 git commit -m "feat(api): add shell-only bootstrap route"
 ```
 
@@ -1432,6 +1467,7 @@ git commit -m "feat(agent-chat): serve timelines and snapshot-based attach"
 - Modify: `test/unit/client/agentChatSlice.test.ts`
 - Modify: `test/unit/client/lib/sdk-message-handler.session-lost.test.ts`
 - Modify: `test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx`
+- Modify: `test/unit/client/components/agent-chat/AgentChatView.split-pane.test.tsx`
 - Modify: `test/unit/client/ws-client-sdk.test.ts`
 - Create: `test/unit/client/store/agentChatThunks.test.ts`
 
@@ -1442,13 +1478,14 @@ Cover:
 - `sdk.session.snapshot` seeds metadata without `sdk.history`
 - switching sessions aborts stale timeline fetches
 - session loss still triggers immediate recovery handling
+- split-pane remount and reattach recover from `sdk.session.snapshot` plus live status without replay-history fallback
 - `ws-client` dispatches snapshot/live events without replay-history fallback
 - store-owned thunks own timeline/body fetch cancellation instead of `AgentChatView` doing transport choreography inline
 
 **Step 2: Run the tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/ws-client-sdk.test.ts test/unit/client/store/agentChatThunks.test.ts
+NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/components/agent-chat/AgentChatView.split-pane.test.tsx test/unit/client/ws-client-sdk.test.ts test/unit/client/store/agentChatThunks.test.ts
 ```
 
 Expected: FAIL because the client still expects replay arrays.
@@ -1460,7 +1497,7 @@ Collapsed turns must fetch bodies only when opened.
 **Step 4: Run the tests again**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/ws-client-sdk.test.ts test/unit/client/store/agentChatThunks.test.ts
+NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/components/agent-chat/AgentChatView.split-pane.test.tsx test/unit/client/ws-client-sdk.test.ts test/unit/client/store/agentChatThunks.test.ts
 ```
 
 Expected: still FAIL.
@@ -1468,7 +1505,7 @@ Expected: still FAIL.
 **Step 5: Commit**
 
 ```bash
-git add test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/ws-client-sdk.test.ts test/unit/client/store/agentChatThunks.test.ts
+git add test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/components/agent-chat/AgentChatView.split-pane.test.tsx test/unit/client/ws-client-sdk.test.ts test/unit/client/store/agentChatThunks.test.ts
 git commit -m "test(agent-chat): define visible-first timeline client state"
 ```
 
@@ -1519,7 +1556,7 @@ Abort stale requests on session switch.
 **Step 5: Run the tests to verify pass**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/store/agentChatThunks.test.ts
+NODE_ENV=test npx vitest run test/unit/client/agentChatSlice.test.ts test/unit/client/lib/sdk-message-handler.session-lost.test.ts test/unit/client/components/agent-chat/AgentChatView.reload.test.tsx test/unit/client/components/agent-chat/AgentChatView.split-pane.test.tsx test/unit/client/store/agentChatThunks.test.ts
 ```
 
 Expected: PASS.
@@ -1720,11 +1757,15 @@ git commit -m "feat(terminal): serve terminal directory, viewport, scrollback, a
 
 **Files:**
 - Modify: `test/unit/client/components/App.ws-bootstrap.test.tsx`
+- Modify: `test/unit/client/components/Sidebar.test.tsx`
+- Modify: `test/unit/client/components/Sidebar.mobile.test.tsx`
 - Create: `test/unit/client/components/OverviewView.test.tsx`
 - Modify: `test/unit/client/components/BackgroundSessions.test.tsx`
 - Modify: `test/unit/client/components/TerminalView.lifecycle.test.tsx`
 - Modify: `test/unit/client/components/TerminalView.search.test.tsx`
 - Modify: `test/unit/client/components/terminal/terminal-runtime.test.ts`
+- Create: `test/unit/client/store/terminalDirectorySlice.test.ts`
+- Create: `test/unit/client/store/terminalDirectoryThunks.test.ts`
 - Modify: `test/unit/client/store/terminalMetaSlice.test.ts`
 - Modify: `test/unit/client/components/component-edge-cases.test.tsx`
 - Modify: `test/e2e/pane-header-runtime-meta-flow.test.tsx`
@@ -1734,7 +1775,8 @@ git commit -m "feat(terminal): serve terminal directory, viewport, scrollback, a
 
 Cover:
 - bootstrap does not request `terminal.meta.list`
-- overview and background terminal surfaces fetch `GET /api/terminals` only when visible instead of sending websocket `terminal.list`
+- terminal directory query windows are store-owned rather than component-owned
+- sidebar, overview, and background terminal surfaces fetch `GET /api/terminals` only by dispatching store-owned intents when visible instead of sending websocket `terminal.list`
 - mount or reattach fetches `/viewport` before websocket attach
 - `sinceSeq` uses `tailSeq` from the viewport snapshot
 - viewport responses seed the runtime metadata needed for visible pane chrome without a global websocket terminal-meta snapshot
@@ -1746,7 +1788,7 @@ Cover:
 **Step 2: Run the tests to verify failure**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/OverviewView.test.tsx test/unit/client/components/BackgroundSessions.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/unit/client/store/terminalMetaSlice.test.ts test/unit/client/components/component-edge-cases.test.tsx test/e2e/pane-header-runtime-meta-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.mobile.test.tsx test/unit/client/components/OverviewView.test.tsx test/unit/client/components/BackgroundSessions.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/unit/client/store/terminalDirectorySlice.test.ts test/unit/client/store/terminalDirectoryThunks.test.ts test/unit/client/store/terminalMetaSlice.test.ts test/unit/client/components/component-edge-cases.test.tsx test/e2e/pane-header-runtime-meta-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
 ```
 
 Expected: FAIL because restore is still replay-first and search is still client-side.
@@ -1758,7 +1800,7 @@ The dependency removal is part of the architectural end state.
 **Step 4: Run the tests again**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/OverviewView.test.tsx test/unit/client/components/BackgroundSessions.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/unit/client/store/terminalMetaSlice.test.ts test/unit/client/components/component-edge-cases.test.tsx test/e2e/pane-header-runtime-meta-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.mobile.test.tsx test/unit/client/components/OverviewView.test.tsx test/unit/client/components/BackgroundSessions.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/unit/client/store/terminalDirectorySlice.test.ts test/unit/client/store/terminalDirectoryThunks.test.ts test/unit/client/store/terminalMetaSlice.test.ts test/unit/client/components/component-edge-cases.test.tsx test/e2e/pane-header-runtime-meta-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
 ```
 
 Expected: still FAIL.
@@ -1766,7 +1808,7 @@ Expected: still FAIL.
 **Step 5: Commit**
 
 ```bash
-git add test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/OverviewView.test.tsx test/unit/client/components/BackgroundSessions.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/unit/client/store/terminalMetaSlice.test.ts test/unit/client/components/component-edge-cases.test.tsx test/e2e/pane-header-runtime-meta-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
+git add test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.mobile.test.tsx test/unit/client/components/OverviewView.test.tsx test/unit/client/components/BackgroundSessions.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/unit/client/store/terminalDirectorySlice.test.ts test/unit/client/store/terminalDirectoryThunks.test.ts test/unit/client/store/terminalMetaSlice.test.ts test/unit/client/components/component-edge-cases.test.tsx test/e2e/pane-header-runtime-meta-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
 git commit -m "test(terminal): define visible-only terminal summaries and viewport restore"
 ```
 
@@ -1776,19 +1818,34 @@ git commit -m "test(terminal): define visible-only terminal summaries and viewpo
 
 **Files:**
 - Modify: `src/App.tsx`
+- Modify: `src/components/Sidebar.tsx`
 - Modify: `src/components/OverviewView.tsx`
 - Modify: `src/components/BackgroundSessions.tsx`
 - Modify: `src/components/TerminalView.tsx`
 - Modify: `src/components/terminal/terminal-runtime.ts`
 - Modify: `src/lib/terminal-attach-seq-state.ts`
 - Modify: `src/lib/ws-client.ts`
+- Create: `src/store/terminalDirectorySlice.ts`
+- Create: `src/store/terminalDirectoryThunks.ts`
 - Modify: `src/store/terminalMetaSlice.ts`
+- Modify: `src/store/store.ts`
 
 **Step 1: Remove client-side terminal search ownership**
 
 Delete `SearchAddon` usage from `src/components/terminal/terminal-runtime.ts`.
 
-**Step 2: Make restore viewport-first**
+**Step 2: Move terminal-directory window ownership out of leaf components**
+
+Create a store-owned terminal-directory slice and thunk layer that owns:
+- initial visible fetch
+- manual refresh
+- refresh-on-`terminals.changed`
+- cursoring if the directory grows beyond one window
+- abort behavior for stale visible/background requests
+
+`Sidebar.tsx`, `OverviewView.tsx`, and `BackgroundSessions.tsx` should dispatch these intents rather than building `/api/terminals` requests or websocket `terminal.list` flows directly.
+
+**Step 3: Make restore viewport-first**
 
 Use:
 
@@ -1799,30 +1856,30 @@ terminal.write(snapshot.serialized)
 ws.send({ type: 'terminal.attach', terminalId, cols, rows, sinceSeq: snapshot.tailSeq })
 ```
 
-**Step 3: Move terminal summaries and focused runtime metadata onto HTTP read models**
+**Step 4: Move terminal summaries and focused runtime metadata onto HTTP read models**
 
-`OverviewView.tsx` and `BackgroundSessions.tsx` must stop sending websocket `terminal.list` requests and fetch `GET /api/terminals` only when visible. `App.tsx` must stop requesting `terminal.meta.list` on connect. `src/store/terminalMetaSlice.ts` should become a scoped cache fed by viewport responses and delta upserts for already-visible terminals instead of a global startup snapshot.
+`Sidebar.tsx`, `OverviewView.tsx`, and `BackgroundSessions.tsx` must stop sending websocket `terminal.list` requests. `App.tsx` must stop requesting `terminal.meta.list` on connect. `src/store/terminalMetaSlice.ts` should become a scoped cache fed by viewport responses and delta upserts for already-visible terminals instead of a global startup snapshot.
 
-**Step 4: Consume the new terminal invalidation and runtime delta model**
+**Step 5: Consume the new terminal invalidation and runtime delta model**
 
-`src/App.tsx`, `src/components/OverviewView.tsx`, `src/components/BackgroundSessions.tsx`, and `src/store/terminalMetaSlice.ts` must listen for `terminals.changed` to refetch only active terminal-directory windows and for `terminal.runtime.updated` to refresh already-visible pane chrome. No client path may still expect `terminal.list.updated`.
+`src/App.tsx`, `src/components/Sidebar.tsx`, `src/components/OverviewView.tsx`, `src/components/BackgroundSessions.tsx`, `src/store/terminalDirectorySlice.ts`, `src/store/terminalDirectoryThunks.ts`, and `src/store/terminalMetaSlice.ts` must listen for `terminals.changed` to refetch only active terminal-directory windows and for `terminal.runtime.updated` to refresh already-visible pane chrome. No client path may still expect `terminal.list.updated`.
 
-**Step 5: Keep background work abortable**
+**Step 6: Keep background work abortable**
 
 Terminal scrollback and search requests must cancel on pane switch or query change.
 
-**Step 6: Run the tests to verify pass**
+**Step 7: Run the tests to verify pass**
 
 ```bash
-NODE_ENV=test npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/OverviewView.test.tsx test/unit/client/components/BackgroundSessions.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/unit/client/store/terminalMetaSlice.test.ts test/unit/client/components/component-edge-cases.test.tsx test/e2e/pane-header-runtime-meta-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
+NODE_ENV=test npx vitest run test/unit/client/components/App.ws-bootstrap.test.tsx test/unit/client/components/Sidebar.test.tsx test/unit/client/components/Sidebar.mobile.test.tsx test/unit/client/components/OverviewView.test.tsx test/unit/client/components/BackgroundSessions.test.tsx test/unit/client/components/TerminalView.lifecycle.test.tsx test/unit/client/components/TerminalView.search.test.tsx test/unit/client/components/terminal/terminal-runtime.test.ts test/unit/client/store/terminalDirectorySlice.test.ts test/unit/client/store/terminalDirectoryThunks.test.ts test/unit/client/store/terminalMetaSlice.test.ts test/unit/client/components/component-edge-cases.test.tsx test/e2e/pane-header-runtime-meta-flow.test.tsx test/e2e/terminal-flaky-network-responsiveness.test.tsx
 ```
 
 Expected: PASS.
 
-**Step 7: Commit**
+**Step 8: Commit**
 
 ```bash
-git add src/App.tsx src/components/OverviewView.tsx src/components/BackgroundSessions.tsx src/components/TerminalView.tsx src/components/terminal/terminal-runtime.ts src/lib/terminal-attach-seq-state.ts src/lib/ws-client.ts src/store/terminalMetaSlice.ts
+git add src/App.tsx src/components/Sidebar.tsx src/components/OverviewView.tsx src/components/BackgroundSessions.tsx src/components/TerminalView.tsx src/components/terminal/terminal-runtime.ts src/lib/terminal-attach-seq-state.ts src/lib/ws-client.ts src/store/terminalDirectorySlice.ts src/store/terminalDirectoryThunks.ts src/store/terminalMetaSlice.ts src/store/store.ts
 git commit -m "refactor(terminal): fetch visible summaries and paint viewport before replay"
 ```
 
@@ -1895,7 +1952,10 @@ git commit -m "test(transport): forbid legacy bulk websocket flows"
 
 **Files:**
 - Modify: `server/ws-handler.ts`
+- Modify: `server/ws-schemas.ts`
 - Modify: `src/App.tsx`
+- Modify: `src/lib/ws-client.ts`
+- Modify: `shared/ws-protocol.ts`
 - Modify: `server/cli/index.ts`
 - Modify: `server/index.ts`
 - Modify: `server/terminals-router.ts`
@@ -1912,12 +1972,13 @@ Remove:
 - `sessions.patch`
 - `sessions.fetch`
 - `sdk.history`
+- `sessionsPatchV1` and `sessionsPaginationV1` hello capability negotiation
 - websocket terminal-directory request/response flows (`terminal.list`, `terminal.list.response`) and the boot-time terminal-meta snapshot path (`terminal.meta.list`, `terminal.meta.list.response`)
 - `terminal.list.updated`
 
 **Step 2: Remove dead code and imports**
 
-Delete `server/ws-chunking.ts`, `server/routes/sessions.ts`, and the duplicate `server/routes/terminals.ts` module. Remove `/api/sessions/search` if no runtime callers remain. Remove websocket handshake snapshot plumbing from `server/index.ts`, `server/ws-handler.ts`, and `server/terminals-router.ts` once bootstrap owns shell-only flags and terminal invalidation uses revisions. Reduce `server/session-pagination.ts` to only what still supports HTTP read-model cursoring, or delete the dead parts if nothing remains.
+Delete `server/ws-chunking.ts`, `server/routes/sessions.ts`, and the duplicate `server/routes/terminals.ts` module. Remove `/api/sessions/search` if no runtime callers remain. Remove websocket handshake snapshot plumbing from `server/index.ts`, `server/ws-handler.ts`, `server/ws-schemas.ts`, `shared/ws-protocol.ts`, and `server/terminals-router.ts` once bootstrap owns shell-only flags and terminal invalidation uses revisions. Reduce `server/session-pagination.ts` to only what still supports HTTP read-model cursoring, or delete the dead parts if nothing remains.
 
 **Step 3: Carry the CLI onto the new session-directory contract**
 
@@ -1925,7 +1986,7 @@ Delete `server/ws-chunking.ts`, `server/routes/sessions.ts`, and the duplicate `
 
 **Step 4: Simplify client startup and message handling**
 
-`src/App.tsx` must no longer buffer chunked session snapshots or request global terminal-meta websocket snapshots after connect. `src/App.tsx` and all terminal-directory UI surfaces must no longer listen for or emit `terminal.list.updated`.
+`src/App.tsx` must no longer buffer chunked session snapshots or request global terminal-meta websocket snapshots after connect. `src/lib/ws-client.ts` must no longer advertise dead session transport capabilities. `src/App.tsx` and all terminal-directory UI surfaces must no longer listen for or emit `terminal.list.updated`.
 
 **Step 5: Run the tests to verify pass**
 
@@ -1939,7 +2000,7 @@ Expected: PASS.
 **Step 6: Commit**
 
 ```bash
-git add server/ws-handler.ts src/App.tsx server/cli/index.ts server/index.ts server/terminals-router.ts server/session-pagination.ts
+git add server/ws-handler.ts server/ws-schemas.ts src/App.tsx src/lib/ws-client.ts shared/ws-protocol.ts server/cli/index.ts server/index.ts server/terminals-router.ts server/session-pagination.ts
 git rm server/ws-chunking.ts server/routes/sessions.ts server/routes/terminals.ts
 git commit -m "refactor(transport): delete legacy bulk websocket architecture"
 ```
