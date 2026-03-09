@@ -60,7 +60,7 @@ export class TerminalHelper {
    */
   async waitForOutput(
     text: string,
-    options: { timeout?: number; nth?: number; terminalId?: string } = {},
+    options: { timeout?: number; terminalId?: string } = {},
   ): Promise<void> {
     const { timeout = 10_000, terminalId } = options
 
@@ -79,13 +79,14 @@ export class TerminalHelper {
   /**
    * Get all text from the terminal buffer.
    * Uses the xterm.js buffer API via the test harness (renderer-agnostic).
+   * @param terminalId - optional: specific terminal to read, or omit for first registered
    */
-  async getVisibleText(nth = 0): Promise<string> {
-    return this.page.evaluate(() => {
+  async getVisibleText(terminalId?: string): Promise<string> {
+    return this.page.evaluate((id) => {
       const harness = window.__FRESHELL_TEST_HARNESS__
       if (!harness) return ''
-      return harness.getTerminalBuffer() ?? ''
-    })
+      return harness.getTerminalBuffer(id) ?? ''
+    }, terminalId)
   }
 
   /**
@@ -94,15 +95,15 @@ export class TerminalHelper {
    * Uses the xterm.js buffer API via the test harness (renderer-agnostic).
    */
   async waitForPrompt(
-    options: { timeout?: number; nth?: number } = {},
+    options: { timeout?: number; terminalId?: string } = {},
   ): Promise<void> {
-    const { timeout = 15_000 } = options
+    const { timeout = 15_000, terminalId } = options
 
     await this.page.waitForFunction(
-      () => {
+      (id) => {
         const harness = window.__FRESHELL_TEST_HARNESS__
         if (!harness) return false
-        const buffer = harness.getTerminalBuffer()
+        const buffer = harness.getTerminalBuffer(id)
         if (!buffer) return false
         // Check each line for a shell prompt character at end of line
         const lines = buffer.split('\n')
@@ -111,7 +112,7 @@ export class TerminalHelper {
           return trimmed.length > 0 && /[$%>#]\s*$/.test(trimmed)
         })
       },
-      undefined,
+      terminalId,
       { timeout },
     )
   }

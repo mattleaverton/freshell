@@ -159,13 +159,12 @@ test.describe('Terminal Lifecycle', () => {
     await terminal.executeCommand('echo "before-disconnect"')
     await terminal.waitForOutput('before-disconnect')
 
-    // Force WebSocket close from client side
-    await page.evaluate(() => {
-      // Access internal WS to force close
-      const harness = window.__FRESHELL_TEST_HARNESS__
-      if (!harness) return
-      // The WS client auto-reconnects, so we just need to verify it works
-    })
+    // Force WebSocket close from client side (without setting intentionalClose,
+    // so the client will auto-reconnect)
+    await harness.forceDisconnect()
+
+    // Wait for auto-reconnection
+    await harness.waitForConnection(20_000)
 
     // Terminal should still work after reconnection
     await terminal.waitForPrompt({ timeout: 20_000 })
