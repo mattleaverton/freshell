@@ -15,6 +15,7 @@
 - Solve the user’s request directly: the menu must stay open long enough to use, and terminal clipboard actions must move to their own top section with icons.
 - Do **not** encode a new product rule that “right-click never activates a pane.” The contract is narrower: right-click opening the menu must not steal terminal focus in the same interaction window or reclose the menu.
 - Preserve normal primary-click behavior. The fix should keep ordinary inactive-pane activation and terminal autofocus working on left click.
+- Use the repo’s current seams, not stale duplicates. For terminal menu structure, the canonical unit seam is `test/unit/client/components/context-menu/menu-defs.test.ts`; do not let this task turn into duplicate-test cleanup.
 - Use the two real terminal-pane entry points that matter:
   - inactive terminal pane header -> pane menu
   - inactive terminal body -> terminal menu
@@ -24,12 +25,13 @@
 - Keep browser-pane coverage out of the automated mainline. One browser-pane sanity check belongs in the required browser spot-check only.
 - The accepted medium strategy requires one real browser validation pass after automated tests. That is mandatory.
 
-## Diagnostic Carry-Forward
+## Diagnostic Feedback For Implementer
 
 - Diagnostic feedback for the implementer: prior loops kept drifting by turning conjectures into requirements. Do not add new framing while executing this plan; let failing tests drive the fix.
 - Do not start in `ContextMenuProvider`. Its dismissal listeners are not the first justified seam here, and previous loops overfit to that theory.
 - If the pane-shell marker plus the active-pane autofocus guard clears both right-click routes while preserving left-click autofocus, stop there.
 - Only widen beyond the active-pane autofocus effect if a still-red regression proves another `term.focus()` path participates in the same close sequence.
+- If the red test reproduces the close without any `focus()` call on the inactive terminal, stop and trace the actual close trigger before editing production code. Do not land the marker/focus guard on speculation alone.
 
 ## Scope Guards
 
@@ -375,8 +377,9 @@ Expected:
 - at least one right-click regression fails today, either because the menu disappears or because the inactive terminal’s `focus()` spy increments during the right-click flow
 
 Do not change production code until the file is red.
+If a right-click regression fails while the `focus()` spy stays flat, treat that as evidence the current root-cause theory is wrong and trace the actual close path before touching production code.
 
-### Task 2: Fix Only The Autofocus That Collides With Context-Menu Opening
+### Task 2: Fix Only The Proven Autofocus Collision
 
 **Files:**
 - Modify: `src/components/panes/Pane.tsx`
@@ -452,7 +455,7 @@ Attach that marker to the root pane shell without removing the existing `onMouse
 >
 ```
 
-This is the key architectural decision: preserve current pane activation wiring, but mark that this activation came from a context-menu interaction.
+This is the key architectural decision when the red test shows the focus race: preserve current pane activation wiring, but mark that this activation came from a context-menu interaction.
 
 **Step 2: Honor that marker in the active-pane autofocus effect**
 
@@ -481,7 +484,7 @@ useEffect(() => {
 }, [isTerminal, shouldFocusActiveTerminal])
 ```
 
-Do not edit unrelated `term.focus()` sites. This plan is specifically targeting the active-pane autofocus effect that fires when an inactive pane becomes active during the right-click path.
+Do not edit unrelated `term.focus()` sites. This plan is specifically targeting the active-pane autofocus effect that fires when an inactive pane becomes active during the right-click path, and only because Task 1 is expected to prove that path is involved.
 
 **Step 3: Re-run the stability regressions**
 
@@ -493,7 +496,7 @@ npx vitest run test/e2e/pane-context-menu-stability.test.tsx --reporter=dot
 
 Expected: all three tests pass.
 
-If either right-click regression is still red, inspect the failing route and only then widen the focus suppression to another proven `term.focus()` path. Do not jump to provider dismissal changes first.
+If either right-click regression is still red, inspect the failing route and only then widen the focus suppression to another proven `term.focus()` path. Do not jump to provider dismissal changes first, and do not keep the marker solution if the failing test never showed focus involvement.
 
 **Step 4: Commit the stability fix**
 
@@ -506,23 +509,12 @@ git commit -m "fix: keep pane context menus open on right click"
 
 **Files:**
 - Modify: `src/components/context-menu/menu-defs.ts`
-- Modify: `test/unit/client/context-menu/menu-defs.test.ts`
+- Modify: `test/unit/client/components/context-menu/menu-defs.test.ts`
 - Modify: `test/unit/client/components/ContextMenuProvider.test.tsx`
 
 **Step 1: Extend the authoritative menu-definition test harness**
 
-In `test/unit/client/context-menu/menu-defs.test.ts`, keep using this file as the authoritative `buildMenuItems(...)` harness.
-
-First, rename the stale `copyFreshclaude*` mocks in `createActions()` to the current `copyAgentChat*` names so the helper matches `MenuActions`:
-
-```ts
-copyAgentChatCodeBlock: vi.fn(),
-copyAgentChatToolInput: vi.fn(),
-copyAgentChatToolOutput: vi.fn(),
-copyAgentChatDiffNew: vi.fn(),
-copyAgentChatDiffOld: vi.fn(),
-copyAgentChatFilePath: vi.fn(),
-```
+In `test/unit/client/components/context-menu/menu-defs.test.ts`, keep using this file as the authoritative `buildMenuItems(...)` harness for terminal menu structure. Do not spend this task cleaning up `test/unit/client/context-menu/menu-defs.test.ts`; if the full verification gate later proves that duplicate file is failing, fix it then as a separate follow-up, not as part of the main red-green loop here.
 
 Then add these helpers near `makeCtx(...)`:
 
@@ -668,7 +660,7 @@ it('renders copy, Paste, and Select all as the first terminal menu section with 
 })
 ```
 
-Keep action wiring assertions in `test/unit/client/context-menu/menu-defs.test.ts`; this DOM test is only the visible smoke for order, label, and icons.
+Keep action wiring assertions in `test/unit/client/components/context-menu/menu-defs.test.ts`; this DOM test is only the visible smoke for order, label, and icons.
 
 **Step 3: Run the clipboard tests before changing production code**
 
@@ -676,7 +668,7 @@ Run:
 
 ```bash
 npx vitest run \
-  test/unit/client/context-menu/menu-defs.test.ts \
+  test/unit/client/components/context-menu/menu-defs.test.ts \
   test/unit/client/components/ContextMenuProvider.test.tsx \
   --reporter=dot
 ```
@@ -746,7 +738,7 @@ Run:
 
 ```bash
 npx vitest run \
-  test/unit/client/context-menu/menu-defs.test.ts \
+  test/unit/client/components/context-menu/menu-defs.test.ts \
   test/unit/client/components/ContextMenuProvider.test.tsx \
   --reporter=dot
 ```
@@ -756,7 +748,7 @@ Expected: PASS.
 **Step 6: Commit the clipboard menu change**
 
 ```bash
-git add src/components/context-menu/menu-defs.ts test/unit/client/context-menu/menu-defs.test.ts test/unit/client/components/ContextMenuProvider.test.tsx
+git add src/components/context-menu/menu-defs.ts test/unit/client/components/context-menu/menu-defs.test.ts test/unit/client/components/ContextMenuProvider.test.tsx
 git commit -m "fix: group terminal clipboard actions at top"
 ```
 
@@ -773,7 +765,7 @@ Run:
 npx vitest run \
   test/e2e/pane-context-menu-stability.test.tsx \
   test/e2e/refresh-context-menu-flow.test.tsx \
-  test/unit/client/context-menu/menu-defs.test.ts \
+  test/unit/client/components/context-menu/menu-defs.test.ts \
   test/unit/client/components/ContextMenuProvider.test.tsx \
   --reporter=dot
 ```
