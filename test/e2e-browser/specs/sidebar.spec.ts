@@ -69,13 +69,13 @@ test.describe('Sidebar', () => {
     // Settings view should show SettingsSection headers
     await expect(page.getByText('Terminal').first()).toBeVisible({ timeout: 5_000 })
 
-    // Go back to terminal view by clicking a nav button
-    // The Tabs button (title="Tabs (Ctrl+B A)") should return to terminal/tabs view
-    const tabsButton = page.getByRole('button', { name: /tabs/i })
-    await expect(tabsButton).toBeVisible()
-    await tabsButton.click()
+    // Switch to the "Coding Agents" view (title="Coding Agents (Ctrl+B T)")
+    // which is the default/home view that shows sessions alongside the terminal
+    const codingAgentsButton = page.getByRole('button', { name: /coding agents/i })
+    await expect(codingAgentsButton).toBeVisible()
+    await codingAgentsButton.click()
 
-    // Terminal should be visible again
+    // Terminal should be visible again (Coding Agents view shows sessions list + terminal)
     await page.locator('.xterm').first().waitFor({ state: 'visible', timeout: 10_000 })
   })
 
@@ -84,7 +84,7 @@ test.describe('Sidebar', () => {
     await terminal.waitForPrompt()
 
     // Create a second tab (which detaches from the first terminal)
-    const addTabButton = page.getByRole('button', { name: /new.*tab/i })
+    const addTabButton = page.locator('[data-context="tab-add"]')
     await addTabButton.click()
     await harness.waitForTabCount(2)
 

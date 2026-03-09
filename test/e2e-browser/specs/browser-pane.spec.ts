@@ -101,7 +101,7 @@ test.describe('Browser Pane', () => {
     await iframe.waitFor({ state: 'attached', timeout: 10_000 })
 
     // Switch to a new tab
-    const addTabButton = page.getByRole('button', { name: /new.*tab/i })
+    const addTabButton = page.locator('[data-context="tab-add"]')
     await addTabButton.click()
     await harness.waitForTabCount(2)
 

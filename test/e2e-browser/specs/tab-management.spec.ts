@@ -7,14 +7,14 @@ test.describe('Tab Management', () => {
   })
 
   test('add tab button creates new tab', async ({ freshellPage, page, harness }) => {
-    const addButton = page.getByRole('button', { name: /new.*tab/i })
+    const addButton = page.locator('[data-context="tab-add"]')
     await addButton.click()
     await harness.waitForTabCount(2)
   })
 
   test('clicking tab switches to it', async ({ freshellPage, page, harness }) => {
     // Create second tab
-    const addButton = page.getByRole('button', { name: /new.*tab/i })
+    const addButton = page.locator('[data-context="tab-add"]')
     await addButton.click()
     await harness.waitForTabCount(2)
 
@@ -29,7 +29,7 @@ test.describe('Tab Management', () => {
 
   test('close tab removes it', async ({ freshellPage, page, harness }) => {
     // Create second tab
-    const addButton = page.getByRole('button', { name: /new.*tab/i })
+    const addButton = page.locator('[data-context="tab-add"]')
     await addButton.click()
     await harness.waitForTabCount(2)
 
@@ -58,21 +58,21 @@ test.describe('Tab Management', () => {
     const tab = page.locator('[data-context="tab"]').first()
     await tab.dblclick()
 
-    // Should show an input field
-    const renameInput = page.locator('input[type="text"]').first()
+    // The rename input appears INSIDE the tab element (replaces the title span)
+    const renameInput = tab.locator('input')
     await expect(renameInput).toBeVisible({ timeout: 5_000 })
 
     // Type new name
     await renameInput.fill('My Custom Tab')
     await renameInput.press('Enter')
 
-    // Verify the tab shows the new name
-    await expect(page.getByText('My Custom Tab')).toBeVisible()
+    // Verify the tab shows the new name (look within the tab area)
+    await expect(tab.getByText('My Custom Tab')).toBeVisible({ timeout: 5_000 })
   })
 
   test('tabs persist across page reload', async ({ freshellPage, page, harness, serverInfo }) => {
     // Create a second tab and rename the first
-    const addButton = page.getByRole('button', { name: /new.*tab/i })
+    const addButton = page.locator('[data-context="tab-add"]')
     await addButton.click()
     await harness.waitForTabCount(2)
 
@@ -97,7 +97,7 @@ test.describe('Tab Management', () => {
 
   test('tab overflow shows scroll controls', async ({ freshellPage, page, harness }) => {
     // Create many tabs to trigger overflow
-    const addButton = page.getByRole('button', { name: /new.*tab/i })
+    const addButton = page.locator('[data-context="tab-add"]')
     for (let i = 0; i < 10; i++) {
       await addButton.click()
     }
@@ -111,7 +111,7 @@ test.describe('Tab Management', () => {
 
   test('drag and drop reorders tabs', async ({ freshellPage, page, harness }) => {
     // Create tabs
-    const addButton = page.getByRole('button', { name: /new.*tab/i })
+    const addButton = page.locator('[data-context="tab-add"]')
     await addButton.click()
     await addButton.click()
     await harness.waitForTabCount(3)

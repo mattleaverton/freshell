@@ -6,7 +6,7 @@ test.describe('Stress Tests', () => {
   test('handles 6+ panes simultaneously', async ({ freshellPage, page, harness }) => {
     // Create multiple panes by splitting
     // Verify all panes render and terminals work
-    const addButton = page.getByRole('button', { name: /new.*tab/i })
+    const addButton = page.locator('[data-context="tab-add"]')
 
     // Create tabs with terminals
     for (let i = 0; i < 5; i++) {
@@ -23,7 +23,7 @@ test.describe('Stress Tests', () => {
   })
 
   test('handles 10 tabs', async ({ freshellPage, page, harness }) => {
-    const addButton = page.getByRole('button', { name: /new.*tab/i })
+    const addButton = page.locator('[data-context="tab-add"]')
 
     for (let i = 0; i < 9; i++) {
       await addButton.click()
@@ -33,7 +33,7 @@ test.describe('Stress Tests', () => {
 
   test('rapid tab switching', async ({ freshellPage, page, harness }) => {
     // Create multiple tabs
-    const addButton = page.getByRole('button', { name: /new.*tab/i })
+    const addButton = page.locator('[data-context="tab-add"]')
     for (let i = 0; i < 4; i++) {
       await addButton.click()
     }
