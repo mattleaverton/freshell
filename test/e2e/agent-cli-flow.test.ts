@@ -245,4 +245,60 @@ describe('cli e2e flow', () => {
       await server.close()
     }
   })
+
+  it('renames the tab and panes in a create split rename flow', async () => {
+    const server = await startTestServerWithRealLayoutStore()
+    try {
+      const created = await runCliJson<{ data: { tabId: string; paneId: string } }>(server.url, [
+        'new-tab',
+        '-n',
+        'Workspace',
+        '--codex',
+        '--cwd',
+        process.cwd(),
+      ])
+      const tabId = created.data.tabId
+      const firstPaneId = created.data.paneId
+
+      const split = await runCliJson<{ data: { paneId: string } }>(server.url, [
+        'split-pane',
+        '-t',
+        firstPaneId,
+        '--editor',
+        '/tmp/example.txt',
+      ])
+      const secondPaneId = split.data.paneId
+
+      await runCli(server.url, ['rename-tab', '-t', tabId, '-n', 'Issue 166 work'])
+      await runCli(server.url, ['rename-pane', '-t', firstPaneId, '-n', 'Codex'])
+      await runCli(server.url, ['rename-pane', secondPaneId, 'Editor'])
+
+      const snapshot = (server.layoutStore as any).snapshot
+      expect(snapshot.tabs.find((tab: any) => tab.id === tabId)?.title).toBe('Issue 166 work')
+      expect(snapshot.paneTitles[tabId][firstPaneId]).toBe('Codex')
+      expect(snapshot.paneTitles[tabId][secondPaneId]).toBe('Editor')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('renames the active pane when only a new name is provided', async () => {
+    const server = await startTestServerWithRealLayoutStore()
+    try {
+      const created = await runCliJson<{ data: { tabId: string; paneId: string } }>(server.url, [
+        'new-tab',
+        '-n',
+        'Workspace',
+        '--shell',
+        'system',
+      ])
+
+      await runCli(server.url, ['rename-pane', 'Main shell'])
+
+      const snapshot = (server.layoutStore as any).snapshot
+      expect(snapshot.paneTitles[created.data.tabId][created.data.paneId]).toBe('Main shell')
+    } finally {
+      await server.close()
+    }
+  })
 })

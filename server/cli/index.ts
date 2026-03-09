@@ -350,6 +350,26 @@ async function main() {
       writeJson(res)
       return
     }
+    case 'rename-pane': {
+      const { target, name } = resolveRenameArgs(flags, args, ['t', 'target', 'pane'])
+      if (!name) {
+        writeError('name required')
+        process.exitCode = 1
+        return
+      }
+
+      const resolved = await resolvePaneTarget(client, target)
+      if (!resolved.pane?.id) {
+        writeError(resolved.message || 'pane not found')
+        process.exitCode = 1
+        return
+      }
+      if (resolved.message) writeError(resolved.message)
+
+      const res = await client.patch(`/api/panes/${encodeURIComponent(resolved.pane.id)}`, { name })
+      writeJson(res)
+      return
+    }
     case 'kill-pane': {
       const target = (getFlag(flags, 't', 'target', 'pane') as string | undefined) || args[0]
       const resolved = await resolvePaneTarget(client, target)
