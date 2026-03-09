@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import express from 'express'
 import http from 'http'
 import { createAgentApiRouter } from '../../server/agent-api/router'
+import { LayoutStore } from '../../server/agent-api/layout-store'
 
 function startTestServer(
   layoutStoreOverrides: Partial<Record<string, any>> = {},
@@ -63,6 +64,39 @@ async function runCli(url: string, args: string[]) {
       resolve({ stdout, stderr })
     })
   })
+}
+
+async function startTestServerWithRealLayoutStore() {
+  const layoutStore = new LayoutStore()
+  const app = express()
+  app.use(express.json())
+
+  let terminalCount = 0
+  app.use('/api', createAgentApiRouter({
+    layoutStore,
+    registry: {
+      create: () => ({ terminalId: `term_${++terminalCount}` }),
+      get: () => undefined,
+      input: () => {},
+    },
+  }))
+
+  const server = http.createServer(app)
+  return await new Promise<{ url: string; layoutStore: LayoutStore; close: () => Promise<void> }>((resolve) => {
+    server.listen(0, () => {
+      const { port } = server.address() as { port: number }
+      resolve({
+        url: `http://localhost:${port}`,
+        layoutStore,
+        close: () => new Promise((done) => server.close(() => done())),
+      })
+    })
+  })
+}
+
+async function runCliJson<T>(url: string, args: string[]) {
+  const output = await runCli(url, args)
+  return JSON.parse(output.stdout) as T
 }
 
 describe('cli e2e flow', () => {
@@ -175,6 +209,40 @@ describe('cli e2e flow', () => {
         await fs.unlink(screenshotPath).catch(() => undefined)
       }
       await close()
+    }
+  })
+
+  it('renames the active tab when only a new name is provided', async () => {
+    const server = await startTestServerWithRealLayoutStore()
+    try {
+      const first = await runCliJson<{ data: { tabId: string } }>(server.url, ['new-tab', '-n', 'Backlog'])
+      const second = await runCliJson<{ data: { tabId: string } }>(server.url, ['new-tab', '-n', 'Active'])
+
+      await runCli(server.url, ['rename-tab', 'Release prep'])
+
+      const snapshot = (server.layoutStore as any).snapshot
+      expect(snapshot.activeTabId).toBe(second.data.tabId)
+      expect(snapshot.tabs.find((tab: any) => tab.id === second.data.tabId)?.title).toBe('Release prep')
+      expect(snapshot.tabs.find((tab: any) => tab.id === first.data.tabId)?.title).toBe('Backlog')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('renames a non-active tab when a target id is provided', async () => {
+    const server = await startTestServerWithRealLayoutStore()
+    try {
+      const first = await runCliJson<{ data: { tabId: string } }>(server.url, ['new-tab', '-n', 'Backlog'])
+      const second = await runCliJson<{ data: { tabId: string } }>(server.url, ['new-tab', '-n', 'Active'])
+
+      await runCli(server.url, ['rename-tab', first.data.tabId, 'Release', 'board'])
+
+      const snapshot = (server.layoutStore as any).snapshot
+      expect(snapshot.activeTabId).toBe(second.data.tabId)
+      expect(snapshot.tabs.find((tab: any) => tab.id === first.data.tabId)?.title).toBe('Release board')
+      expect(snapshot.tabs.find((tab: any) => tab.id === second.data.tabId)?.title).toBe('Active')
+    } finally {
+      await server.close()
     }
   })
 })

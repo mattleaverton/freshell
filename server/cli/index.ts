@@ -42,6 +42,40 @@ const getFlag = (flags: Flags, ...names: string[]) => {
   return undefined
 }
 
+function resolveRenameArgs(
+  flags: Flags,
+  args: string[],
+  targetFlagNames: string[],
+) {
+  const explicitTarget = getFlag(flags, ...targetFlagNames)
+  const explicitName = getFlag(flags, 'n', 'name', 'title')
+  const joinName = (parts: string[]) => parts.join(' ').trim()
+
+  if (typeof explicitName === 'string') {
+    return {
+      target: typeof explicitTarget === 'string' ? explicitTarget : args[0],
+      name: explicitName.trim(),
+    }
+  }
+
+  if (typeof explicitTarget === 'string') {
+    return {
+      target: explicitTarget,
+      name: joinName(args),
+    }
+  }
+
+  if (args.length === 1) {
+    return { target: undefined, name: args[0].trim() }
+  }
+
+  if (args.length >= 2) {
+    return { target: args[0], name: joinName(args.slice(1)) }
+  }
+
+  return { target: undefined, name: '' }
+}
+
 const isTruthy = (value: unknown) => value === true || value === 'true' || value === '1' || value === 'yes'
 
 const unwrap = (response: any) => (response && typeof response === 'object' && 'data' in response ? response.data : response)
@@ -219,8 +253,7 @@ async function main() {
       return
     }
     case 'rename-tab': {
-      const target = (getFlag(flags, 't', 'target', 'tab') as string | undefined) || args[0]
-      const name = (getFlag(flags, 'n', 'name', 'title') as string | undefined) || args[1]
+      const { target, name } = resolveRenameArgs(flags, args, ['t', 'target', 'tab'])
       if (!name) {
         writeError('name required')
         process.exitCode = 1
