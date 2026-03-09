@@ -317,12 +317,10 @@ export function createAgentApiRouter({
   })
 
   router.get('/panes/:id/wait-for', async (req, res) => {
-    const paneId = req.params.id
+    const resolved = resolvePaneTarget(req.params.id)
+    if (rejectPaneTargetError(res, resolved)) return
+    const paneId = resolved.paneId || req.params.id
     let terminalId = layoutStore.resolvePaneToTerminal?.(paneId)
-    if (!terminalId && layoutStore.resolveTarget) {
-      const target = layoutStore.resolveTarget(paneId)
-      if (target?.paneId) terminalId = layoutStore.resolvePaneToTerminal?.(target.paneId)
-    }
     const term = terminalId ? registry.get?.(terminalId) : undefined
     if (!term) return res.status(404).json(fail('terminal not found'))
 
@@ -596,17 +594,6 @@ export function createAgentApiRouter({
 
       if (result?.tabId) {
         await persistSyncableTerminalRename(paneSnapshot, name)
-
-        const tabPanes = layoutStore.listPanes?.(result.tabId) || []
-        if (tabPanes.length === 1) {
-          const tabRenameResult = layoutStore.renameTab?.(result.tabId, name)
-          if (tabRenameResult?.tabId) {
-            wsHandler?.broadcastUiCommand({
-              command: 'tab.rename',
-              payload: { id: result.tabId, title: name },
-            })
-          }
-        }
 
         wsHandler?.broadcastUiCommand({
           command: 'pane.rename',

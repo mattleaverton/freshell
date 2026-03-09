@@ -164,27 +164,21 @@ export default function PaneContainer({ tabId, node, hidden }: PaneContainerProp
 
   const commitRename = useCallback(() => {
     if (!renamingPaneId) return
+    const paneId = renamingPaneId
     const trimmed = renameValue.trim()
     if (trimmed) {
-      dispatch(updatePaneTitle({ tabId, paneId: renamingPaneId, title: trimmed }))
-
-      // Sync tab title when renaming the only pane in a tab
-      if (isOnlyPane) {
-        dispatch(updateTab({ id: tabId, updates: { title: trimmed } }))
-      }
-
-      // Persist the rename immediately so later server-side pane content
-      // changes preserve the user-authored title.
       if (node.type === 'leaf') {
-        api.patch(`/api/panes/${encodeURIComponent(renamingPaneId)}`, {
+        api.patch(`/api/panes/${encodeURIComponent(paneId)}`, {
           name: trimmed,
-        }).catch(() => {}) // Best-effort; UI already updated via Redux
+        }).then(() => {
+          dispatch(updatePaneTitle({ tabId, paneId, title: trimmed }))
+        }).catch(() => {})
       }
     }
     // Empty value keeps the original title (no dispatch)
     setRenamingPaneId(null)
     setRenameValue('')
-  }, [dispatch, tabId, renamingPaneId, renameValue, node, isOnlyPane])
+  }, [dispatch, tabId, renamingPaneId, renameValue, node])
 
   const handleRenameKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === 'Escape') {

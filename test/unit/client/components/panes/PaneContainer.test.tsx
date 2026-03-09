@@ -430,7 +430,7 @@ describe('PaneContainer', () => {
   })
 
   describe('pane rename sync', () => {
-    it('patches the pane rename API when inline rename commits', async () => {
+    it('commits local pane title changes only after the pane rename API succeeds', async () => {
       const leafNode: PaneNode = {
         type: 'leaf',
         id: 'pane-1',
@@ -457,6 +457,43 @@ describe('PaneContainer', () => {
       await waitFor(() => {
         expect(mockApiPatch).toHaveBeenCalledWith('/api/panes/pane-1', { name: 'Ops desk' })
       })
+      await waitFor(() => {
+        expect(store.getState().panes.paneTitles['tab-1']?.['pane-1']).toBe('Ops desk')
+      })
+      expect(store.getState().tabs.tabs[0].title).toBe('Tab 1')
+    })
+
+    it('does not update local pane titles when the pane rename API rejects the request', async () => {
+      mockApiPatch.mockRejectedValueOnce(new Error('name must be 500 characters or fewer'))
+
+      const leafNode: PaneNode = {
+        type: 'leaf',
+        id: 'pane-1',
+        content: createTerminalContent({ terminalId: 'term-1' }),
+      }
+
+      const store = createStore({
+        layouts: { 'tab-1': leafNode },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        renameRequestTabId: 'tab-1',
+        renameRequestPaneId: 'pane-1',
+      })
+
+      renderWithStore(
+        <PaneContainer tabId="tab-1" node={leafNode} />,
+        store
+      )
+
+      const renameInput = await screen.findByLabelText('Rename pane')
+      fireEvent.change(renameInput, { target: { value: 'x'.repeat(600) } })
+      fireEvent.blur(renameInput)
+
+      await waitFor(() => {
+        expect(mockApiPatch).toHaveBeenCalledWith('/api/panes/pane-1', { name: 'x'.repeat(600) })
+      })
+      expect(store.getState().panes.paneTitles['tab-1']?.['pane-1']).toBe('Shell')
+      expect(store.getState().tabs.tabs[0].title).toBe('Tab 1')
     })
   })
 

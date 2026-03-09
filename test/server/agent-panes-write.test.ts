@@ -64,6 +64,24 @@ it('rejects ambiguous pane title targets before mutating pane routes', async () 
   expect(closePane).not.toHaveBeenCalled()
 })
 
+it('rejects ambiguous pane title targets for wait-for', async () => {
+  const app = express()
+  app.use(express.json())
+  app.use('/api', createAgentApiRouter({
+    layoutStore: {
+      resolveTarget: () => ({ message: 'pane target is ambiguous; use pane id or tab.pane index' }),
+    },
+    registry: {},
+    wsHandler: { broadcastUiCommand: () => {} },
+  }))
+
+  const res = await request(app).get('/api/panes/Shell/wait-for')
+
+  expect(res.status).toBe(409)
+  expect(res.body.status).toBe('error')
+  expect(res.body.message).toContain('ambiguous')
+})
+
 it('rejects blank pane rename payloads', async () => {
   const app = express()
   app.use(express.json())
@@ -156,16 +174,14 @@ it('renames a resolved pane via PATCH /api/panes/:id', async () => {
   })
 })
 
-it('syncs the tab title when renaming the only pane in a tab', async () => {
+it('does not rename the tab when renaming the only pane in a tab', async () => {
   const app = express()
   app.use(express.json())
   const renamePane = vi.fn(() => ({ tabId: 'tab_1', paneId: 'pane_1' }))
-  const renameTab = vi.fn(() => ({ tabId: 'tab_1' }))
   const broadcastUiCommand = vi.fn()
   app.use('/api', createAgentApiRouter({
     layoutStore: {
       renamePane,
-      renameTab,
       listPanes: () => [{ id: 'pane_1' }],
       getPaneSnapshot: () => ({
         tabId: 'tab_1',
@@ -181,15 +197,13 @@ it('syncs the tab title when renaming the only pane in a tab', async () => {
 
   expect(res.status).toBe(200)
   expect(renamePane).toHaveBeenCalledWith('pane_1', 'Docs')
-  expect(renameTab).toHaveBeenCalledWith('tab_1', 'Docs')
   expect(broadcastUiCommand).toHaveBeenCalledWith({
     command: 'pane.rename',
     payload: { tabId: 'tab_1', paneId: 'pane_1', title: 'Docs' },
   })
-  expect(broadcastUiCommand).toHaveBeenCalledWith({
+  expect(broadcastUiCommand).not.toHaveBeenCalledWith(expect.objectContaining({
     command: 'tab.rename',
-    payload: { id: 'tab_1', title: 'Docs' },
-  })
+  }))
 })
 
 it('persists syncable coding CLI pane renames through terminal overrides and session overrides', async () => {
