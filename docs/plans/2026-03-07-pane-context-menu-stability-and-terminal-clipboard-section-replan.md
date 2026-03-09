@@ -4,7 +4,7 @@
 
 **Goal:** Keep pane right-click menus open instead of immediately reclosing, and move terminal `copy` / `Paste` / `Select all` into their own iconized top section with `copy` labeled exactly `copy`.
 
-**Architecture:** Treat this as two contracts. First, lock down the terminal clipboard section at the menu-definition layer plus one rendered DOM smoke so order, label, icons, disabled state, and handler wiring are explicit. Second, characterize the menu-close bug through the real `PaneLayout` routes that exist today: pane shell on browser panes, pane shell on terminal panes, and terminal body on terminal panes. Use the smallest production change that turns a reproduced automated route green. Keep any live-browser spot-check outside the execution path as an optional human follow-up with corrected worktree startup commands; the implementation subagent's acceptance gate must stay fully automatable.
+**Architecture:** Treat this as two contracts. First, lock down the terminal clipboard section in `menu-defs.ts` with unit coverage plus one rendered DOM smoke so order, label, icons, disabled state, and handler wiring are explicit. Second, reproduce the reclose bug on the concrete inactive-pane routes users hit today, then fix the narrow seam those red tests identify. The most likely seam is `Pane`'s unconditional secondary-button activation, but that is only a valid fix if a reproduced route points there. Finish with one real browser spot-check using corrected worktree startup commands, because the accepted medium strategy included an interactive validation checkpoint.
 
 **Tech Stack:** React 18, TypeScript, Redux Toolkit, lucide-react, Vitest, Testing Library, Vite dev server, xterm.js mocks
 
@@ -17,7 +17,14 @@
 - Preserve existing terminal action ids: `terminal-copy`, `terminal-paste`, `terminal-select-all`, `terminal-search`.
 - `ContextMenu` already renders `item.icon`, so the clipboard-icon change should stay in `menu-defs.ts` unless a failing rendered test proves otherwise.
 - Terminal-body coverage must target a descendant appended inside `data-testid="terminal-xterm-container"` by the test xterm mock. Right-clicking only the wrapper div does not count as terminal-body coverage.
-- Automated tests are the required regression proof for trycycle execution. If the first jsdom route matrix stays green, do not pivot to a mandatory browser-only check; instead tighten the automated harness with code-grounded diagnostics until a faithful route goes red. A live-browser check may be documented separately, but it is not an execution gate.
+- Automated tests are still the primary regression proof, but they are not the whole contract here. The final execution report must also include one live browser spot-check or an explicit statement that the environment blocked it.
+
+## Strategy Notes
+
+- Do not start by changing `ContextMenuProvider`'s capture-phase `pointerdown` dismissal. That listener is installed only after `menuState` exists, so it cannot observe the secondary click that opened the menu.
+- Do not encode invented product rules. If you add a seam-level contract such as "secondary mouse down does not focus an inactive pane", tie it to a reproduced user-visible failure and keep the justification in the test names and plan notes.
+- Use the existing `refresh-context-menu-flow` harness shape and the real `Pane` / `PaneLayout` / `TerminalView` routes. Do not introduce a fake seam when the repo already has a close analog.
+- For manual validation, do not use `npm run dev:server` with a custom `PORT`; that script hardcodes `3002`.
 
 ### Task 1: Lock Down The Terminal Clipboard Section Contract
 
@@ -260,23 +267,21 @@ git add src/components/context-menu/menu-defs.ts test/unit/client/context-menu/m
 git commit -m "fix: group terminal clipboard actions at top"
 ```
 
-### Task 2: Reproduce And Fix Pane Context Menu Stability From The Real Routes
+### Task 2: Reproduce And Fix Pane Context Menu Stability From The Real Inactive-Pane Routes
 
 **Files:**
 - Create: `test/e2e/pane-context-menu-stability.test.tsx`
-- Modify as needed: `src/components/context-menu/ContextMenuProvider.tsx`
+- Modify: `test/unit/client/components/panes/Pane.test.tsx`
 - Modify as needed: `src/components/panes/Pane.tsx`
 - Modify as needed: `src/components/TerminalView.tsx`
+- Modify as needed: `src/components/context-menu/ContextMenuProvider.tsx`
 
-**Step 1: Add a failing route-matrix regression harness**
+**Step 1: Add focused failing regressions for the actual user-facing routes**
 
-Create `test/e2e/pane-context-menu-stability.test.tsx`. Reuse the `createStore(...)` / `renderFlow(...)` pattern from `test/e2e/refresh-context-menu-flow.test.tsx`, but build the matrix around the routes that actually exist in the current tree:
+Create `test/e2e/pane-context-menu-stability.test.tsx`. Reuse the `createStore(...)` / `renderFlow(...)` pattern from `test/e2e/refresh-context-menu-flow.test.tsx`, but target only the concrete routes that can explain the reported "sometimes recloses immediately" behavior:
 
-- browser pane shell, already-active pane
 - browser pane shell, inactive pane
-- terminal pane shell, already-active pane
 - terminal pane shell, inactive pane
-- terminal body, already-active pane
 - terminal body, inactive pane
 
 At the top of the file, add a local xterm mock that appends a child surface into the real container so the terminal-body route goes through `term.open(...)` instead of a wrapper shortcut:
@@ -376,7 +381,7 @@ async function rightClickAndExpectMenuToStayOpen(target: HTMLElement) {
 }
 ```
 
-One terminal-body regression should look like this:
+The terminal-body regression should look like this:
 
 ```tsx
 it('keeps the terminal body menu open when right-clicking an inactive terminal pane', async () => {
@@ -405,7 +410,13 @@ const inactivePaneShell = container.querySelector(
 ) as HTMLElement
 ```
 
-Do not add assertions about `activePane` changes or `focus()` calls to the final contract. Those are only diagnostic aids if the user-visible menu-open assertion is not yet reproducing the bug.
+Add three route tests:
+
+- `browser pane shell stays open when right-clicking an inactive pane`
+- `terminal pane shell stays open when right-clicking an inactive pane`
+- `terminal body stays open when right-clicking an inactive pane`
+
+Do not add `activePane` or `focus()` assertions to the final contract in this file. Those are diagnostics only if one of the user-visible routes does not reproduce cleanly.
 
 **Step 2: Run the new stability suite**
 
@@ -417,7 +428,36 @@ npx vitest run test/e2e/pane-context-menu-stability.test.tsx --reporter=dot
 
 Expected: ideally at least one route fails on current code by closing the menu before the post-open settle window ends.
 
-**Step 3: If the suite stays green, tighten the automated repro before touching production code**
+**Step 3: If the suite goes red, prove the narrow seam before changing production code**
+
+If Step 2 fails on an inactive pane-shell or terminal-body route, first verify whether the failure depends on secondary-click pane activation through the shared shell. Add this focused unit regression to `test/unit/client/components/panes/Pane.test.tsx`:
+
+```tsx
+it('does not call onFocus on secondary-button mouse down', () => {
+  const onFocus = vi.fn()
+
+  const { container } = render(
+    <Pane
+      tabId="t1"
+      paneId="p1"
+      isActive={false}
+      isOnlyPane={false}
+      onClose={vi.fn()}
+      onFocus={onFocus}
+    >
+      <div>Content</div>
+    </Pane>
+  )
+
+  fireEvent.mouseDown(container.firstChild as HTMLElement, { button: 2 })
+
+  expect(onFocus).not.toHaveBeenCalled()
+})
+```
+
+Keep the existing primary-button focus test. This seam-level test is justified only because the route-level failure has already shown that secondary-click activation is part of the bug.
+
+**Step 4: If the suite stays green, tighten the automated repro before touching production code**
 
 If Step 2 does not go red, do not guess and do not switch to a mandatory manual browser step. Stay inside `test/e2e/pane-context-menu-stability.test.tsx` and, if needed, `test/unit/client/components/ContextMenuProvider.test.tsx`, and make the automated harness more faithful to the current code paths:
 
@@ -428,7 +468,7 @@ If Step 2 does not go red, do not guess and do not switch to a mandatory manual 
   - If needed, extend `waitForMenuToSettle()` by one more animation frame or add a `waitFor(...)` around disappearance so the test can observe a flash-close, not just the final steady state.
 - If the top-level route matrix still stays green, add one narrower characterization test at the actual suspected seam before touching production code:
   - `src/components/panes/Pane.tsx`: whether non-primary `onMouseDown` on an inactive pane triggers activation.
-  - `src/components/context-menu/ContextMenuProvider.tsx`: whether the capture-phase `pointerdown` close path processes the same secondary-button interaction that opened the menu.
+  - `src/components/context-menu/ContextMenuProvider.tsx`: whether a later post-open `pointerdown` is what closes the menu immediately after open.
   - `src/components/TerminalView.tsx`: whether the active-pane `requestAnimationFrame(() => term.focus())` runs immediately after a terminal-body context-menu open.
 - Remove the temporary diagnostics once one faithful, user-visible menu-open assertion is red.
 
@@ -436,11 +476,11 @@ If you exhaust these automated refinements and still cannot make a real route fa
 
 Expected state after this step: there is at least one failing automated regression tied to a concrete repo seam, and the plan never requires browser access to keep moving.
 
-**Step 4: Implement only the smallest fix justified by the red route**
+**Step 5: Implement only the smallest fix justified by the red route**
 
 Start with the narrowest production hook that the failing route actually exercises:
 
-- If pane-shell routes are red, start in `src/components/panes/Pane.tsx`, because the shell-wide focus hook is currently `onMouseDown={onFocus}` on the pane wrapper. The first candidate fix is to ignore non-primary buttons there:
+- If the red route plus the seam-level `Pane.test.tsx` regression show secondary-click activation through the shared shell, start in `src/components/panes/Pane.tsx`, because the shell-wide focus hook is currently `onMouseDown={onFocus}` on the pane wrapper. The first candidate fix is to ignore non-primary buttons there:
 
 ```tsx
 onMouseDown={(event) => {
@@ -449,12 +489,12 @@ onMouseDown={(event) => {
 }}
 ```
 
-- If pane-shell routes still fail after that, inspect `src/components/context-menu/ContextMenuProvider.tsx`, especially the capture-phase `pointerdown` close path that runs while the menu is open. Adjust it so the secondary-button interaction that opens the menu does not immediately self-dismiss it.
-- If only terminal-body routes are red, inspect `src/components/TerminalView.tsx`, especially the `requestAnimationFrame(() => term.focus())` path for the active pane. Add the smallest guard that stops a context-menu-triggered refocus from stomping the just-opened menu.
+- If pane-shell routes still fail after that, inspect `src/components/context-menu/ContextMenuProvider.tsx`, but only for behavior that happens after `menuState` exists. Do not blame the opening secondary click on the post-open `pointerdown` listener without a new failing test that proves it.
+- If the shell fix clears shell routes but the terminal-body route still fails, inspect `src/components/TerminalView.tsx`, especially the `requestAnimationFrame(() => term.focus())` path for the active pane. Add the smallest guard that stops a context-menu-triggered refocus from stomping the just-opened menu, and back that change with the smallest additional regression necessary.
 
 Do not land multiple speculative fixes together. Apply one change, rerun the red test, and only widen the fix if the first minimal change does not clear the reproduced route.
 
-**Step 5: Re-run the stability suite and verify it passes**
+**Step 6: Re-run the stability suite and verify it passes**
 
 Run:
 
@@ -462,12 +502,21 @@ Run:
 npx vitest run test/e2e/pane-context-menu-stability.test.tsx --reporter=dot
 ```
 
-Expected: PASS for browser pane shell, terminal pane shell, and terminal body on both active and inactive panes.
-
-**Step 6: Commit**
+Then run:
 
 ```bash
-git add src/components/context-menu/ContextMenuProvider.tsx src/components/panes/Pane.tsx src/components/TerminalView.tsx test/e2e/pane-context-menu-stability.test.tsx
+npx vitest run \
+  test/unit/client/components/panes/Pane.test.tsx \
+  test/e2e/pane-context-menu-stability.test.tsx \
+  --reporter=dot
+```
+
+Expected: PASS for the inactive browser shell, inactive terminal shell, and inactive terminal body routes, plus the seam-level `Pane` regression if it was added.
+
+**Step 7: Commit**
+
+```bash
+git add src/components/context-menu/ContextMenuProvider.tsx src/components/panes/Pane.tsx src/components/TerminalView.tsx test/e2e/pane-context-menu-stability.test.tsx test/unit/client/components/panes/Pane.test.tsx
 git commit -m "fix: keep pane context menus open"
 ```
 
@@ -486,6 +535,7 @@ Run:
 npx vitest run \
   test/unit/client/context-menu/menu-defs.test.ts \
   test/unit/client/components/ContextMenuProvider.test.tsx \
+  test/unit/client/components/panes/Pane.test.tsx \
   test/e2e/pane-context-menu-stability.test.tsx \
   --reporter=dot
 ```
@@ -522,9 +572,12 @@ npm run verify
 
 Expected: PASS for build plus the full test suite. Because this is a worktree, the build output is isolated and safe to generate here.
 
-## Optional Human Spot-Check
+### Task 4: Run The Required Browser Spot-Check
 
-This section is not part of the `trycycle-executing` contract. It is a user-owned follow-up for anyone who wants one live browser sanity check after the automated gates pass.
+**Files:**
+- None
+
+**Step 1: Start the worktree app on isolated ports**
 
 Do not use `npm run dev:server` for a custom backend port here; `package.json` hardcodes `PORT=3002` in that script. Start the worktree app on isolated ports with commands that actually honor `PORT` and `VITE_PORT`:
 
@@ -533,20 +586,23 @@ PORT=3344 VITE_PORT=3345 npx tsx watch server/index.ts > /tmp/freshell-3344-serv
 PORT=3344 VITE_PORT=3345 npm run dev:client -- --host 127.0.0.1 > /tmp/freshell-3345-client.log 2>&1 & echo $! > /tmp/freshell-3345-client.pid
 ```
 
-Verify the PIDs belong to this worktree before using them:
+**Step 2: Verify the PIDs belong to this worktree before using them**
 
 ```bash
 ps -fp "$(cat /tmp/freshell-3344-server.pid)"
 ps -fp "$(cat /tmp/freshell-3345-client.pid)"
 ```
 
-Then open `http://127.0.0.1:3345` and confirm:
+**Step 3: Open `http://127.0.0.1:3345` and confirm the actual UX**
 
 1. Right-click inside a terminal body and confirm the menu stays open.
-2. The first terminal menu section is `copy`, `Paste`, `Select all`, in that order, with an icon on each item.
-3. Create or use an inactive pane and right-click its pane shell; the menu should not flash open and immediately close.
+2. Create or use an inactive terminal pane and right-click its pane header or shell; the menu should not flash open and immediately close.
+3. The first terminal menu section is `copy`, `Paste`, `Select all`, in that order, with an icon on each item.
+4. If you have a browser pane available, right-click its inactive pane shell once as a quick sanity check that the shared shell route also stays open.
 
-Stop only those verified worktree processes when finished:
+If browser access in this environment is impossible, do not silently skip this task. Record that the browser spot-check was blocked and why.
+
+**Step 4: Stop only those verified worktree processes when finished**
 
 ```bash
 ps -fp "$(cat /tmp/freshell-3344-server.pid)"
