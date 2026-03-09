@@ -34,6 +34,7 @@ The direct end state is still correct. What changes here is the execution shape 
 1. Heavy query work moves to the server.
 2. Small visible-window adornment based on client-only state may stay in the client.
 3. `App.tsx` becomes the sole websocket owner; child components stop calling `ws.connect()`.
+4. Focused-pane HTTP hydration must begin immediately after shell bootstrap and must not wait for websocket `ready`.
 
 ## Codebase Findings
 
@@ -85,9 +86,15 @@ The direct end state is still correct. What changes here is the execution shape 
    - `GET /api/session-directory` for sidebar/history only when that surface is on-screen
    - `GET /api/agent-sessions/:sessionId/timeline` and `GET /api/agent-sessions/:sessionId/turns/:turnId` for the visible agent chat pane
    - `GET /api/terminals/:terminalId/viewport`, `/scrollback`, and `/search` for the visible terminal pane
-4. Offscreen tabs and panes do not pre-hydrate by default. They hydrate only on selection or after visible work is idle and explicitly budgeted.
-5. Session mutations return focused invalidation signals or enough local confirmation data to refresh only the active query window; they never trigger a full `/api/sessions` reload.
-6. WebSocket v4 carries only:
+4. Startup fan-out is explicit:
+   - finish `GET /api/bootstrap`
+   - immediately start focused-pane HTTP hydration in the `critical` lane
+   - immediately start websocket connect in parallel for live deltas
+   - start secondary on-screen surfaces such as sidebar/history in the `visible` lane
+   - leave version checks, network diagnostics, offscreen panes, and load-more work in `background`
+5. Offscreen tabs and panes do not pre-hydrate by default. They hydrate only on selection or after visible work is idle and explicitly budgeted.
+6. Session mutations return focused invalidation signals or enough local confirmation data to refresh only the active query window; they never trigger a full `/api/sessions` reload.
+7. WebSocket v4 carries only:
    - `ready`
    - live terminal deltas and lifecycle events
    - lightweight SDK live events and `sdk.session.snapshot`
@@ -102,7 +109,8 @@ The direct end state is still correct. What changes here is the execution shape 
 3. `visible` is for on-screen secondary surfaces such as sidebar/history refreshes.
 4. Live terminal input and output outrank all read-model work.
 5. Background requests are abortable on both client and server.
-6. Any frame that routinely exceeds the realtime budget is in the wrong transport lane.
+6. WebSocket readiness is not a prerequisite for painting HTTP-owned visible data; it only gates live delta delivery.
+7. Any frame that routinely exceeds the realtime budget is in the wrong transport lane.
 
 ### Ownership Rules
 
@@ -121,13 +129,14 @@ The direct end state is still correct. What changes here is the execution shape 
 1. `WS_PROTOCOL_VERSION = 4`.
 2. Startup does one shell bootstrap request before websocket connect.
 3. Bootstrap never embeds session-directory windows, agent timelines, terminal viewports, or other pane payloads.
-4. After shell bootstrap, only currently visible surfaces hydrate immediately.
-5. `version` and network status no longer block websocket readiness or first paint.
-6. No runtime path emits or consumes `sessions.updated`, `sessions.page`, `sessions.patch`, `sessions.fetch`, or `sdk.history`.
-7. Terminal reconnect paints the current viewport first, then requests only the short missed tail with `sinceSeq`.
-8. Session and terminal search are server-side only.
-9. Session rename/archive/delete flows refetch or invalidate only the active directory window, never a full session snapshot.
-10. When state is uncertain, refetch the active visible window instead of rebuilding large client reconciliation logic.
+4. Immediately after shell bootstrap, the app starts focused-pane HTTP hydration and websocket connect in parallel; focused-pane paint must not wait for websocket `ready`.
+5. Secondary on-screen surfaces may start after bootstrap in the `visible` lane, but they must not delay focused-pane paint.
+6. `version` and network status no longer block websocket readiness or first paint.
+7. No runtime path emits or consumes `sessions.updated`, `sessions.page`, `sessions.patch`, `sessions.fetch`, or `sdk.history`.
+8. Terminal reconnect paints the current viewport first, then requests only the short missed tail with `sinceSeq`.
+9. Session and terminal search are server-side only.
+10. Session rename/archive/delete flows refetch or invalidate only the active directory window, never a full session snapshot.
+11. When state is uncertain, refetch the active visible window instead of rebuilding large client reconciliation logic.
 
 ## Budgets And Invariants
 
@@ -155,6 +164,7 @@ Every task below follows red-green-refactor and adds coverage at the seam being 
 4. Integration tests for bootstrap, session-directory, agent-timeline, and terminal-view HTTP routes.
 5. Client tests proving:
    - `App.tsx` performs one shell bootstrap request and then hydrates only the actually visible surfaces
+   - focused-pane HTTP hydration starts after bootstrap without waiting for websocket `ready`
    - child components no longer own websocket connection setup
    - sessions state is visible-window oriented, not snapshot oriented
    - agent chat no longer depends on `sdk.history`
@@ -163,6 +173,7 @@ Every task below follows red-green-refactor and adds coverage at the seam being 
    - `ws-client` SDK handling no longer depends on replay-history messages
 6. Slow-network e2e tests proving:
    - the app becomes interactive before offscreen work completes
+   - the focused pane can paint from HTTP read models before websocket `ready` under an artificially delayed handshake
    - focused-pane requests in the `critical` lane complete ahead of merely visible or background work
    - terminal reconnect shows the current screen without replaying the entire backlog
    - agent chat reload shows recent turns before older bodies
@@ -658,6 +669,7 @@ git commit -m "feat(api): add shell-only bootstrap route"
 Cover:
 - app uses one shell bootstrap request before websocket connect
 - visible surfaces hydrate after shell bootstrap based on the current layout instead of being inlined into bootstrap
+- focused-pane HTTP hydration starts after bootstrap without waiting for websocket `ready`
 - `version` and network status are demoted to background work
 - `App.tsx` owns websocket connection lifecycle
 - child components no longer need to call `ws.connect()`
@@ -672,7 +684,7 @@ Expected: FAIL because startup is still a waterfall and connection ownership is 
 
 **Step 3: Add assertions around ordering**
 
-Shell bootstrap must finish before `ready` is awaited, but sidebar or pane hydration must remain separate follow-up work.
+Shell bootstrap must finish before focused-pane hydration and websocket connect begin. Focused-pane HTTP hydration must start immediately after bootstrap and before websocket `ready` resolves. Sidebar or other secondary on-screen hydration must remain separate follow-up work in the `visible` lane.
 
 **Step 4: Run the tests again**
 
@@ -713,13 +725,16 @@ Use:
 ```ts
 const bootstrap = await api.getBootstrap()
 dispatch(seedBootstrap(bootstrap))
-await ws.connect()
+dispatch(hydrateFocusedPaneFromLayout())
 dispatch(hydrateVisibleSurfacesFromLayout())
+const wsReadyPromise = ws.connect()
+void hydrateBackgroundShellData()
+await wsReadyPromise
 ```
 
 **Step 3: Keep shell bootstrap narrow and move other work to the right lanes**
 
-Run `GET /api/version` and network status after shell bootstrap and websocket connect. Let sidebar/history, terminal viewport, and agent timeline fetch through their own read-model requests based on what is actually visible.
+Run `GET /api/version` and network status in the background after shell bootstrap; do not let them wait on websocket `ready`, and do not let websocket `ready` gate focused-pane paint. Let sidebar/history, terminal viewport, and agent timeline fetch through their own read-model requests based on what is actually visible, with the focused pane dispatched first in the `critical` lane and secondary on-screen surfaces in the `visible` lane.
 
 **Step 4: Run the tests to verify pass**
 
@@ -1818,3 +1833,4 @@ git commit -m "test(perf): lock in slow-network visible-first architecture"
 4. Treat `version`, network diagnostics, and any other non-visible startup work as background unless a failing test proves they are required for first paint.
 5. If a file becomes dead, delete it instead of leaving the old architecture in place beside the new one.
 6. Rename or replace legacy-named tests when the name encodes the old architecture. Keeping a `session-search` test file around for the new directory contract is a maintenance bug, not a convenience.
+7. Keep startup choreography honest: a delayed websocket handshake must not prevent the focused pane from painting from its HTTP read model.
