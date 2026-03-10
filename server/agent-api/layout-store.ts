@@ -37,6 +37,17 @@ export class LayoutStore {
     if (!this.snapshot.paneTitleSetByUser[tabId]) this.snapshot.paneTitleSetByUser[tabId] = {}
   }
 
+  private getPaneTitleMaps(tabId: string) {
+    if (!this.snapshot) return undefined
+    this.ensurePaneTitleMaps(tabId)
+
+    const paneTitles = this.snapshot.paneTitles?.[tabId]
+    const paneTitleSetByUser = this.snapshot.paneTitleSetByUser?.[tabId]
+    if (!paneTitles || !paneTitleSetByUser) return undefined
+
+    return { paneTitles, paneTitleSetByUser }
+  }
+
   private removePaneMetadata(tabId: string, paneId: string) {
     if (!this.snapshot) return
     if (this.snapshot.paneTitles?.[tabId]) {
@@ -126,11 +137,9 @@ export class LayoutStore {
   private seedPaneTitle(tabId: string, paneId: string, content: any) {
     const title = this.derivePaneTitle(content)
     if (!title || !this.snapshot) return
-    if (this.snapshot.paneTitleSetByUser?.[tabId]?.[paneId]) return
-    this.ensurePaneTitleMaps(tabId)
-    const paneTitles = this.snapshot.paneTitles?.[tabId]
-    if (!paneTitles) return
-    paneTitles[paneId] = title
+    const paneTitleMaps = this.getPaneTitleMaps(tabId)
+    if (!paneTitleMaps || paneTitleMaps.paneTitleSetByUser[paneId]) return
+    paneTitleMaps.paneTitles[paneId] = title
   }
 
   updateFromUi(snapshot: UiSnapshot, connectionId: string) {
@@ -452,12 +461,11 @@ export class LayoutStore {
     const pane = this.getPaneSnapshot(paneId)
     if (!pane) return { message: 'pane not found' as const }
 
-    this.ensurePaneTitleMaps(pane.tabId)
-    const paneTitles = this.snapshot.paneTitles?.[pane.tabId]
-    const paneTitleSetByUser = this.snapshot.paneTitleSetByUser?.[pane.tabId]
-    if (!paneTitles || !paneTitleSetByUser) return { message: 'pane metadata unavailable' as const }
-    paneTitles[paneId] = title
-    paneTitleSetByUser[paneId] = true
+    const paneTitleMaps = this.getPaneTitleMaps(pane.tabId)
+    if (!paneTitleMaps) return { message: 'no layout snapshot' as const }
+
+    paneTitleMaps.paneTitles[paneId] = title
+    paneTitleMaps.paneTitleSetByUser[paneId] = true
     return { tabId: pane.tabId, paneId }
   }
 

@@ -33,6 +33,7 @@ it('renames a pane in its owning tab', () => {
 
   expect(store.renamePane('pane_1', 'Logs')).toEqual({ tabId: 'tab_a', paneId: 'pane_1' })
   expect((store as any).snapshot.paneTitles.tab_a.pane_1).toBe('Logs')
+  expect((store as any).snapshot.paneTitleSetByUser.tab_a.pane_1).toBe(true)
 })
 
 it('lists pane titles from the public pane snapshot', () => {

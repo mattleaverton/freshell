@@ -15,7 +15,8 @@ type RenderGroup =
   | { kind: 'tools'; pairs: ToolPair[]; startIndex: number; toolGroupIndex: number }
 
 interface MessageBubbleProps {
-  role: 'user' | 'assistant'
+  speaker?: 'user' | 'assistant'
+  role?: 'user' | 'assistant'
   content: ChatContentBlock[]
   timestamp?: string
   model?: string
@@ -33,6 +34,7 @@ interface MessageBubbleProps {
 }
 
 function MessageBubble({
+  speaker,
   role,
   content,
   timestamp,
@@ -44,6 +46,7 @@ function MessageBubble({
   completedToolOffset,
   autoExpandAbove,
 }: MessageBubbleProps) {
+  const resolvedSpeaker = speaker ?? role ?? 'assistant'
   // Build a map of tool_use_id -> tool_result for pairing
   const resultMap = useMemo(() => {
     const map = new Map<string, ChatContentBlock>()
@@ -172,16 +175,16 @@ function MessageBubble({
     <div
       className={cn(
         'max-w-prose pl-2.5 py-0.5 text-sm',
-        role === 'user'
+        resolvedSpeaker === 'user'
           ? 'border-l-[3px] border-l-[hsl(var(--claude-user))]'
           : 'border-l-2 border-l-[hsl(var(--claude-assistant))]'
       )}
       role="article"
-      aria-label={`${role} message`}
+      aria-label={`${resolvedSpeaker} message`}
     >
       {groups.map((group) => {
         if (group.kind === 'text') {
-          if (role === 'user') {
+          if (resolvedSpeaker === 'user') {
             return <p key={group.index} className="whitespace-pre-wrap leading-5">{group.block.text}</p>
           }
           return (

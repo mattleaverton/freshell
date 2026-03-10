@@ -15,9 +15,10 @@ interface ChatComposerProps {
   isRunning?: boolean
   placeholder?: string
   autoFocus?: boolean
+  shouldFocusOnReady?: boolean
 }
 
-const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer({ paneId, onSend, onInterrupt, disabled, isRunning, placeholder, autoFocus }, ref) {
+const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer({ paneId, onSend, onInterrupt, disabled, isRunning, placeholder, autoFocus, shouldFocusOnReady }, ref) {
   const [text, setText] = useState(() => (paneId ? getDraft(paneId) : ''))
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
@@ -42,23 +43,24 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
     focus: () => textareaRef.current?.focus(),
   }), [])
 
-  // Auto-focus when the textarea becomes enabled (disabled transitions false).
+  // Focus when the textarea becomes enabled (disabled transitions false).
   // At mount the textarea may be disabled (status='creating'), so we watch
-  // the `disabled` prop and focus once it goes falsy — if autoFocus was requested.
-  const autoFocusFiredRef = useRef(false)
+  // the `disabled` prop and focus once it goes falsy when requested.
+  const focusOnReadyFiredRef = useRef(false)
+  const focusRequested = shouldFocusOnReady ?? autoFocus ?? false
   const textareaCallbackRef = useCallback((node: HTMLTextAreaElement | null) => {
     textareaRef.current = node
   }, [])
 
   useEffect(() => {
-    if (!autoFocus || disabled || autoFocusFiredRef.current) return
-    autoFocusFiredRef.current = true
+    if (!focusRequested || disabled || focusOnReadyFiredRef.current) return
+    focusOnReadyFiredRef.current = true
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         textareaRef.current?.focus()
       })
     })
-  }, [disabled, autoFocus])
+  }, [disabled, focusRequested])
 
   // Sync draft store on every text change
   const handleTextChange = useCallback((value: string) => {

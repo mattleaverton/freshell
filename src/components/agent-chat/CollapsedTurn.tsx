@@ -58,7 +58,7 @@ function CollapsedTurn({
           <span className="font-mono opacity-70">{summary}</span>
         </button>
         <MessageBubble
-          role={userMessage.role}
+          speaker={userMessage.role}
           content={userMessage.content}
           timestamp={userMessage.timestamp}
           showThinking={showThinking}
@@ -66,7 +66,7 @@ function CollapsedTurn({
           showTimecodes={showTimecodes}
         />
         <MessageBubble
-          role={assistantMessage.role}
+          speaker={assistantMessage.role}
           content={assistantMessage.content}
           timestamp={assistantMessage.timestamp}
           model={assistantMessage.model}
