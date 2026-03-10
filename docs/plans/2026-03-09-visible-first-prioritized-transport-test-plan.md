@@ -1,7 +1,7 @@
-# Slow-Network Architecture Rebuild Test Plan
+# Visible-First Prioritized Transport Test Plan
 
 Date: 2026-03-09  
-Source: `/home/user/code/freshell/.worktrees/trycycle-slow-network-architecture-plan/docs/plans/2026-03-09-slow-network-architecture-rebuild.md`
+Source: `/home/user/code/freshell/.worktrees/trycycle-slow-network-architecture-plan/docs/plans/2026-03-09-visible-first-prioritized-transport.md`
 
 ## Strategy changes requiring user approval
 No approval required.

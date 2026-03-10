@@ -1,4 +1,4 @@
-# Slow-Network Architecture Rebuild Implementation Plan
+# Visible-First Prioritized Transport Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
