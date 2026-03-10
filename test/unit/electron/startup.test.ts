@@ -417,6 +417,98 @@ describe('runStartup', () => {
     expect(mockWindow.maximize).not.toHaveBeenCalled()
   })
 
+  describe('window state persistence on move/resize', () => {
+    function createMockWindowWithBounds() {
+      const win = createMockWindow()
+      ;(win as any).getBounds = vi.fn().mockReturnValue({ x: 100, y: 200, width: 800, height: 600 })
+      ;(win as any).isMaximized = vi.fn().mockReturnValue(false)
+      return win
+    }
+
+    it('saves window state on resize (debounced)', async () => {
+      const mockWindow = createMockWindowWithBounds()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+      })
+      await runStartup(ctx)
+
+      // Find the 'resize' handler registered via window.on
+      const onCalls = (mockWindow.on as ReturnType<typeof vi.fn>).mock.calls
+      const resizeCall = onCalls.find(([event]: [string]) => event === 'resize')
+      expect(resizeCall).toBeDefined()
+
+      // Trigger it
+      resizeCall![1]()
+
+      // Advance past debounce timer
+      await vi.advanceTimersByTimeAsync(600)
+
+      expect(ctx.windowStatePersistence.save).toHaveBeenCalledWith({
+        x: 100, y: 200, width: 800, height: 600, maximized: false,
+      })
+    })
+
+    it('saves window state on move (debounced)', async () => {
+      const mockWindow = createMockWindowWithBounds()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+      })
+      await runStartup(ctx)
+
+      const onCalls = (mockWindow.on as ReturnType<typeof vi.fn>).mock.calls
+      const moveCall = onCalls.find(([event]: [string]) => event === 'move')
+      expect(moveCall).toBeDefined()
+
+      moveCall![1]()
+
+      await vi.advanceTimersByTimeAsync(600)
+
+      expect(ctx.windowStatePersistence.save).toHaveBeenCalledWith({
+        x: 100, y: 200, width: 800, height: 600, maximized: false,
+      })
+    })
+
+    it('debounces rapid events (only saves once)', async () => {
+      const mockWindow = createMockWindowWithBounds()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+      })
+      await runStartup(ctx)
+
+      const onCalls = (mockWindow.on as ReturnType<typeof vi.fn>).mock.calls
+      const resizeCall = onCalls.find(([event]: [string]) => event === 'resize')
+      expect(resizeCall).toBeDefined()
+
+      // Call 5 times rapidly
+      for (let i = 0; i < 5; i++) {
+        resizeCall![1]()
+      }
+
+      await vi.advanceTimersByTimeAsync(600)
+
+      expect(ctx.windowStatePersistence.save).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not save before debounce period expires', async () => {
+      const mockWindow = createMockWindowWithBounds()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+      })
+      await runStartup(ctx)
+
+      const onCalls = (mockWindow.on as ReturnType<typeof vi.fn>).mock.calls
+      const resizeCall = onCalls.find(([event]: [string]) => event === 'resize')
+      expect(resizeCall).toBeDefined()
+
+      resizeCall![1]()
+
+      // Advance only 100ms (less than 500ms debounce)
+      await vi.advanceTimersByTimeAsync(100)
+
+      expect(ctx.windowStatePersistence.save).not.toHaveBeenCalled()
+    })
+  })
+
   it('creates BrowserWindow and loads server URL', async () => {
     const mockWindow = createMockWindow()
     const ctx = createDefaultContext({

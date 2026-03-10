@@ -15,6 +15,8 @@ export interface BrowserWindowLike {
   isVisible(): boolean
   isFocused(): boolean
   on(event: string, callback: (...args: any[]) => void): void
+  getBounds?(): { x: number; y: number; width: number; height: number }
+  isMaximized?(): boolean
 }
 
 export interface BrowserWindowConstructor {
@@ -151,7 +153,29 @@ export async function runStartup(ctx: StartupContext): Promise<StartupResult> {
     window.maximize()
   }
 
-  // 4. Register global hotkey (quake-style toggle)
+  // 4. Save window state on move/resize (debounced to avoid excessive writes)
+  let saveTimeout: ReturnType<typeof setTimeout> | undefined
+  const saveState = () => {
+    clearTimeout(saveTimeout)
+    saveTimeout = setTimeout(() => {
+      const bounds = window.getBounds?.()
+      const maximized = window.isMaximized?.() ?? false
+      if (bounds) {
+        void ctx.windowStatePersistence.save({
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+          maximized,
+        })
+      }
+    }, 500)
+  }
+
+  window.on('resize', saveState)
+  window.on('move', saveState)
+
+  // 5. Register global hotkey (quake-style toggle)
   ctx.hotkeyManager.register(desktopConfig.globalHotkey, () => {
     if (window.isVisible() && window.isFocused()) {
       window.hide()
