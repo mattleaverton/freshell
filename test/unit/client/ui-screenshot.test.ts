@@ -1,4 +1,7 @@
+import os from 'node:os'
+import path from 'node:path'
 import fs from 'node:fs/promises'
+import { deflateSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { configureStore } from '@reduxjs/toolkit'
 import { Provider } from 'react-redux'
@@ -23,9 +26,54 @@ vi.mock('../../../src/lib/screenshot-capture-env', () => ({
   suspendTerminalRenderersForScreenshot: vi.fn(async () => async () => {}),
 }))
 
-const CONTEXT_MENU_PROOF_PATH = '/tmp/freshell-terminal-context-menu-proof.png'
-const VALID_PNG_BASE64 =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+vr9kAAAAASUVORK5CYII='
+const CONTEXT_MENU_PROOF_PATH = path.join(os.tmpdir(), 'freshell-terminal-context-menu-proof.png')
+const PNG_SIGNATURE_BYTES = [137, 80, 78, 71, 13, 10, 26, 10] as const
+
+function crc32(buffer: Buffer): number {
+  let crc = 0xffffffff
+  for (const byte of buffer) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit += 1) {
+      const carry = crc & 1
+      crc >>>= 1
+      if (carry) crc ^= 0xedb88320
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function createPngChunk(type: string, data: Buffer): Buffer {
+  const typeBuffer = Buffer.from(type, 'ascii')
+  const lengthBuffer = Buffer.alloc(4)
+  lengthBuffer.writeUInt32BE(data.length, 0)
+
+  const crcBuffer = Buffer.alloc(4)
+  crcBuffer.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 0)
+
+  return Buffer.concat([lengthBuffer, typeBuffer, data, crcBuffer])
+}
+
+function createSolidPngBase64(rgba: readonly [number, number, number, number]): string {
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(1, 0)
+  ihdr.writeUInt32BE(1, 4)
+  ihdr[8] = 8
+  ihdr[9] = 6
+  ihdr[10] = 0
+  ihdr[11] = 0
+  ihdr[12] = 0
+
+  const idat = deflateSync(Buffer.from([0, ...rgba]))
+  const signature = Buffer.from(PNG_SIGNATURE_BYTES)
+  const png = Buffer.concat([
+    signature,
+    createPngChunk('IHDR', ihdr),
+    createPngChunk('IDAT', idat),
+    createPngChunk('IEND', Buffer.alloc(0)),
+  ])
+
+  return png.toString('base64')
+}
 
 function setRect(node: Element, width: number, height: number) {
   Object.defineProperty(node, 'getBoundingClientRect', {
@@ -229,7 +277,7 @@ describe('captureUiScreenshot iframe handling', () => {
     expect(iframe.hasAttribute('data-screenshot-iframe-marker')).toBe(false)
   })
 
-  it('captures a terminal context menu screenshot proof artifact', async () => {
+  it('writes a portable PNG artifact for the terminal context menu capture and verifies the captured DOM', async () => {
     const user = userEvent.setup()
     const store = createMenuStore()
 
@@ -265,6 +313,7 @@ describe('captureUiScreenshot iframe handling', () => {
     setRect(document.body, 1200, 800)
 
     let cloneDoc: Document | null = null
+    let expectedImageBase64 = ''
     vi.mocked(html2canvas).mockImplementation(async (el: any, opts: any = {}) => {
       if (typeof opts.onclone === 'function') {
         const doc = document.implementation.createHTMLDocument('clone')
@@ -274,10 +323,20 @@ describe('captureUiScreenshot iframe handling', () => {
         cloneDoc = doc
       }
 
+      const topMenuItems = Array.from(cloneDoc?.querySelectorAll('[role="menuitem"]') ?? []).slice(0, 3)
+      const topLabels = topMenuItems.map((node) => node.textContent?.replace(/\s+/g, ' ').trim())
+      const allHaveIcons = topMenuItems.every((node) => node.querySelector('svg'))
+      const matchesTerminalClipboardSection =
+        topLabels.join('|') === 'Copy selection|Paste|Select all' && allHaveIcons
+
+      expectedImageBase64 = createSolidPngBase64(
+        matchesTerminalClipboardSection ? [12, 129, 54, 255] : [188, 28, 28, 255],
+      )
+
       return {
         width: 1200,
         height: 800,
-        toDataURL: () => `data:image/png;base64,${VALID_PNG_BASE64}`,
+        toDataURL: () => `data:image/png;base64,${expectedImageBase64}`,
       } as any
     })
 
@@ -287,11 +346,12 @@ describe('captureUiScreenshot iframe handling', () => {
 
     expect(vi.mocked(html2canvas)).toHaveBeenCalledTimes(1)
     expect(vi.mocked(html2canvas).mock.calls[0]?.[0]).toBe(document.body)
+    expect(result.imageBase64).toBe(expectedImageBase64)
 
     const clonedMenuItems = Array.from(cloneDoc!.querySelectorAll('[role="menuitem"]')).map(
       (node) => node.textContent?.replace(/\s+/g, ' ').trim(),
     )
-    expect(clonedMenuItems.slice(0, 3)).toEqual(['copy', 'Paste', 'Select all'])
+    expect(clonedMenuItems.slice(0, 3)).toEqual(['Copy selection', 'Paste', 'Select all'])
 
     const topMenuItems = Array.from(cloneDoc!.querySelectorAll('[role="menuitem"]')).slice(0, 3)
     for (const node of topMenuItems) {
@@ -300,6 +360,6 @@ describe('captureUiScreenshot iframe handling', () => {
 
     const artifact = await fs.readFile(CONTEXT_MENU_PROOF_PATH)
     expect(artifact.length).toBeGreaterThan(8)
-    expect(Array.from(artifact.subarray(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+    expect(Array.from(artifact.subarray(0, 8))).toEqual([...PNG_SIGNATURE_BYTES])
   })
 })
