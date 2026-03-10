@@ -1,4 +1,5 @@
 import type { store as appStore } from '@/store/store'
+import type { PerfAuditSnapshot } from '@/lib/perf-audit-bridge'
 
 export interface FreshellTestHarness {
   getState: () => ReturnType<typeof appStore.getState>
@@ -10,6 +11,7 @@ export interface FreshellTestHarness {
   getTerminalBuffer: (terminalId?: string) => string | null
   registerTerminalBuffer: (terminalId: string, accessor: () => string) => void
   unregisterTerminalBuffer: (terminalId: string) => void
+  getPerfAuditSnapshot: () => PerfAuditSnapshot | null
 }
 
 declare global {
@@ -32,6 +34,7 @@ export function installTestHarness(
   waitForWsReady: (timeoutMs?: number) => Promise<void>,
   forceWsDisconnect: () => void,
   sendWsMessage: (msg: unknown) => void,
+  getPerfAuditSnapshot: () => PerfAuditSnapshot | null = () => null,
 ): void {
   if (typeof window === 'undefined') return
 
@@ -62,5 +65,6 @@ export function installTestHarness(
     unregisterTerminalBuffer: (terminalId: string) => {
       terminalBuffers.delete(terminalId)
     },
+    getPerfAuditSnapshot,
   }
 }

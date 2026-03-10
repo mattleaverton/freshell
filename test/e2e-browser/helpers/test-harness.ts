@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test'
+import type { PerfAuditSnapshot } from '@/lib/perf-audit-bridge'
 
 /**
  * Helpers for interacting with the Freshell test harness from Playwright tests.
@@ -57,6 +58,14 @@ export class TestHarness {
       if (!harness) throw new Error('Test harness not installed')
       return harness.getTerminalBuffer(id)
     }, terminalId)
+  }
+
+  async getPerfAuditSnapshot(): Promise<PerfAuditSnapshot | null> {
+    return this.page.evaluate(() => {
+      const harness = window.__FRESHELL_TEST_HARNESS__
+      if (!harness) throw new Error('Test harness not installed')
+      return harness.getPerfAuditSnapshot()
+    })
   }
 
   /**
