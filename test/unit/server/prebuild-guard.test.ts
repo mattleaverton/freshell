@@ -88,6 +88,16 @@ describe('prebuild-guard', () => {
       expect(fetchMock).toHaveBeenCalledTimes(2)
     })
 
+    it('honors custom retry settings', async () => {
+      const fetchMock = vi.fn().mockRejectedValue(new Error('socket hang up'))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const result = await checkProdRunning(3001, { attempts: 2, retryDelayMs: 0, timeoutMs: 1 })
+
+      expect(result).toEqual({ status: 'not-running' })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
     it('returns running with version when freshell is on the port', async () => {
       server = http.createServer((_req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -146,7 +156,7 @@ describe('prebuild-guard', () => {
       })
       port = (server.address() as { port: number }).port
 
-      const result = await checkProdRunning(port)
+      const result = await checkProdRunning(port, { attempts: 1, retryDelayMs: 0, timeoutMs: 25 })
       expect(result).toEqual({ status: 'not-running' })
     })
   })

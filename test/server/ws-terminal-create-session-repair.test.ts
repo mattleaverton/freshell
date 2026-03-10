@@ -8,6 +8,10 @@ import { WS_PROTOCOL_VERSION } from '../../shared/ws-protocol'
 
 const HOOK_TIMEOUT_MS = 30000
 const VALID_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000'
+const REPAIR_WAIT_MS = 75
+const REPAIR_STAGGER_MS = 20
+const DUPLICATE_SETTLE_MS = 100
+const DISCONNECT_SETTLE_MS = 150
 const DEFAULT_CONFIG_SNAPSHOT = vi.hoisted(() => ({
   version: 1,
   settings: {},
@@ -329,7 +333,7 @@ describe('terminal.create session repair wait', () => {
   }, HOOK_TIMEOUT_MS)
 
   it('blocks terminal.create until session repair completes', async () => {
-    sessionRepairService.waitForSessionDelay = 100
+    sessionRepairService.waitForSessionDelay = REPAIR_WAIT_MS
 
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
 
@@ -457,7 +461,7 @@ describe('terminal.create session repair wait', () => {
   })
 
   it('prevents duplicate terminal creation during async repair wait', async () => {
-    sessionRepairService.waitForSessionDelay = 300
+    sessionRepairService.waitForSessionDelay = REPAIR_WAIT_MS
 
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
 
@@ -487,7 +491,7 @@ describe('terminal.create session repair wait', () => {
       expect(created.terminalId).toMatch(/^term_/)
 
       // Wait a bit to ensure no second terminal.created arrives
-      await new Promise(r => setTimeout(r, 500))
+      await new Promise(r => setTimeout(r, DUPLICATE_SETTLE_MS))
 
       // Only one terminal should have been created
       expect(registry.records.size).toBe(1)
@@ -497,7 +501,7 @@ describe('terminal.create session repair wait', () => {
   })
 
   it('treats cross-socket duplicate requestIds as one in-flight claude repair wait', async () => {
-    sessionRepairService.waitForSessionDelay = 300
+    sessionRepairService.waitForSessionDelay = REPAIR_WAIT_MS
 
     const requestId = 'resume-cross-socket-dup-1'
     const ws1 = new WebSocket(`ws://127.0.0.1:${port}/ws`)
@@ -515,7 +519,7 @@ describe('terminal.create session repair wait', () => {
         resumeSessionId: VALID_SESSION_ID,
       }))
 
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await new Promise((resolve) => setTimeout(resolve, REPAIR_STAGGER_MS))
 
       ws2 = new WebSocket(`ws://127.0.0.1:${port}/ws`)
       await new Promise<void>((resolve) => ws2!.on('open', () => resolve()))
@@ -546,7 +550,7 @@ describe('terminal.create session repair wait', () => {
   })
 
   it('coalesces concurrent claude repair waits by session across sockets', async () => {
-    sessionRepairService.waitForSessionDelay = 300
+    sessionRepairService.waitForSessionDelay = REPAIR_WAIT_MS
 
     const ws1 = new WebSocket(`ws://127.0.0.1:${port}/ws`)
     let ws2: WebSocket | undefined
@@ -563,7 +567,7 @@ describe('terminal.create session repair wait', () => {
         resumeSessionId: VALID_SESSION_ID,
       }))
 
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await new Promise((resolve) => setTimeout(resolve, REPAIR_STAGGER_MS))
 
       ws2 = new WebSocket(`ws://127.0.0.1:${port}/ws`)
       await new Promise<void>((resolve) => ws2!.on('open', () => resolve()))
@@ -594,7 +598,7 @@ describe('terminal.create session repair wait', () => {
   })
 
   it('does not create terminal if client disconnects during repair wait', async () => {
-    sessionRepairService.waitForSessionDelay = 500
+    sessionRepairService.waitForSessionDelay = REPAIR_WAIT_MS
 
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
 
@@ -611,12 +615,12 @@ describe('terminal.create session repair wait', () => {
       }))
 
       // Close the socket while repair is in progress
-      await new Promise(r => setTimeout(r, 50))
+      await new Promise(r => setTimeout(r, REPAIR_STAGGER_MS))
       ws.close()
       await new Promise<void>((resolve) => ws.once('close', () => resolve()))
 
       // Wait for repair to complete
-      await new Promise(r => setTimeout(r, 600))
+      await new Promise(r => setTimeout(r, DISCONNECT_SETTLE_MS))
 
       // No terminal should have been created
       expect(registry.records.size).toBe(0)
@@ -655,7 +659,7 @@ describe('terminal.create session repair wait', () => {
       await configStarted
       await closeWebSocket(ws)
       releaseConfig?.()
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await new Promise((resolve) => setTimeout(resolve, REPAIR_STAGGER_MS))
 
       expect(registry.records.size).toBe(0)
       expect(registry.createCallCount).toBe(0)
@@ -706,7 +710,7 @@ describe('terminal.create session repair wait', () => {
 
       const createdOnWs1Promise = waitForCreated(ws1, requestId, 3000)
 
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await new Promise((resolve) => setTimeout(resolve, REPAIR_STAGGER_MS))
       releaseConfig?.()
 
       const createdOnWs1 = await createdOnWs1Promise
