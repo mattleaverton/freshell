@@ -19,6 +19,7 @@ import type { ChatMessage, ChatSessionState } from '@/store/agentChatTypes'
 import { api, setSessionMetadata } from '@/lib/api'
 import { updateSettingsLocal } from '@/store/settingsSlice'
 import { getAgentChatProviderConfig } from '@/lib/agent-chat-utils'
+import { getInstalledPerfAuditBridge } from '@/lib/perf-audit-bridge'
 
 /** Early lifecycle states that should not be re-entered once the session has advanced. */
 const EARLY_STATES = new Set(['creating', 'starting'])
@@ -74,6 +75,8 @@ export default function AgentChatView({ tabId, paneId, paneContent, hidden }: Ag
   const availableModels = useAppSelector((s) => s.agentChat.availableModels)
   const settingsLoaded = useAppSelector((s) => s.settings.loaded)
   const initialSetupDone = useAppSelector((s) => s.settings.settings.agentChat?.initialSetupDone ?? false)
+  const activePaneId = useAppSelector((s) => s.panes.activePane[tabId])
+  const surfaceVisibleMarkedRef = useRef(false)
 
   // Track whether we're waiting for a session restore (persisted sessionId, history not yet loaded).
   // Fresh creates set historyLoaded=true immediately; reloads wait for sdk.history.
@@ -461,6 +464,20 @@ export default function AgentChatView({ tabId, paneId, paneContent, hidden }: Ag
 
   const turnItems = renderItems.filter(r => r.kind === 'turn')
   const collapseThreshold = Math.max(0, turnItems.length - RECENT_TURNS_FULL)
+
+  useEffect(() => {
+    if (surfaceVisibleMarkedRef.current) return
+    if (hidden) return
+    if (activePaneId !== paneId) return
+    if (!session?.historyLoaded) return
+    if (renderItems.length === 0) return
+    getInstalledPerfAuditBridge()?.mark('agent_chat.surface_visible', {
+      tabId,
+      paneId,
+      sessionId: paneContent.sessionId,
+    })
+    surfaceVisibleMarkedRef.current = true
+  }, [activePaneId, hidden, paneContent.sessionId, paneId, renderItems.length, session?.historyLoaded, tabId])
 
   return (
     <div className={cn('h-full w-full flex flex-col', hidden ? 'tab-hidden' : 'tab-visible')} role="region" aria-label={`${providerLabel} Chat`} onPointerUp={handleContainerPointerUp}>
