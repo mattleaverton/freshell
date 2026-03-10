@@ -60,24 +60,40 @@ import {
 import { UiLayoutSyncSchema } from './agent-api/layout-schema.js'
 import type { LayoutStore } from './agent-api/layout-store.js'
 
-const MAX_CONNECTIONS = Number(process.env.MAX_CONNECTIONS || 50)
-const HELLO_TIMEOUT_MS = Number(process.env.HELLO_TIMEOUT_MS || 5_000)
-const PING_INTERVAL_MS = Number(process.env.PING_INTERVAL_MS || 30_000)
-const MAX_WS_BUFFERED_AMOUNT = Number(process.env.MAX_WS_BUFFERED_AMOUNT || 2 * 1024 * 1024)
-const WS_MAX_PAYLOAD_BYTES = Number(process.env.WS_MAX_PAYLOAD_BYTES || 16 * 1024 * 1024)
-const MAX_SCREENSHOT_BASE64_BYTES = Number(process.env.MAX_SCREENSHOT_BASE64_BYTES || 12 * 1024 * 1024)
-// Use ?? so only unset vars fall back; preserves explicit values in MAX_REGULAR_WS_MESSAGE_BYTES.
-const REGULAR_WS_MESSAGE_BYTES_ENV = process.env.MAX_REGULAR_WS_MESSAGE_BYTES ?? process.env.DEFAULT_WS_MESSAGE_BYTES
-const MAX_REGULAR_WS_MESSAGE_BYTES = Number(REGULAR_WS_MESSAGE_BYTES_ENV ?? 1 * 1024 * 1024)
-// Max payload size per WebSocket message for mobile browser compatibility (500KB)
-const MAX_CHUNK_BYTES = Number(process.env.MAX_WS_CHUNK_BYTES || 500 * 1024)
-// Drain-aware sending: wait for buffer to drop below threshold between chunks
-const DRAIN_THRESHOLD_BYTES = Number(process.env.WS_DRAIN_THRESHOLD_BYTES || 512 * 1024) // 512KB
-const DRAIN_TIMEOUT_MS = Number(process.env.WS_DRAIN_TIMEOUT_MS || 30_000) // 30s
+type WsHandlerConfig = {
+  maxConnections: number
+  helloTimeoutMs: number
+  pingIntervalMs: number
+  maxWsBufferedAmount: number
+  wsMaxPayloadBytes: number
+  maxScreenshotBase64Bytes: number
+  maxRegularWsMessageBytes: number
+  maxChunkBytes: number
+  drainThresholdBytes: number
+  drainTimeoutMs: number
+  terminalCreateRateLimit: number
+  terminalCreateRateWindowMs: number
+}
+
+function readWsHandlerConfig(): WsHandlerConfig {
+  // Use ?? so only unset vars fall back; preserves explicit MAX_REGULAR_WS_MESSAGE_BYTES values.
+  const regularWsMessageBytesEnv = process.env.MAX_REGULAR_WS_MESSAGE_BYTES ?? process.env.DEFAULT_WS_MESSAGE_BYTES
+  return {
+    maxConnections: Number(process.env.MAX_CONNECTIONS || 50),
+    helloTimeoutMs: Number(process.env.HELLO_TIMEOUT_MS || 5_000),
+    pingIntervalMs: Number(process.env.PING_INTERVAL_MS || 30_000),
+    maxWsBufferedAmount: Number(process.env.MAX_WS_BUFFERED_AMOUNT || 2 * 1024 * 1024),
+    wsMaxPayloadBytes: Number(process.env.WS_MAX_PAYLOAD_BYTES || 16 * 1024 * 1024),
+    maxScreenshotBase64Bytes: Number(process.env.MAX_SCREENSHOT_BASE64_BYTES || 12 * 1024 * 1024),
+    maxRegularWsMessageBytes: Number(regularWsMessageBytesEnv ?? 1 * 1024 * 1024),
+    maxChunkBytes: Number(process.env.MAX_WS_CHUNK_BYTES || 500 * 1024),
+    drainThresholdBytes: Number(process.env.WS_DRAIN_THRESHOLD_BYTES || 512 * 1024),
+    drainTimeoutMs: Number(process.env.WS_DRAIN_TIMEOUT_MS || 30_000),
+    terminalCreateRateLimit: Number(process.env.TERMINAL_CREATE_RATE_LIMIT || 10),
+    terminalCreateRateWindowMs: Number(process.env.TERMINAL_CREATE_RATE_WINDOW_MS || 10_000),
+  }
+}
 const DRAIN_POLL_INTERVAL_MS = 50
-// Rate limit: max terminal.create requests per client within a sliding window
-const TERMINAL_CREATE_RATE_LIMIT = Number(process.env.TERMINAL_CREATE_RATE_LIMIT || 10)
-const TERMINAL_CREATE_RATE_WINDOW_MS = Number(process.env.TERMINAL_CREATE_RATE_WINDOW_MS || 10_000)
 /** Sentinel value reserved in createdByRequestId while awaiting async session repair */
 const REPAIR_PENDING_SENTINEL = '__repair_pending__'
 const log = logger.child({ component: 'ws' })
@@ -207,6 +223,8 @@ function createScreenshotError(code: ScreenshotErrorCode, message: string): Erro
 }
 
 export class WsHandler {
+  private readonly config: WsHandlerConfig
+  private readonly authToken: string
   private wss: WebSocketServer
   private connections = new Set<LiveWebSocket>()
   private clientStates = new Map<LiveWebSocket, ClientState>()
@@ -246,6 +264,8 @@ export class WsHandler {
     layoutStore?: LayoutStore,
     extensionManager?: ExtensionManager,
   ) {
+    this.config = readWsHandlerConfig()
+    this.authToken = getRequiredAuthToken()
     this.sessionRepairService = sessionRepairService
     this.handshakeSnapshotProvider = handshakeSnapshotProvider
     this.terminalMetaListProvider = terminalMetaListProvider
@@ -263,7 +283,7 @@ export class WsHandler {
     this.wss = new WebSocketServer({
       server,
       path: '/ws',
-      maxPayload: WS_MAX_PAYLOAD_BYTES,
+      maxPayload: this.config.wsMaxPayloadBytes,
       perMessageDeflate: {
         zlibDeflateOptions: { level: 1 },
         threshold: 1024,
@@ -290,7 +310,7 @@ export class WsHandler {
         ws.isAlive = false
         ws.ping()
       }
-    }, PING_INTERVAL_MS)
+    }, this.config.pingIntervalMs)
 
     // Subscribe to session repair events
     if (this.sessionRepairService) {
@@ -493,7 +513,7 @@ export class WsHandler {
   }
 
   private onConnection(ws: LiveWebSocket, req: http.IncomingMessage) {
-    if (this.connections.size >= MAX_CONNECTIONS) {
+    if (this.connections.size >= this.config.maxConnections) {
       ws.close(CLOSE_CODES.MAX_CONNECTIONS, 'Too many connections')
       return
     }
@@ -571,7 +591,7 @@ export class WsHandler {
       if (!state.authenticated) {
         ws.close(CLOSE_CODES.HELLO_TIMEOUT, 'Hello timeout')
       }
-    }, HELLO_TIMEOUT_MS)
+    }, this.config.helloTimeoutMs)
 
     ws.on('message', (data) => void this.onMessage(ws, state, data))
     ws.on('close', (code, reason) => this.onClose(ws, state, code, reason))
@@ -628,7 +648,7 @@ export class WsHandler {
 
   private closeForBackpressureIfNeeded(ws: LiveWebSocket, bufferedOverride?: number): boolean {
     const buffered = bufferedOverride ?? (ws.bufferedAmount as number | undefined)
-    if (typeof buffered !== 'number' || buffered <= MAX_WS_BUFFERED_AMOUNT) return false
+    if (typeof buffered !== 'number' || buffered <= this.config.maxWsBufferedAmount) return false
 
     if (perfConfig.enabled && shouldLog(`ws_backpressure_${ws.connectionId || 'unknown'}`, perfConfig.rateLimitMs)) {
       logPerfEvent(
@@ -636,7 +656,7 @@ export class WsHandler {
         {
           connectionId: ws.connectionId,
           bufferedBytes: buffered,
-          limitBytes: MAX_WS_BUFFERED_AMOUNT,
+          limitBytes: this.config.maxWsBufferedAmount,
         },
         'warn',
       )
@@ -645,12 +665,12 @@ export class WsHandler {
     return true
   }
 
-  private send(ws: LiveWebSocket, msg: unknown) {
+  private send(ws: LiveWebSocket, msg: unknown, skipBackpressureCheck = false) {
     let messageType: string | undefined
     try {
-      // Backpressure guard.
+      // Backpressure guard (skipped for pre-drained chunked sends).
       const buffered = ws.bufferedAmount as number | undefined
-      if (this.closeForBackpressureIfNeeded(ws, buffered)) return
+      if (!skipBackpressureCheck && this.closeForBackpressureIfNeeded(ws, buffered)) return
       let serialized = ''
       let payloadBytes: number | undefined
       let serializeMs: number | undefined
@@ -710,9 +730,9 @@ export class WsHandler {
     }
   }
 
-  private safeSend(ws: LiveWebSocket, msg: unknown) {
+  private safeSend(ws: LiveWebSocket, msg: unknown, skipBackpressureCheck = false) {
     if (ws.readyState === WebSocket.OPEN) {
-      this.send(ws, msg)
+      this.send(ws, msg, skipBackpressureCheck)
     }
   }
 
@@ -826,7 +846,7 @@ export class WsHandler {
     // Increment generation to cancel any in-flight sends for this connection
     const generation = (ws.sessionUpdateGeneration = (ws.sessionUpdateGeneration || 0) + 1)
     const isSuperseded = () => ws.sessionUpdateGeneration !== generation
-    const chunks = chunkProjects(projects, MAX_CHUNK_BYTES)
+    const chunks = chunkProjects(projects, this.config.maxChunkBytes)
 
     // Instrumentation: measure session payload size
     const totalSessions = projects.reduce((sum, p) => sum + (p.sessions?.length ?? 0), 0)
@@ -834,6 +854,24 @@ export class WsHandler {
 
     for (let i = 0; i < chunks.length; i++) {
       // Bail out if connection closed or a newer update has started
+      if (ws.readyState !== WebSocket.OPEN) return false
+      if (isSuperseded()) return false
+
+      // Wait for buffer to drain BEFORE sending the next chunk (skip first chunk).
+      // On remote connections (Tailscale, SSH tunnels), TCP drain is slower than
+      // chunk sends, so bufferedAmount can accumulate past the backpressure kill
+      // threshold (MAX_WS_BUFFERED_AMOUNT) if we don't drain first.
+      if (i > 0) {
+        const buffered = ws.bufferedAmount as number | undefined
+        if (typeof buffered === 'number' && buffered > this.config.drainThresholdBytes) {
+          if (!await this.waitForDrain(ws, this.config.drainThresholdBytes, this.config.drainTimeoutMs, isSuperseded)) return false
+        } else {
+          await new Promise<void>((resolve) => setImmediate(resolve))
+        }
+      }
+
+      // The fast-path yield above can give a newer generation a chance to start.
+      // Re-check before we serialize/send so stale streams do not leak chunks.
       if (ws.readyState !== WebSocket.OPEN) return false
       if (isSuperseded()) return false
 
@@ -863,17 +901,10 @@ export class WsHandler {
       }
 
       totalPayloadBytes += Buffer.byteLength(JSON.stringify(msg))
-      this.safeSend(ws, msg)
-
-      // Wait for buffer to drain before sending next chunk
-      if (i < chunks.length - 1) {
-        const buffered = ws.bufferedAmount as number | undefined
-        if (typeof buffered === 'number' && buffered > DRAIN_THRESHOLD_BYTES) {
-          if (!await this.waitForDrain(ws, DRAIN_THRESHOLD_BYTES, DRAIN_TIMEOUT_MS, isSuperseded)) return false
-        } else {
-          await new Promise<void>((resolve) => setImmediate(resolve))
-        }
-      }
+      // Skip the send() backpressure guard for chunks 2..N — we already
+      // drained above. Keep it for the first chunk in case the buffer is
+      // already near MAX_WS_BUFFERED_AMOUNT from concurrent writes.
+      this.safeSend(ws, msg, /* skipBackpressureCheck */ i > 0)
     }
     // Verify connection survived the final send (safeSend can trigger backpressure close)
     const allSent = ws.readyState === WebSocket.OPEN && !isSuperseded()
@@ -932,7 +963,7 @@ export class WsHandler {
       const m = parsed.data
       messageType = m.type
 
-      if (rawBytes > MAX_REGULAR_WS_MESSAGE_BYTES && m.type !== 'ui.screenshot.result') {
+      if (rawBytes > this.config.maxRegularWsMessageBytes && m.type !== 'ui.screenshot.result') {
         ws.close(1009, 'Message too large')
         return
       }
@@ -944,8 +975,7 @@ export class WsHandler {
       }
 
       if (m.type === 'hello') {
-        const expected = getRequiredAuthToken()
-        if (!m.token || !timingSafeCompare(m.token, expected)) {
+        if (!m.token || !timingSafeCompare(m.token, this.authToken)) {
           log.warn({ event: 'ws_auth_failed', connectionId: ws.connectionId }, 'WebSocket auth failed')
           this.sendError(ws, { code: 'NOT_AUTHENTICATED', message: 'Invalid token' })
           ws.close(CLOSE_CODES.NOT_AUTHENTICATED, 'Invalid token')
@@ -1004,7 +1034,7 @@ export class WsHandler {
         if (!pending) return
         if (pending.connectionId && pending.connectionId !== ws.connectionId) return
 
-        if (typeof m.imageBase64 === 'string' && m.imageBase64.length > MAX_SCREENSHOT_BASE64_BYTES) {
+        if (typeof m.imageBase64 === 'string' && m.imageBase64.length > this.config.maxScreenshotBase64Bytes) {
           clearTimeout(pending.timeout)
           this.screenshotRequests.delete(m.requestId)
           pending.reject(new Error('Screenshot payload too large'))
@@ -1167,9 +1197,9 @@ export class WsHandler {
               if (!m.restore) {
                 const now = Date.now()
                 state.terminalCreateTimestamps = state.terminalCreateTimestamps.filter(
-                  (t) => now - t < TERMINAL_CREATE_RATE_WINDOW_MS
+                  (t) => now - t < this.config.terminalCreateRateWindowMs
                 )
-                if (state.terminalCreateTimestamps.length >= TERMINAL_CREATE_RATE_LIMIT) {
+                if (state.terminalCreateTimestamps.length >= this.config.terminalCreateRateLimit) {
                   rateLimited = true
                   log.warn({ connectionId: ws.connectionId, count: state.terminalCreateTimestamps.length }, 'terminal.create rate limited')
                   this.sendError(ws, { code: 'RATE_LIMITED', message: 'Too many terminal.create requests', requestId: m.requestId })
@@ -2024,7 +2054,7 @@ export class WsHandler {
         ws.isAlive = false
         ws.ping()
       }
-    }, PING_INTERVAL_MS)
+    }, this.config.pingIntervalMs)
 
     log.info('WsHandler resumed after rebind')
   }

@@ -2,6 +2,7 @@ import { useState, memo, useMemo } from 'react'
 import { ChevronRight, Loader2, Check, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import DiffView from './DiffView'
+import { getToolPreview } from './tool-preview'
 
 interface ToolBlockProps {
   name: string
@@ -11,38 +12,6 @@ interface ToolBlockProps {
   status: 'running' | 'complete'
   /** When true, tool block starts expanded (used for recent tools). Default: false. */
   initialExpanded?: boolean
-}
-
-/** Generate a context-rich one-line preview for the tool header. */
-function getToolPreview(name: string, input?: Record<string, unknown>): string {
-  if (!input) return ''
-
-  if (name === 'Bash') {
-    // Prefer description over raw command
-    if (typeof input.description === 'string') return input.description
-    if (typeof input.command === 'string') return `$ ${input.command.slice(0, 120)}`
-    return ''
-  }
-
-  if (name === 'Grep') {
-    const pattern = typeof input.pattern === 'string' ? input.pattern : ''
-    const path = typeof input.path === 'string' ? input.path : ''
-    return path ? `${pattern} in ${path}` : pattern
-  }
-
-  if ((name === 'Read' || name === 'Write' || name === 'Edit') && typeof input.file_path === 'string') {
-    return input.file_path
-  }
-
-  if (name === 'Glob' && typeof input.pattern === 'string') {
-    return input.pattern
-  }
-
-  if ((name === 'WebFetch' || name === 'WebSearch') && typeof input.url === 'string') {
-    return input.url
-  }
-
-  return JSON.stringify(input).slice(0, 100)
 }
 
 /** Generate a short result summary (e.g. "143 lines", "5 matches", "error"). */
@@ -80,7 +49,7 @@ function ToolBlock({ name, input, output, isError, status, initialExpanded }: To
   return (
     <div
       className={cn(
-        'border-l-2 my-1 text-xs',
+        'border-l-2 my-0.5 text-xs',
         isError
           ? 'border-l-[hsl(var(--claude-error))]'
           : 'border-l-[hsl(var(--claude-tool))]'
@@ -89,7 +58,7 @@ function ToolBlock({ name, input, output, isError, status, initialExpanded }: To
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 w-full px-2 py-1 text-left hover:bg-accent/50 rounded-r"
+        className="flex w-full items-center gap-2 rounded-r px-2 py-0.5 text-left hover:bg-accent/50"
         aria-expanded={expanded}
         aria-label={`${name} tool call`}
       >
@@ -112,7 +81,7 @@ function ToolBlock({ name, input, output, isError, status, initialExpanded }: To
       </button>
 
       {expanded && (
-        <div className="px-2 py-1.5 border-t border-border/50 text-xs">
+        <div className="border-t border-border/50 px-2 py-1 text-xs">
           {name === 'Edit' && input &&
             typeof input.old_string === 'string' &&
             typeof input.new_string === 'string' ? (
@@ -137,7 +106,7 @@ function ToolBlock({ name, input, output, isError, status, initialExpanded }: To
               {output && (
                 <pre
                   className={cn(
-                    'whitespace-pre-wrap font-mono max-h-48 overflow-y-auto mt-1',
+                    'mt-0.5 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono',
                     isError ? 'text-red-500' : 'opacity-80'
                   )}
                   data-tool-output=""

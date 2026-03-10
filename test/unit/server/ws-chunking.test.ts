@@ -1,9 +1,15 @@
-import { describe, it, expect } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+const { mockLogger } = vi.hoisted(() => ({ mockLogger: { warn: vi.fn() } }))
+vi.mock('../../../server/logger.js', () => ({ logger: mockLogger }))
 import { chunkProjects } from '../../../server/ws-chunking.js'
 import type { ProjectGroup } from '../../../server/coding-cli/types.js'
 
 describe('WebSocket chunking', () => {
   describe('chunkProjects', () => {
+    beforeEach(() => {
+      mockLogger.warn.mockClear()
+    })
+
     const createProject = (path: string, sessionCount: number): ProjectGroup => ({
       projectPath: path,
       sessions: Array.from({ length: sessionCount }, (_, i) => ({
@@ -37,9 +43,15 @@ describe('WebSocket chunking', () => {
 
       expect(chunks.length).toBeGreaterThan(1)
 
-      // Verify all projects are included across chunks
-      const allProjects = chunks.flat()
-      expect(allProjects.length).toBe(projects.length)
+      // Verify all sessions are included across chunks (projects may be split)
+      const allEntries = chunks.flat()
+      const totalSessions = allEntries.reduce((sum, p) => sum + p.sessions.length, 0)
+      const originalSessions = projects.reduce((sum, p) => sum + p.sessions.length, 0)
+      expect(totalSessions).toBe(originalSessions)
+
+      // Verify all project paths are represented
+      const uniquePaths = new Set(allEntries.map(p => p.projectPath))
+      expect(uniquePaths.size).toBe(projects.length)
     })
 
     it('keeps each chunk under the size limit', () => {
@@ -57,16 +69,105 @@ describe('WebSocket chunking', () => {
       }
     })
 
-    it('handles single large project that exceeds chunk size', () => {
-      // A single project larger than the chunk size should still be in its own chunk
+    it('splits a single oversized project into multiple chunks', () => {
       const largeProject = createProject('/large/project', 1000) // Many sessions
-      const smallChunkSize = 1000 // Very small limit
+      const smallChunkSize = 5000 // Small enough to force splitting
 
       const chunks = chunkProjects([largeProject], smallChunkSize)
 
-      // Should still return the project in a single chunk (can't split a project)
+      // Should be split across multiple chunks
+      expect(chunks.length).toBeGreaterThan(1)
+
+      // All sub-groups should have the same projectPath
+      for (const chunk of chunks) {
+        expect(chunk.length).toBe(1)
+        expect(chunk[0].projectPath).toBe('/large/project')
+      }
+
+      // All sessions should be preserved across sub-groups
+      const allSessions = chunks.flatMap(c => c[0].sessions)
+      expect(allSessions.length).toBe(1000)
+      expect(allSessions.map(s => s.sessionId)).toEqual(
+        largeProject.sessions.map(s => s.sessionId)
+      )
+    })
+
+    it('preserves session order when splitting one project across chunks', () => {
+      const project: ProjectGroup = {
+        projectPath: '/ordered/project',
+        sessions: Array.from({ length: 12 }, (_, index) => ({
+          sessionId: `session-${index}`,
+          projectPath: '/ordered/project',
+          updatedAt: 1000 - index,
+          summary: 'x'.repeat(150),
+        })),
+      }
+
+      const chunks = chunkProjects([project], 900)
+
+      expect(chunks.length).toBeGreaterThan(1)
+      expect(chunks.flatMap((chunk) => chunk[0].sessions.map((session) => session.sessionId))).toEqual(
+        project.sessions.map((session) => session.sessionId),
+      )
+    })
+
+    it('keeps oversized project with single session in one chunk', () => {
+      // A project with just one session can't be split further
+      const singleSessionProject = createProject('/big/session', 1)
+      const tinyChunkSize = 10 // Smaller than any possible project
+
+      const chunks = chunkProjects([singleSessionProject], tinyChunkSize)
+
       expect(chunks.length).toBe(1)
-      expect(chunks[0][0]).toEqual(largeProject)
+      expect(chunks[0][0]).toEqual(singleSessionProject)
+    })
+
+    it('preserves color when splitting oversized projects', () => {
+      const project: ProjectGroup = {
+        ...createProject('/colored/project', 100),
+        color: '#ff0000',
+      }
+      const smallChunkSize = 2000
+
+      const chunks = chunkProjects([project], smallChunkSize)
+      expect(chunks.length).toBeGreaterThan(1)
+
+      for (const chunk of chunks) {
+        expect(chunk[0].color).toBe('#ff0000')
+      }
+    })
+
+    it('warns and isolates an individually oversized session inside a multi-session project', () => {
+      const project: ProjectGroup = {
+        projectPath: '/mixed/project',
+        sessions: [
+          {
+            sessionId: 'huge',
+            projectPath: '/mixed/project',
+            updatedAt: Date.now(),
+            summary: 'x'.repeat(6000),
+          },
+          {
+            sessionId: 'small',
+            projectPath: '/mixed/project',
+            updatedAt: Date.now(),
+          },
+        ] as any,
+      }
+
+      const chunks = chunkProjects([project], 1000)
+
+      expect(chunks).toHaveLength(2)
+      expect(chunks[0][0].sessions.map((s) => s.sessionId)).toEqual(['huge'])
+      expect(chunks[1][0].sessions.map((s) => s.sessionId)).toEqual(['small'])
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'oversized_unsplittable_project',
+          projectPath: '/mixed/project',
+          sessionCount: 1,
+        }),
+        expect.any(String),
+      )
     })
 
     it('preserves project order', () => {

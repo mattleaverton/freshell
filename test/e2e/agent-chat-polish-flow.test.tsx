@@ -119,10 +119,45 @@ describe('freshclaude polish e2e: left-border message layout', () => {
   })
 })
 
-describe('freshclaude polish e2e: tool block expand/collapse', () => {
+describe('freshclaude polish e2e: compact density', () => {
   afterEach(cleanup)
 
+  it('uses tighter scroll and bubble spacing to fit more content on screen', () => {
+    const store = makeStore()
+    store.dispatch(sessionCreated({ requestId: 'req-1', sessionId: 'sess-1' }))
+    store.dispatch(addUserMessage({ sessionId: 'sess-1', text: 'Hello Claude' }))
+    store.dispatch(addAssistantMessage({
+      sessionId: 'sess-1',
+      content: [{ type: 'text', text: 'Hello human' }],
+    }))
+    store.dispatch(setSessionStatus({ sessionId: 'sess-1', status: 'idle' }))
+
+    const { container } = render(
+      <Provider store={store}>
+        <AgentChatView tabId="t1" paneId="p1" paneContent={BASE_PANE} />
+      </Provider>,
+    )
+
+    const scrollArea = container.querySelector('[data-context="agent-chat"]') as HTMLElement
+    expect(scrollArea.className).toContain('px-3')
+    expect(scrollArea.className).toContain('py-3')
+    expect(scrollArea.className).toContain('space-y-2')
+
+    const messages = screen.getAllByRole('article')
+    expect(messages[0].className).toContain('py-0.5')
+    expect(messages[1].className).toContain('py-0.5')
+  })
+})
+
+describe('freshclaude polish e2e: tool block expand/collapse', () => {
+  afterEach(() => {
+    cleanup()
+    localStorage.removeItem('freshell:toolStripExpanded')
+  })
+
   it('collapses and expands tool blocks on click', () => {
+    // Tool strips are collapsed by default; set expanded to test ToolBlock interaction
+    localStorage.setItem('freshell:toolStripExpanded', 'true')
     const store = makeStore()
     store.dispatch(sessionCreated({ requestId: 'req-1', sessionId: 'sess-1' }))
     store.dispatch(addUserMessage({ sessionId: 'sess-1', text: 'Run a command' }))
@@ -160,9 +195,14 @@ describe('freshclaude polish e2e: tool block expand/collapse', () => {
 })
 
 describe('freshclaude polish e2e: auto-collapse old tools', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    localStorage.removeItem('freshell:toolStripExpanded')
+  })
 
   it('old tools start collapsed while recent tools start expanded', () => {
+    // Tool strips are collapsed by default; set expanded to test auto-expand behavior
+    localStorage.setItem('freshell:toolStripExpanded', 'true')
     const store = makeStore()
     store.dispatch(sessionCreated({ requestId: 'req-1', sessionId: 'sess-1' }))
     store.dispatch(addUserMessage({ sessionId: 'sess-1', text: 'Do things' }))
@@ -286,9 +326,14 @@ describe('freshclaude polish e2e: thinking indicator', () => {
 })
 
 describe('freshclaude polish e2e: diff view for Edit tool', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    localStorage.removeItem('freshell:toolStripExpanded')
+  })
 
   it('shows color-coded diff when an Edit tool result contains old_string/new_string', () => {
+    // Tool strips are collapsed by default; set expanded to test ToolBlock content
+    localStorage.setItem('freshell:toolStripExpanded', 'true')
     const store = makeStore()
     store.dispatch(sessionCreated({ requestId: 'req-1', sessionId: 'sess-1' }))
     store.dispatch(addUserMessage({ sessionId: 'sess-1', text: 'Edit a file' }))
@@ -320,8 +365,11 @@ describe('freshclaude polish e2e: diff view for Edit tool', () => {
       </Provider>,
     )
 
-    // Tool block should be present and expanded (only 1 tool < 3)
+    // Tool block should be present; ensure it is expanded
     const toolButton = screen.getByRole('button', { name: /tool call/i })
+    if (toolButton.getAttribute('aria-expanded') !== 'true') {
+      fireEvent.click(toolButton)
+    }
     expect(toolButton).toHaveAttribute('aria-expanded', 'true')
 
     // DiffView should render with the diff figure role
@@ -335,9 +383,14 @@ describe('freshclaude polish e2e: diff view for Edit tool', () => {
 })
 
 describe('freshclaude polish e2e: system-reminder stripping', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    localStorage.removeItem('freshell:toolStripExpanded')
+  })
 
   it('strips <system-reminder> tags from tool result output', () => {
+    // Tool strips are collapsed by default; set expanded to verify content is sanitized
+    localStorage.setItem('freshell:toolStripExpanded', 'true')
     const store = makeStore()
     store.dispatch(sessionCreated({ requestId: 'req-1', sessionId: 'sess-1' }))
     store.dispatch(addUserMessage({ sessionId: 'sess-1', text: 'Read a file' }))
@@ -359,6 +412,13 @@ describe('freshclaude polish e2e: system-reminder stripping', () => {
         <AgentChatView tabId="t1" paneId="p1" paneContent={BASE_PANE} />
       </Provider>,
     )
+
+    // Ensure the ToolBlock is expanded to verify the sanitized output
+    const toolButton = screen.getByRole('button', { name: /tool call/i })
+    if (toolButton.getAttribute('aria-expanded') !== 'true') {
+      fireEvent.click(toolButton)
+    }
+    expect(toolButton).toHaveAttribute('aria-expanded', 'true')
 
     // The visible output should contain the real content
     expect(screen.getByText(/File content here/)).toBeInTheDocument()

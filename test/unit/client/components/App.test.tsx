@@ -239,7 +239,10 @@ describe('App Component - Share Button', () => {
 
   async function openShareFromSettings() {
     fireEvent.click(screen.getByTitle('Go settings'))
-    const openShareButton = await screen.findByRole('button', { name: 'Open share panel' })
+    await waitFor(() => {
+      expect(screen.queryByText('Loading settings…')).not.toBeInTheDocument()
+    }, { timeout: 5000 })
+    const openShareButton = await screen.findByRole('button', { name: 'Open share panel' }, { timeout: 5000 })
     fireEvent.click(openShareButton)
   }
 
@@ -833,6 +836,56 @@ describe('App WS message handling', () => {
     vi.useRealTimers()
   })
 
+  it('merges a late append chunk into the same split project after the flush timer', async () => {
+    vi.useFakeTimers()
+    let handler: ((msg: any) => void) | null = null
+    mockOnMessage.mockImplementation((cb: (msg: any) => void) => {
+      handler = cb
+      return () => { handler = null }
+    })
+
+    const store = createTestStore()
+    renderApp(store)
+
+    await vi.waitFor(() => expect(handler).not.toBeNull())
+
+    act(() => {
+      handler!({
+        type: 'sessions.updated',
+        clear: true,
+        projects: [{
+          projectPath: '/split/project',
+          sessions: [
+            { provider: 'claude', sessionId: 's1', updatedAt: 1 },
+            { provider: 'claude', sessionId: 's2', updatedAt: 2 },
+          ],
+        }],
+      })
+    })
+
+    act(() => { vi.advanceTimersByTime(300) })
+
+    expect(store.getState().sessions.projects[0].sessions.map((s: any) => s.sessionId)).toEqual(['s1', 's2'])
+
+    act(() => {
+      handler!({
+        type: 'sessions.updated',
+        append: true,
+        projects: [{
+          projectPath: '/split/project',
+          sessions: [
+            { provider: 'claude', sessionId: 's3', updatedAt: 3 },
+          ],
+        }],
+      })
+    })
+
+    expect(store.getState().sessions.projects).toHaveLength(1)
+    expect(store.getState().sessions.projects[0].sessions.map((s: any) => s.sessionId)).toEqual(['s3', 's1', 's2'])
+
+    vi.useRealTimers()
+  })
+
   it('ignores sessions.patch messages until a WS sessions.updated snapshot is received', async () => {
     let handler: ((msg: any) => void) | null = null
     mockOnMessage.mockImplementation((cb: (msg: any) => void) => {
@@ -1029,5 +1082,26 @@ describe('Tab Switching Keyboard Shortcuts', () => {
 
     fireEvent.keyDown(window, { code: 'BracketLeft', ctrlKey: true, shiftKey: true })
     expect(store.getState().tabs.activeTabId).toBe('tab-1')
+  })
+
+  it('switches tabs from a focused textarea', () => {
+    const store = createStoreWithTabs(3, 1) // active tab-2
+    renderApp(store)
+
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    try {
+      textarea.focus()
+
+      expect(document.activeElement).toBe(textarea)
+
+      fireEvent.keyDown(textarea, { code: 'BracketRight', ctrlKey: true, shiftKey: true })
+      expect(store.getState().tabs.activeTabId).toBe('tab-3')
+
+      fireEvent.keyDown(textarea, { code: 'BracketLeft', ctrlKey: true, shiftKey: true })
+      expect(store.getState().tabs.activeTabId).toBe('tab-2')
+    } finally {
+      textarea.remove()
+    }
   })
 })

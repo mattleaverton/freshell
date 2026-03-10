@@ -23,6 +23,7 @@ import { setClientPerfEnabled } from '@/lib/perf-logger'
 import { applyLocalTerminalFontFamily } from '@/lib/terminal-fonts'
 import { handleUiCommand } from '@/lib/ui-commands'
 import { getAuthToken } from '@/lib/auth'
+import { installTestHarness } from '@/lib/test-harness'
 import { store } from '@/store/store'
 import { useThemeEffect } from '@/hooks/useTheme'
 import { useMobile } from '@/hooks/useMobile'
@@ -112,6 +113,13 @@ function parseConfigFallbackReason(value: unknown): ConfigFallbackInfo['reason']
     : 'READ_ERROR'
 }
 
+function getTabSwitchShortcutDirection(event: KeyboardEvent): 'prev' | 'next' | null {
+  if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return null
+  if (event.code === 'BracketLeft') return 'prev'
+  if (event.code === 'BracketRight') return 'next'
+  return null
+}
+
 const ReadyMessageSchema = z.object({
   type: z.literal('ready'),
   timestamp: z.string(),
@@ -127,6 +135,43 @@ export default function App() {
   const activeTabId = useAppSelector((s) => s.tabs.activeTabId)
   const settings = useAppSelector((s) => s.settings.settings)
   const networkStatus = useAppSelector((s) => s.network.status)
+
+  // Install test harness when URL has ?e2e=1 parameter (for Playwright E2E tests).
+  // Uses useState initializer to run exactly once. The URL parameter approach is
+  // used instead of import.meta.env.PROD because E2E tests run against the
+  // production build where PROD=true.
+  const [_harnessInstalled] = useState(() => {
+    if (typeof window === 'undefined') return false
+    const params = new URLSearchParams(window.location.search)
+    if (!params.has('e2e')) return false
+
+    const ws = getWsClient()
+    installTestHarness(
+      store,
+      () => (ws as any)._state || 'unknown',
+      (timeoutMs = 10_000) => new Promise<void>((resolve, reject) => {
+        if ((ws as any)._state === 'ready') { resolve(); return }
+        const timeout = setTimeout(
+          () => reject(new Error('WS connection timeout')),
+          timeoutMs,
+        )
+        const unsub = ws.onMessage(() => {
+          if ((ws as any)._state === 'ready') {
+            clearTimeout(timeout)
+            unsub()
+            resolve()
+          }
+        })
+      }),
+      // forceDisconnect: close the underlying WebSocket to trigger auto-reconnect.
+      // Unlike ws.disconnect(), this does NOT set intentionalClose, so the client
+      // will reconnect automatically.
+      () => { (ws as any).ws?.close() },
+      // sendWsMessage: send a raw WS message for test cleanup (e.g., terminal.kill)
+      (msg: unknown) => { ws.send(msg) },
+    )
+    return true
+  })
 
   const [view, setView] = useState<AppView>('terminal')
   const [showSharePanel, setShowSharePanel] = useState(false)
@@ -492,8 +537,9 @@ export default function App() {
               chunkedBuffer.push(...projects)
               scheduleChunkedFlush()
             } else {
-              // Append without a prior clear (shouldn't happen, but handle gracefully)
-              dispatch(mergeProjects(projects))
+              // Append after the flush window can still occur on slow links.
+              // Merge like a partial snapshot so split projects keep earlier sessions.
+              dispatch(mergeSnapshotProjects(projects))
               dispatch(markWsSnapshotReceived())
             }
           } else {
@@ -810,22 +856,14 @@ export default function App() {
     }
 
     function onKeyDown(e: KeyboardEvent) {
-      if (isTextInput(e.target)) return
-
-      // Tab switching: Ctrl+Shift+[ (prev) and Ctrl+Shift+] (next)
-      // Also handled in TerminalView.tsx for when terminal is focused
-      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey) {
-        if (e.code === 'BracketLeft') {
-          e.preventDefault()
-          dispatch(switchToPrevTab())
-          return
-        }
-        if (e.code === 'BracketRight') {
-          e.preventDefault()
-          dispatch(switchToNextTab())
-          return
-        }
+      const tabSwitchDirection = getTabSwitchShortcutDirection(e)
+      if (tabSwitchDirection) {
+        e.preventDefault()
+        dispatch(tabSwitchDirection === 'prev' ? switchToPrevTab() : switchToNextTab())
+        return
       }
+
+      if (isTextInput(e.target)) return
     }
 
     window.addEventListener('keydown', onKeyDown)
