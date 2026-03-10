@@ -12,6 +12,11 @@ export type ParsedAuditArgs = {
   profileIds: VisibleFirstProfileId[]
 }
 
+export type ParsedCompareArgs = {
+  basePath: string
+  candidatePath: string
+}
+
 function requireValue(flag: string, value: string | undefined): string {
   if (!value) {
     throw new Error(`${flag} requires a value`)
@@ -57,5 +62,38 @@ export function parseAuditArgs(args: string[], cwd = process.cwd()): ParsedAudit
     outputPath,
     scenarioIds: scenarioIds.length > 0 ? scenarioIds : [...AUDIT_SCENARIO_IDS],
     profileIds: profileIds.length > 0 ? profileIds : [...AUDIT_PROFILE_IDS],
+  }
+}
+
+export function parseCompareArgs(args: string[], cwd = process.cwd()): ParsedCompareArgs {
+  let basePath: string | null = null
+  let candidatePath: string | null = null
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]
+    if (arg === '--base') {
+      basePath = path.resolve(cwd, requireValue(arg, args[index + 1]))
+      index += 1
+      continue
+    }
+    if (arg === '--candidate') {
+      candidatePath = path.resolve(cwd, requireValue(arg, args[index + 1]))
+      index += 1
+      continue
+    }
+
+    throw new Error(`Unknown argument: ${arg}`)
+  }
+
+  if (!basePath) {
+    throw new Error('compare mode requires --base')
+  }
+  if (!candidatePath) {
+    throw new Error('compare mode requires --candidate')
+  }
+
+  return {
+    basePath,
+    candidatePath,
   }
 }
