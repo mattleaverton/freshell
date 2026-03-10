@@ -204,6 +204,63 @@ describe('SessionRepairService', () => {
     }
   })
 
+  it('waits for in-flight history backfill before stop resolves', async () => {
+    const projectDir = path.join(tempDir, '.claude', 'projects', 'test-project')
+    await fs.mkdir(projectDir, { recursive: true })
+
+    const sessionId = 'stop-drain-session'
+    const sessionFile = path.join(projectDir, `${sessionId}.jsonl`)
+    await fs.writeFile(sessionFile, createTranscript(sessionId, '/tmp/project'))
+
+    let releaseHistory: (() => void) | undefined
+    const historyGate = new Promise<void>((resolve) => {
+      releaseHistory = resolve
+    })
+
+    const service = new SessionRepairService({
+      cacheDir: tempDir,
+      scanner: {
+        scan: vi.fn(async (filePath: string): Promise<SessionScanResult> => ({
+          sessionId: path.basename(filePath, '.jsonl'),
+          filePath,
+          status: 'healthy',
+          chainDepth: 1,
+          orphanCount: 0,
+          fileSize: 1,
+          messageCount: 1,
+        })),
+        repair: vi.fn(),
+      } as any,
+    })
+
+    const ensureHistoryEntryForFile = vi.fn(async () => {
+      await historyGate
+      return { status: 'created' as const }
+    })
+    ;(service as any).historyRepairer = {
+      ensureHistoryEntryForFile,
+    }
+
+    await service.start()
+    service.prioritizeSessions({ active: sessionId })
+
+    await vi.waitFor(() => {
+      expect(ensureHistoryEntryForFile).toHaveBeenCalledWith(sessionFile)
+    })
+
+    let stopped = false
+    const stopPromise = service.stop().then(() => {
+      stopped = true
+    })
+
+    await Promise.resolve()
+    expect(stopped).toBe(false)
+
+    releaseHistory?.()
+    await stopPromise
+    expect(stopped).toBe(true)
+  })
+
   it('treats history backfill failures as best-effort during waitForSession', async () => {
     const projectDir = path.join(tempDir, '.claude', 'projects', 'test-project')
     await fs.mkdir(projectDir, { recursive: true })
