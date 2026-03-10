@@ -6,6 +6,7 @@ import fsp from 'fs/promises'
 import os from 'os'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { resolveDebugLogPath } from '../../../server/logger.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -16,12 +17,19 @@ export interface TestServerInfo {
   wsUrl: string
   token: string
   configDir: string
+  homeDir: string
+  logsDir: string
+  debugLogPath: string
   pid: number
 }
 
 export interface TestServerOptions {
   /** Extra environment variables to pass to the server process */
   env?: Record<string, string>
+  /** Optional setup hook for populating the isolated HOME before the server starts */
+  setupHome?: (homeDir: string) => Promise<void>
+  /** Preserve the isolated HOME after stop for audit collection */
+  preserveHomeOnStop?: boolean
   /** Timeout in ms to wait for the server to become healthy (default: 30000) */
   startTimeoutMs?: number
   /** Whether to pipe server stdout/stderr to the test console (default: false) */
@@ -91,9 +99,14 @@ export class TestServer {
     const token = randomUUID()
     const port = await findFreePort()
     this.configDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'freshell-e2e-'))
+    const homeDir = this.configDir
+
+    if (this.options.setupHome) {
+      await this.options.setupHome(homeDir)
+    }
 
     // Create the .freshell config dir inside the temp HOME so the server doesn't error
-    const freshellDir = path.join(this.configDir, '.freshell')
+    const freshellDir = path.join(homeDir, '.freshell')
     await fsp.mkdir(freshellDir, { recursive: true })
 
     // Pre-seed config.json so the SetupWizard does not block the UI.
@@ -112,7 +125,7 @@ export class TestServer {
     }, null, 2))
 
     // Create a logs dir
-    const logsDir = path.join(this.configDir, '.freshell', 'logs')
+    const logsDir = path.join(homeDir, '.freshell', 'logs')
     await fsp.mkdir(logsDir, { recursive: true })
 
     const projectRoot = findProjectRoot()
@@ -130,7 +143,7 @@ export class TestServer {
       ...process.env as Record<string, string>,
       PORT: String(port),
       AUTH_TOKEN: token,
-      HOME: this.configDir,
+      HOME: homeDir,
       NODE_ENV: 'production',
       FRESHELL_LOG_DIR: logsDir,
       HIDE_STARTUP_TOKEN: 'true',
@@ -150,6 +163,7 @@ export class TestServer {
     })
 
     const pid = this.process.pid!
+    const debugLogPath = resolveDebugLogPath(env, homeDir) ?? path.join(logsDir, `server-debug.production.${port}.jsonl`)
 
     this.process.stdout!.on('data', (chunk: Buffer) => {
       const text = chunk.toString()
@@ -170,7 +184,17 @@ export class TestServer {
     const timeoutMs = this.options.startTimeoutMs ?? 30_000
     await this.waitForHealth(baseUrl, timeoutMs)
 
-    this._info = { port, baseUrl, wsUrl, token, configDir: this.configDir, pid }
+    this._info = {
+      port,
+      baseUrl,
+      wsUrl,
+      token,
+      configDir: homeDir,
+      homeDir,
+      logsDir,
+      debugLogPath,
+      pid,
+    }
     return this._info
   }
 
@@ -195,10 +219,10 @@ export class TestServer {
 
       proc.kill('SIGTERM')
     }).finally(async () => {
-      if (this.configDir) {
+      if (this.configDir && !this.options.preserveHomeOnStop) {
         await fsp.rm(this.configDir, { recursive: true, force: true }).catch(() => {})
-        this.configDir = null
       }
+      this.configDir = null
       this._info = null
     })
   }

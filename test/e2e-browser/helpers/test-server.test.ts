@@ -1,3 +1,5 @@
+import fs from 'fs/promises'
+import path from 'path'
 import { describe, it, expect, afterEach } from 'vitest'
 import { TestServer } from './test-server.js'
 
@@ -60,5 +62,30 @@ describe('TestServer', () => {
     const info = await server.start()
     expect(info.configDir).toContain('freshell-e2e-')
     expect(info.configDir).not.toContain('.freshell')
+  })
+
+  it('exposes HOME, logs, and debug-log paths and can preserve them for audit collection', async () => {
+    server = new TestServer({
+      preserveHomeOnStop: true,
+      setupHome: async (homeDir) => {
+        await fs.mkdir(path.join(homeDir, '.claude', 'projects', 'perf'), { recursive: true })
+      },
+    })
+
+    const info = await server.start()
+    expect(info.homeDir).toContain('freshell-e2e-')
+    expect(info.logsDir).toContain(path.join('.freshell', 'logs'))
+    expect(info.debugLogPath).toContain('.jsonl')
+    expect(await fs.stat(path.join(info.homeDir, '.claude', 'projects', 'perf'))).toBeDefined()
+    await server.stop()
+    server = undefined
+    await expect(fs.stat(info.homeDir)).resolves.toBeDefined()
+
+    server = new TestServer()
+    const defaultInfo = await server.start()
+    const defaultHomeDir = defaultInfo.homeDir
+    await server.stop()
+    server = undefined
+    await expect(fs.stat(defaultHomeDir)).rejects.toThrow()
   })
 })
