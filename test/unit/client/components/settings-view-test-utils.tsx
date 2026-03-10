@@ -12,11 +12,13 @@ import settingsReducer, {
 import tabsReducer from '@/store/tabsSlice'
 import connectionReducer from '@/store/connectionSlice'
 import sessionsReducer from '@/store/sessionsSlice'
+import extensionsReducer from '@/store/extensionsSlice'
 import { networkReducer, type NetworkState, type NetworkStatusResponse } from '@/store/networkSlice'
 import tabRegistryReducer, { type TabRegistryState } from '@/store/tabRegistrySlice'
 import type { RegistryTabRecord } from '@/store/tabRegistryTypes'
 import type { AppSettings } from '@/store/types'
 import type { DeepPartial } from '@/lib/type-utils'
+import type { ClientExtensionEntry } from '@shared/extension-types'
 
 type SettingsViewProps = ComponentProps<typeof SettingsView>
 
@@ -33,6 +35,34 @@ interface InstallSettingsViewHooksOptions {
 }
 
 let originalFonts: Document['fonts'] | undefined
+
+const defaultCliExtensions: ClientExtensionEntry[] = [
+  {
+    name: 'claude',
+    version: '1.0.0',
+    label: 'Claude CLI',
+    description: '',
+    category: 'cli',
+    cli: {
+      supportsPermissionMode: true,
+      supportsResume: true,
+      resumeCommandTemplate: ['claude', '--resume', '{{sessionId}}'],
+    },
+  },
+  {
+    name: 'codex',
+    version: '1.0.0',
+    label: 'Codex CLI',
+    description: '',
+    category: 'cli',
+    cli: {
+      supportsModel: true,
+      supportsSandbox: true,
+      supportsResume: true,
+      resumeCommandTemplate: ['codex', 'resume', '{{sessionId}}'],
+    },
+  },
+]
 
 export function createSettings(overrides?: DeepPartial<AppSettings>): AppSettings {
   return overrides ? mergeSettings(defaultSettings, overrides) : defaultSettings
@@ -112,6 +142,7 @@ export function createSettingsViewStore(options: CreateSettingsViewStoreOptions 
       tabs: tabsReducer,
       connection: connectionReducer,
       sessions: sessionsReducer,
+      extensions: extensionsReducer,
       network: networkReducer,
       tabRegistry: tabRegistryReducer,
     },
@@ -127,6 +158,9 @@ export function createSettingsViewStore(options: CreateSettingsViewStoreOptions 
         loaded: true,
         lastSavedAt: undefined,
         ...settingsState,
+      },
+      extensions: {
+        entries: defaultCliExtensions,
       },
       tabRegistry: createTabRegistryState(),
       ...extraPreloadedState,
