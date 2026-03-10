@@ -178,7 +178,7 @@ export class TestServer {
     })
 
     const baseUrl = `http://127.0.0.1:${port}`
-    const wsUrl = `ws://127.0.0.1:${port}`
+    const wsUrl = `ws://127.0.0.1:${port}/ws`
 
     // Wait for health check to pass (confirms server is listening on the port)
     const timeoutMs = this.options.startTimeoutMs ?? 30_000

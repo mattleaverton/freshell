@@ -4,7 +4,6 @@ import { setStatus, setError, setErrorCode, setServerInstanceId, setPlatform, se
 import { setSettings } from '@/store/settingsSlice'
 import {
   setProjects,
-  mergeProjects,
   mergeSnapshotProjects,
   applySessionsPatch,
   markWsSnapshotReceived,

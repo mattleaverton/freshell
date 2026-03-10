@@ -15,7 +15,7 @@ import AgentChatSettings from './AgentChatSettings'
 import ThinkingIndicator from './ThinkingIndicator'
 import { useStreamDebounce } from './useStreamDebounce'
 import CollapsedTurn from './CollapsedTurn'
-import type { ChatMessage, ChatSessionState } from '@/store/agentChatTypes'
+import type { ChatMessage } from '@/store/agentChatTypes'
 import { api, setSessionMetadata } from '@/lib/api'
 import { updateSettingsLocal } from '@/store/settingsSlice'
 import { getAgentChatProviderConfig } from '@/lib/agent-chat-utils'
@@ -384,7 +384,7 @@ export default function AgentChatView({ tabId, paneId, paneContent, hidden }: Ag
     && !initialSetupDone
     && (settingsLoaded || settingsLoadTimedOut)
 
-  // Auto-focus is handled by the ChatComposer's autoFocus prop below.
+  // Focus is handled by the ChatComposer readiness prop below.
   // When settings are dismissed, focus imperatively via the dismiss callback.
 
 
@@ -555,7 +555,7 @@ export default function AgentChatView({ tabId, paneId, paneContent, hidden }: Ag
               return (
                 <React.Fragment key={`turn-${i}`}>
                   <MessageBubble
-                    role={item.user.role}
+                    speaker={item.user.role}
                     content={item.user.content}
                     timestamp={item.user.timestamp}
                     showThinking={paneContent.showThinking ?? defaultShowThinking}
@@ -563,7 +563,7 @@ export default function AgentChatView({ tabId, paneId, paneContent, hidden }: Ag
                     showTimecodes={paneContent.showTimecodes ?? defaultShowTimecodes}
                   />
                   <MessageBubble
-                    role={item.assistant.role}
+                    speaker={item.assistant.role}
                     content={item.assistant.content}
                     timestamp={item.assistant.timestamp}
                     model={item.assistant.model}
@@ -581,7 +581,7 @@ export default function AgentChatView({ tabId, paneId, paneContent, hidden }: Ag
             return (
               <MessageBubble
                 key={`msg-${i}`}
-                role={item.message.role}
+                speaker={item.message.role}
                 content={item.message.content}
                 timestamp={item.message.timestamp}
                 model={item.message.model}
@@ -598,7 +598,7 @@ export default function AgentChatView({ tabId, paneId, paneContent, hidden }: Ag
 
         {session?.streamingActive && streamingContent.length > 0 && (
           <MessageBubble
-            role="assistant"
+            speaker="assistant"
             content={streamingContent}
             showThinking={paneContent.showThinking ?? defaultShowThinking}
             showTools={paneContent.showTools ?? defaultShowTools}
@@ -675,7 +675,7 @@ export default function AgentChatView({ tabId, paneId, paneContent, hidden }: Ag
         onInterrupt={handleInterrupt}
         disabled={!isInteractive && !isRunning}
         isRunning={isRunning}
-        autoFocus={!shouldShowSettings}
+        shouldFocusOnReady={!shouldShowSettings}
         placeholder={
           hasWaitingItems
             ? 'Waiting for answer...'

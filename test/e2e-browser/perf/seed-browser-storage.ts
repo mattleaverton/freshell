@@ -95,6 +95,47 @@ export function buildAgentChatBrowserStorageSeed(): StorageSeed {
   )
 }
 
+export function buildTerminalBrowserStorageSeed(): StorageSeed {
+  const tabId = 'tab-terminal-audit'
+  const paneId = 'pane-terminal-audit'
+
+  return baseSeed(
+    buildTabsPayload({
+      activeTabId: tabId,
+      tabs: [
+        {
+          id: tabId,
+          title: 'Terminal Audit',
+          createRequestId: 'tab-terminal-audit',
+        },
+      ],
+    }),
+    buildPanesPayload({
+      layouts: {
+        [tabId]: {
+          type: 'leaf',
+          id: paneId,
+          content: {
+            kind: 'terminal',
+            createRequestId: 'terminal-audit-create',
+            status: 'creating',
+            mode: 'shell',
+            shell: 'system',
+          },
+        },
+      },
+      activePane: {
+        [tabId]: paneId,
+      },
+      paneTitles: {
+        [tabId]: {
+          [paneId]: 'Terminal Audit',
+        },
+      },
+    }),
+  )
+}
+
 export function buildOffscreenTabBrowserStorageSeed(): StorageSeed {
   const terminalTabId = 'tab-terminal'
   const terminalPaneId = 'pane-terminal'

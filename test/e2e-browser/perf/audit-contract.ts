@@ -118,6 +118,20 @@ export type VisibleFirstAuditSample = z.infer<typeof VisibleFirstAuditSampleSche
 export type VisibleFirstProfileId = typeof AUDIT_PROFILE_IDS[number]
 export type VisibleFirstScenarioId = typeof AUDIT_SCENARIO_IDS[number]
 
+export function assertVisibleFirstAuditTrusted(artifact: VisibleFirstAuditArtifact): void {
+  const failures = artifact.scenarios.flatMap((scenario) =>
+    scenario.samples
+      .filter((sample) => sample.status !== 'ok')
+      .map((sample) => `${scenario.id}/${sample.profileId}:${sample.status}`),
+  )
+
+  if (failures.length === 0) {
+    return
+  }
+
+  throw new Error(`Visible-first audit is untrustworthy: ${failures.join(', ')}`)
+}
+
 export function getScenarioDescription(scenarioId: VisibleFirstScenarioId): string {
   return AUDIT_SCENARIOS.find((scenario) => scenario.id === scenarioId)?.description ?? scenarioId
 }

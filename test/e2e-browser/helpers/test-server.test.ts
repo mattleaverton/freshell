@@ -20,6 +20,7 @@ describe('TestServer', () => {
     expect(info.port).not.toBe(3001)
     expect(info.port).not.toBe(3002)
     expect(info.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
+    expect(info.wsUrl).toMatch(/^ws:\/\/127\.0\.0\.1:\d+\/ws$/)
     expect(info.token).toBeTruthy()
     expect(info.token.length).toBeGreaterThanOrEqual(16)
   })

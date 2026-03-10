@@ -25,6 +25,7 @@ import { AUDIT_SCENARIOS } from './scenarios.js'
 import {
   buildAgentChatBrowserStorageSeed,
   buildOffscreenTabBrowserStorageSeed,
+  buildTerminalBrowserStorageSeed,
 } from './seed-browser-storage.js'
 import {
   seedVisibleFirstAuditServerHome,
@@ -303,6 +304,9 @@ async function resolveBrowserStorageSeed(input: {
   seedResult: VisibleFirstAuditHomeSeedResult
 }): Promise<Record<string, string> | null> {
   switch (input.scenarioId) {
+    case 'terminal-cold-boot':
+    case 'sidebar-search-large-corpus':
+      return buildTerminalBrowserStorageSeed()
     case 'agent-chat-cold-boot':
       return buildAgentChatBrowserStorageSeed()
     case 'offscreen-tab-selection':
@@ -345,22 +349,36 @@ function getActiveTerminalId(state: unknown): string | null {
 
 async function driveScenarioInteraction(input: {
   scenarioId: VisibleFirstScenarioId
+  profileId: VisibleFirstProfileId
   page: Page
   harness: TestHarness
   terminal: TerminalHelper
 }): Promise<void> {
   switch (input.scenarioId) {
     case 'sidebar-search-large-corpus': {
-      const showSidebarButton = input.page.getByRole('button', { name: /show sidebar/i })
-      if (await showSidebarButton.isVisible().catch(() => false)) {
-        await showSidebarButton.click()
+      if (input.profileId === 'mobile_restricted') {
+        await input.page.evaluate(() => {
+          (document.querySelector('button[aria-label="Show sidebar"]') as HTMLButtonElement | null)?.click()
+        })
+      } else {
+        const showSidebarButton = input.page.locator('button[aria-label="Show sidebar"]:visible').first()
+        if (await showSidebarButton.isVisible().catch(() => false)) {
+          await showSidebarButton.click()
+        }
       }
-      const searchInput = input.page.getByPlaceholder('Search...')
+      const searchInput = input.page.getByPlaceholder('Search...').first()
+      await searchInput.waitFor({ state: 'visible', timeout: SAMPLE_TIMEOUT_MS })
       await searchInput.fill('alpha')
       return
     }
     case 'offscreen-tab-selection': {
-      await input.page.getByRole('button', { name: 'Background Agent Chat' }).click()
+      if (input.profileId === 'mobile_restricted') {
+        await input.page.evaluate(() => {
+          (document.querySelector('button[aria-label="Next tab"]') as HTMLButtonElement | null)?.click()
+        })
+        return
+      }
+      await input.page.locator('[data-context="tab"][data-tab-id="tab-heavy-agent-chat"]').click()
       return
     }
     case 'terminal-reconnect-backlog': {
@@ -447,6 +465,7 @@ async function executeSampleDefault(
 
     await driveScenarioInteraction({
       scenarioId: input.scenarioId,
+      profileId: input.profileId,
       page,
       harness,
       terminal,
