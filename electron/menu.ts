@@ -4,6 +4,7 @@ export interface MenuItemOptions {
   type?: 'separator' | 'normal' | 'submenu'
   accelerator?: string
   click?: () => void
+  enabled?: boolean
   submenu?: MenuItemOptions[]
 }
 

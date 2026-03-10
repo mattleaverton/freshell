@@ -18,6 +18,7 @@ import { execSync } from 'child_process'
 import {
   existsSync,
   readFileSync,
+  writeFileSync,
   mkdirSync,
   cpSync,
   rmSync,
@@ -146,6 +147,43 @@ async function main(): Promise<void> {
 
   console.log(`Node.js binary placed at ${binaryDir}`)
 
+  // Step 1b: Download Node.js binaries for cross-build targets
+  // When building on Linux, also download the Windows binary so
+  // electron-builder can package it for Windows.
+  const crossTargets: Array<{ plat: string; ar: string }> = []
+  if (platform !== 'win32') crossTargets.push({ plat: 'win32', ar: arch })
+  if (platform !== 'linux') crossTargets.push({ plat: 'linux', ar: arch })
+
+  for (const target of crossTargets) {
+    const targetDir = path.join(bundledNodeDir, target.plat === 'win32' ? 'win' : target.plat, target.ar)
+    if (existsSync(path.join(targetDir, target.plat === 'win32' ? 'node.exe' : 'node'))) {
+      console.log(`Cross-target ${target.plat}-${target.ar} already exists, skipping`)
+      continue
+    }
+    mkdirSync(targetDir, { recursive: true })
+    const targetUrl = getNodeDownloadUrl(version, target.plat, target.ar)
+    console.log(`Downloading cross-target Node.js for ${target.plat}-${target.ar} from ${targetUrl}...`)
+
+    if (target.plat === 'win32') {
+      execSync(
+        `curl -sL "${targetUrl}" -o "${path.join(bundledNodeDir, 'node-cross.zip')}" && ` +
+          `cd "${bundledNodeDir}" && unzip -o node-cross.zip "node-v${version}-win-${target.ar}/node.exe" -d tmp-cross && ` +
+          `mv "tmp-cross/node-v${version}-win-${target.ar}/node.exe" "${targetDir}/node.exe" && ` +
+          'rm -rf tmp-cross node-cross.zip',
+        { stdio: 'inherit' }
+      )
+    } else {
+      execSync(
+        `curl -sL "${targetUrl}" | tar xz -C "${bundledNodeDir}" --strip-components=1 ` +
+          `"node-v${version}-${target.plat}-${target.ar}/bin/node" && ` +
+          `mkdir -p "${targetDir}" && mv "${path.join(bundledNodeDir, 'bin', 'node')}" "${targetDir}/node" && ` +
+          `rmdir "${path.join(bundledNodeDir, 'bin')}" 2>/dev/null || true`,
+        { stdio: 'inherit' }
+      )
+    }
+    console.log(`Cross-target Node.js binary placed at ${targetDir}`)
+  }
+
   // Step 2: Download Node.js headers
   const headersBaseDir = path.join(bundledNodeDir, 'headers')
   mkdirSync(headersBaseDir, { recursive: true })
@@ -200,11 +238,18 @@ async function main(): Promise<void> {
   rmSync(stagingDir, { recursive: true, force: true })
   mkdirSync(stagingDir, { recursive: true })
 
-  // Copy package.json and package-lock.json to staging
-  cpSync(
-    path.join(PROJECT_ROOT, 'package.json'),
-    path.join(stagingDir, 'package.json')
-  )
+  // Copy package.json to staging, stripping comment entries (keys starting
+  // with "//") that newer npm versions reject as invalid package names.
+  const pkgRaw = readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')
+  const pkg = JSON.parse(pkgRaw)
+  for (const section of ['dependencies', 'devDependencies']) {
+    if (pkg[section]) {
+      for (const key of Object.keys(pkg[section])) {
+        if (key.startsWith('//')) delete pkg[section][key]
+      }
+    }
+  }
+  writeFileSync(path.join(stagingDir, 'package.json'), JSON.stringify(pkg, null, 2))
   if (existsSync(path.join(PROJECT_ROOT, 'package-lock.json'))) {
     cpSync(
       path.join(PROJECT_ROOT, 'package-lock.json'),

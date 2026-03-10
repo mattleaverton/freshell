@@ -11,6 +11,10 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage } from 'electron'
 import path from 'path'
 import os from 'os'
+import { fileURLToPath } from 'url'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
 import { readDesktopConfig, patchDesktopConfig } from './desktop-config.js'
 import { getDefaultDesktopConfig } from './desktop-config.js'
@@ -66,9 +70,20 @@ async function main(): Promise<void> {
       on: () => {},
     }
   } else {
-    // electron-updater's autoUpdater is a separate package import
-    const { autoUpdater } = await import('electron-updater')
-    updateManager = createUpdateManager(autoUpdater)
+    // electron-updater's autoUpdater is a separate package import.
+    // It may not be available if the package wasn't bundled (e.g. unsigned builds).
+    try {
+      const { autoUpdater } = await import('electron-updater')
+      updateManager = createUpdateManager(autoUpdater)
+    } catch {
+      console.warn('electron-updater not available, auto-updates disabled')
+      updateManager = {
+        checkForUpdates: async () => {},
+        downloadUpdate: async () => {},
+        installAndRestart: () => {},
+        on: () => {},
+      }
+    }
   }
 
   // Construct the startup context

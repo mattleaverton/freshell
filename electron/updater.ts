@@ -2,7 +2,7 @@ import { EventEmitter } from 'events'
 
 export interface AutoUpdaterApi {
   checkForUpdates(): Promise<any>
-  downloadUpdate(): Promise<void>
+  downloadUpdate(): Promise<void | string[]>
   quitAndInstall(): void
   on(event: string, callback: (...args: any[]) => void): void
 }

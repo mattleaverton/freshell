@@ -20,7 +20,7 @@
     "build": "npm run typecheck:client && npm run build:client && npm run build:server",
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
-    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:electron": "tsc -p tsconfig.electron.json && tsc -p tsconfig.electron-preload.json",
     "build:wizard": "vite build --config vite.wizard.config.ts",
     "dev:wizard": "vite --config vite.wizard.config.ts",
     "electron:dev": "npm run build:electron && cross-env ELECTRON_DEV=1 concurrently -n client,wizard,electron \"vite\" \"vite --config vite.wizard.config.ts\" \"electron .\"",
@@ -132,7 +132,6 @@
     "typescript": "^5.7.2",
     "vite": "^6.4.1",
     "vitest": "^3.2.4",
-    "//electron-deps-note": "electron, electron-builder, and electron-updater require `npm install` after branch merge. They are not installed in worktrees to avoid polluting the tree. Tests pass without them because all Electron APIs are mocked via custom interfaces.",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.0",
     "electron-updater": "^6.3.0"
