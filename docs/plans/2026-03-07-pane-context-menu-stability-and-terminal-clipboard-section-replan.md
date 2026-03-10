@@ -2,54 +2,49 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
-**Goal:** Keep pane right-click menus open long enough to use, and move terminal `copy` / `Paste` / `Select all` into their own iconized top section with `copy` labeled exactly `copy`.
+**Goal:** Keep pane right-click menus from immediately reclosing, and move terminal `copy`, `Paste`, and `Select all` into their own iconized top section with `copy` labeled exactly `copy`.
 
-**Architecture:** Treat this as one behavioral fix and one structural menu change. For menu stability, prove the bug on real rendered terminal-pane routes, then suppress only the active-terminal autofocus that collides with context-menu opening by marking the pane shell during secondary-button/context-menu interactions and honoring that marker in `TerminalView`'s active-pane focus effect. For the clipboard reordering, keep the change inside `src/components/context-menu/menu-defs.ts` and verify both the menu-definition data and the rendered DOM.
+**Architecture:** Solve the close-on-open bug at the pane interaction seam first. The code currently activates panes on every mouse button in `Pane`, which is the simplest plausible trigger for a right-click menu race on inactive panes; prove that with rendered regressions, then narrow pane activation to primary-button input unless the red tests prove a different close path. Keep the clipboard reorder entirely inside terminal menu definitions, and satisfy the user’s screenshot requirement with an automated screenshot artifact from the existing `captureUiScreenshot()` pipeline on the open menu state. No human/manual verification belongs in this plan.
 
-**Tech Stack:** React 18, TypeScript, Redux Toolkit, lucide-react, Vitest, Testing Library, Vite, xterm.js mocks
+**Tech Stack:** React 18, TypeScript, Redux Toolkit, lucide-react, Vitest, Testing Library, jsdom, html2canvas, xterm.js mocks
 
 ---
 
 ## Strategy Gate
 
-- Solve the user’s request directly: the menu must stay open long enough to use, and terminal clipboard actions must move to their own top section with icons.
-- Do **not** encode a new product rule that “right-click never activates a pane.” The contract is narrower: right-click opening the menu must not steal terminal focus in the same interaction window or reclose the menu.
-- Preserve normal primary-click behavior. The fix should keep ordinary inactive-pane activation and terminal autofocus working on left click.
-- Use the repo’s current seams, not stale duplicates. For terminal menu structure, the canonical unit seam is `test/unit/client/components/context-menu/menu-defs.test.ts`; do not let this task turn into duplicate-test cleanup.
-- Use the two real terminal-pane entry points that matter:
-  - inactive terminal pane header -> pane menu
-  - inactive terminal body -> terminal menu
-- Make the red signal deterministic. Each stability regression must assert both:
-  - the menu remains open after the interaction settles
-  - the inactive terminal’s `focus()` spy does not fire during that right-click path
-- Keep browser-pane coverage out of the automated mainline. One browser-pane sanity check belongs in the required browser spot-check only.
-- The accepted medium strategy requires one real browser validation pass after automated tests. That is mandatory.
+- Solve exactly the user request:
+  - right-clicking a pane must not cause the menu to flash open and immediately close
+  - terminal `copy`, `Paste`, and `Select all` must be grouped at the very top
+  - those three items must each render an icon
+  - `copy` must be labeled exactly `copy`
+- Do not require or describe any human/browser spot-check. The user explicitly rejected manual validation.
+- Do not precommit to a speculative “context-menu opening marker” or similar side channel. Start with the simpler seam already visible in the code: `Pane` focuses on all mouse buttons today.
+- Do not encode more product behavior than necessary. The contract is “menu stays open”; if the minimal fix happens to stop right-click activation, that is acceptable because it directly removes the race and preserves normal left-click activation.
+- Keep the terminal menu reorder local to `src/components/context-menu/menu-defs.ts`. Do not rewrite the renderer.
+- Treat automated screenshot output as evidence, not the primary behavioral oracle. The correctness contract still lives in deterministic rendered tests; the screenshot artifact exists because the user explicitly asked for it.
+- No server, protocol, persistence, or docs work is needed for this task.
 
-## Diagnostic Feedback For Implementer
+## Files That Matter
 
-- Diagnostic feedback for the implementer: prior loops kept drifting by turning conjectures into requirements. Do not add new framing while executing this plan; let failing tests drive the fix.
-- Do not start in `ContextMenuProvider`. Its dismissal listeners are not the first justified seam here, and previous loops overfit to that theory.
-- If the pane-shell marker plus the active-pane autofocus guard clears both right-click routes while preserving left-click autofocus, stop there.
-- Only widen beyond the active-pane autofocus effect if a still-red regression proves another `term.focus()` path participates in the same close sequence.
-- If the red test reproduces the close without any `focus()` call on the inactive terminal, stop and trace the actual close trigger before editing production code. Do not land the marker/focus guard on speculation alone.
+- `src/components/panes/Pane.tsx`
+- `src/components/context-menu/menu-defs.ts`
+- `src/components/context-menu/ContextMenu.tsx`
+- `src/components/context-menu/ContextMenuProvider.tsx`
+- `test/e2e/refresh-context-menu-flow.test.tsx`
+- `test/unit/client/components/context-menu/menu-defs.test.ts`
+- `test/unit/client/components/ContextMenuProvider.test.tsx`
+- `test/unit/client/ui-screenshot.test.ts`
 
-## Scope Guards
-
-- No server, WebSocket protocol, persistence, or data-model changes.
-- No `docs/index.html` update; this is a localized UI behavior fix, not a new feature surface.
-- Preserve existing menu item ids: `terminal-copy`, `terminal-paste`, `terminal-select-all`, `terminal-search`.
-- Keep `ContextMenu` as the renderer. The icon change belongs in menu item definitions, not in a renderer rewrite.
-- Preserve existing `Paste`, `Select all`, and `Search` labels. Only `copy` changes text.
-- The terminal-body regression must right-click a descendant created inside `data-testid="terminal-xterm-container"`. Right-clicking only the wrapper is not sufficient body coverage.
-
-### Task 1: Reproduce The Stability Contract On Real Terminal-Pane Routes
+### Task 1: Reproduce The Reclose Bug On The Real Terminal-Pane Routes
 
 **Files:**
 - Create: `test/e2e/pane-context-menu-stability.test.tsx`
 
-**Step 1: Create the dedicated rendered harness**
+**Step 1: Build a two-terminal rendered harness**
 
-Create `test/e2e/pane-context-menu-stability.test.tsx`. Reuse the `createStore(...)` and `renderFlow(...)` shape from `test/e2e/refresh-context-menu-flow.test.tsx`, but add a terminal mock that gives you both a real DOM surface and access to each terminal instance’s `focus()` spy:
+Create `test/e2e/pane-context-menu-stability.test.tsx` using the same store/render pattern as `test/e2e/refresh-context-menu-flow.test.tsx`, but with two terminal panes so one is inactive.
+
+Reuse:
 
 ```tsx
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -64,33 +59,23 @@ import connectionReducer from '@/store/connectionSlice'
 import settingsReducer, { defaultSettings } from '@/store/settingsSlice'
 import PaneLayout from '@/components/panes/PaneLayout'
 import { ContextMenuProvider } from '@/components/context-menu/ContextMenuProvider'
-import { ContextIds } from '@/components/context-menu/context-menu-constants'
 import type { PaneNode } from '@/store/paneTypes'
+```
 
-const wsMocks = vi.hoisted(() => ({
-  send: vi.fn(),
-  connect: vi.fn().mockResolvedValue(undefined),
-  onMessage: vi.fn(() => vi.fn()),
-  onReconnect: vi.fn(() => vi.fn()),
-  setHelloExtensionProvider: vi.fn(),
-}))
+Mock `@xterm/xterm` so each terminal creates a real descendant surface:
 
+```tsx
 const terminalInstances = vi.hoisted(() => [] as Array<{
   focus: ReturnType<typeof vi.fn>
-  openedSurface: HTMLElement | null
+  surface: HTMLElement | null
 }>)
-
-vi.mock('@/lib/ws-client', () => ({
-  getWsClient: () => wsMocks,
-}))
 
 vi.mock('@xterm/xterm', () => {
   class MockTerminal {
-    options: Record<string, unknown> = {}
     cols = 80
     rows = 24
-    openedSurface: HTMLElement | null = null
     focus = vi.fn()
+    surface: HTMLElement | null = null
 
     constructor() {
       terminalInstances.push(this)
@@ -101,7 +86,7 @@ vi.mock('@xterm/xterm', () => {
       surface.setAttribute('data-testid', 'terminal-xterm-surface')
       surface.tabIndex = -1
       element.appendChild(surface)
-      this.openedSurface = surface
+      this.surface = surface
     })
 
     loadAddon = vi.fn()
@@ -120,31 +105,14 @@ vi.mock('@xterm/xterm', () => {
     getSelection = vi.fn(() => '')
     onData = vi.fn()
     onTitleChange = vi.fn(() => ({ dispose: vi.fn() }))
-    dispose = vi.fn(() => {
-      this.openedSurface?.remove()
-      this.openedSurface = null
-    })
+    dispose = vi.fn()
   }
 
   return { Terminal: MockTerminal }
 })
-
-vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: class {
-    fit = vi.fn()
-  },
-}))
-
-vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
-
-class MockResizeObserver {
-  observe = vi.fn()
-  disconnect = vi.fn()
-  unobserve = vi.fn()
-}
 ```
 
-Add the same `createTerminalLeaf(...)`, `createStore(...)`, and `renderFlow(...)` patterns used in `test/e2e/refresh-context-menu-flow.test.tsx`, but with a split layout containing two terminal panes:
+Build a split layout with two terminal leaves and a helper that waits for the menu to settle:
 
 ```tsx
 function createTerminalLeaf(id: string, terminalId: string): Extract<PaneNode, { type: 'leaf' }> {
@@ -162,10 +130,10 @@ function createTerminalLeaf(id: string, terminalId: string): Extract<PaneNode, {
   }
 }
 
-function createTerminalSplitLayout(): PaneNode {
+function createLayout(): PaneNode {
   return {
     type: 'split',
-    id: 'split-terminal',
+    id: 'split-1',
     direction: 'horizontal',
     sizes: [50, 50],
     children: [
@@ -175,90 +143,7 @@ function createTerminalSplitLayout(): PaneNode {
   }
 }
 
-function createStore(layout: PaneNode) {
-  return configureStore({
-    reducer: {
-      tabs: tabsReducer,
-      panes: panesReducer,
-      sessions: sessionsReducer,
-      connection: connectionReducer,
-      settings: settingsReducer,
-    },
-    middleware: (getDefaultMiddleware) =>
-      getDefaultMiddleware({ serializableCheck: false }),
-    preloadedState: {
-      tabs: {
-        tabs: [
-          {
-            id: 'tab-1',
-            createRequestId: 'tab-1',
-            title: 'Tab One',
-            status: 'running',
-            mode: 'shell',
-            shell: 'system',
-            createdAt: 1,
-          },
-        ],
-        activeTabId: 'tab-1',
-        renameRequestTabId: null,
-      },
-      panes: {
-        layouts: { 'tab-1': layout },
-        activePane: { 'tab-1': layout.type === 'leaf' ? layout.id : layout.children[0].id },
-        paneTitles: {},
-        paneTitleSetByUser: {},
-        renameRequestTabId: null,
-        renameRequestPaneId: null,
-        zoomedPane: {},
-        refreshRequestsByPane: {},
-      },
-      sessions: {
-        projects: [],
-        expandedProjects: new Set<string>(),
-      },
-      connection: {
-        status: 'ready',
-        platform: 'linux',
-        availableClis: {},
-        featureFlags: {},
-      },
-      settings: {
-        settings: defaultSettings,
-        loaded: true,
-        lastSavedAt: null,
-      },
-    },
-  })
-}
-
-function renderFlow(store: ReturnType<typeof createStore>) {
-  return render(
-    <Provider store={store}>
-      <ContextMenuProvider
-        view="terminal"
-        onViewChange={() => {}}
-        onToggleSidebar={() => {}}
-        sidebarCollapsed={false}
-      >
-        <PaneLayout
-          tabId="tab-1"
-          defaultContent={{ kind: 'browser', url: '', devToolsOpen: false }}
-        />
-      </ContextMenuProvider>
-    </Provider>,
-  )
-}
-```
-
-Add these helpers:
-
-```tsx
-function getInactiveTerminalInstance() {
-  expect(terminalInstances).toHaveLength(2)
-  return terminalInstances[1]!
-}
-
-async function waitForMenuToSettle() {
+async function settleMenu() {
   await act(async () => {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
@@ -266,105 +151,67 @@ async function waitForMenuToSettle() {
 }
 ```
 
-Initialize and reset state with:
+**Step 2: Add the failing right-click regressions**
+
+Add these tests:
 
 ```tsx
-beforeEach(() => {
-  terminalInstances.length = 0
-  wsMocks.send.mockClear()
-  vi.stubGlobal('ResizeObserver', MockResizeObserver)
-})
-
-afterEach(() => {
-  cleanup()
-  vi.unstubAllGlobals()
-})
-```
-
-**Step 2: Add the two right-click regressions plus a left-click control**
-
-In that same file, add these tests:
-
-```tsx
-it('keeps the pane menu open and avoids terminal autofocus when right-clicking an inactive pane header', async () => {
-  const store = createStore(createTerminalSplitLayout())
+it('keeps the pane menu open when right-clicking an inactive terminal pane header', async () => {
+  const store = createStore(createLayout())
   const user = userEvent.setup()
   const { container } = renderFlow(store)
 
-  const inactiveTerminal = await waitFor(() => {
-    const instance = getInactiveTerminalInstance()
-    expect(instance.openedSurface).not.toBeNull()
-    return instance
-  })
-  const focusCallsBefore = inactiveTerminal.focus.mock.calls.length
-
-  const inactiveHeader = container.querySelector(
-    '[data-context="pane"][data-pane-id="pane-2"] [role="banner"]',
-  ) as HTMLElement | null
-  expect(inactiveHeader).not.toBeNull()
-
-  await user.pointer({ target: inactiveHeader as HTMLElement, keys: '[MouseRight]' })
-  await waitForMenuToSettle()
-
-  expect(screen.getByRole('menu')).toBeInTheDocument()
-  expect(inactiveTerminal.focus).toHaveBeenCalledTimes(focusCallsBefore)
-})
-
-it('keeps the terminal menu open and avoids terminal autofocus when right-clicking inside an inactive terminal body', async () => {
-  const store = createStore(createTerminalSplitLayout())
-  const user = userEvent.setup()
-  const { container } = renderFlow(store)
-
-  const inactiveTerminal = await waitFor(() => {
-    const instance = getInactiveTerminalInstance()
-    expect(instance.openedSurface).not.toBeNull()
-    return instance
-  })
-  const focusCallsBefore = inactiveTerminal.focus.mock.calls.length
-
-  const terminalSurface = await waitFor(() => {
-    const node = container.querySelector(
-      '[data-context="terminal"][data-pane-id="pane-2"] [data-testid="terminal-xterm-surface"]',
-    ) as HTMLElement | null
+  const header = await waitFor(() => {
+    const node = container.querySelector('[data-pane-id="pane-2"] [role="banner"]')
     expect(node).not.toBeNull()
     return node as HTMLElement
   })
 
-  await user.pointer({ target: terminalSurface, keys: '[MouseRight]' })
-  await waitForMenuToSettle()
+  await user.pointer({ target: header, keys: '[MouseRight]' })
+  await settleMenu()
 
   expect(screen.getByRole('menu')).toBeInTheDocument()
-  expect(inactiveTerminal.focus).toHaveBeenCalledTimes(focusCallsBefore)
+  expect(screen.getByRole('menuitem', { name: 'Refresh pane' })).toBeInTheDocument()
 })
 
-it('still autofocuses the inactive terminal after a primary-click activation', async () => {
-  const store = createStore(createTerminalSplitLayout())
+it('keeps the terminal menu open when right-clicking inside an inactive terminal body', async () => {
+  const store = createStore(createLayout())
   const user = userEvent.setup()
   const { container } = renderFlow(store)
 
-  const inactiveTerminal = await waitFor(() => {
-    const instance = getInactiveTerminalInstance()
-    expect(instance.openedSurface).not.toBeNull()
-    return instance
+  const surface = await waitFor(() => {
+    const node = container.querySelector('[data-pane-id="pane-2"] [data-testid="terminal-xterm-surface"]')
+    expect(node).not.toBeNull()
+    return node as HTMLElement
   })
-  const focusCallsBefore = inactiveTerminal.focus.mock.calls.length
 
-  const inactiveHeader = container.querySelector(
-    '[data-context="pane"][data-pane-id="pane-2"] [role="banner"]',
-  ) as HTMLElement | null
-  expect(inactiveHeader).not.toBeNull()
+  await user.pointer({ target: surface, keys: '[MouseRight]' })
+  await settleMenu()
 
-  await user.pointer({ target: inactiveHeader as HTMLElement, keys: '[MouseLeft]' })
+  expect(screen.getByRole('menu')).toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: 'Search' })).toBeInTheDocument()
+})
+
+it('still activates the inactive pane on primary click', async () => {
+  const store = createStore(createLayout())
+  const user = userEvent.setup()
+  const { container } = renderFlow(store)
+
+  const header = await waitFor(() => {
+    const node = container.querySelector('[data-pane-id="pane-2"] [role="banner"]')
+    expect(node).not.toBeNull()
+    return node as HTMLElement
+  })
+
+  await user.pointer({ target: header, keys: '[MouseLeft]' })
 
   await waitFor(() => {
-    expect(inactiveTerminal.focus.mock.calls.length).toBeGreaterThan(focusCallsBefore)
+    expect(store.getState().panes.activePane['tab-1']).toBe('pane-2')
   })
 })
 ```
 
-These three tests define the contract: right-click routes must not close the menu or steal focus, while ordinary left-click activation must still autofocus the terminal.
-
-**Step 3: Run the stability file before changing production code**
+**Step 3: Run the file before changing production code**
 
 Run:
 
@@ -374,119 +221,37 @@ npx vitest run test/e2e/pane-context-menu-stability.test.tsx --reporter=dot
 
 Expected:
 - the left-click control passes
-- at least one right-click regression fails today, either because the menu disappears or because the inactive terminal’s `focus()` spy increments during the right-click flow
+- at least one of the right-click tests fails red against current code
 
-Do not change production code until the file is red.
-If a right-click regression fails while the `focus()` spy stays flat, treat that as evidence the current root-cause theory is wrong and trace the actual close path before touching production code.
-
-### Task 2: Fix Only The Proven Autofocus Collision
+### Task 2: Fix The Right-Click Interaction At The Simplest Proven Seam
 
 **Files:**
 - Modify: `src/components/panes/Pane.tsx`
-- Modify: `src/components/TerminalView.tsx`
 - Re-run: `test/e2e/pane-context-menu-stability.test.tsx`
+- Only if still red after the `Pane.tsx` fix: inspect and then modify the specific still-failing close path in `src/components/context-menu/ContextMenuProvider.tsx` or `src/components/TerminalView.tsx`
 
-**Step 1: Mark the pane shell during context-menu opening without changing focus semantics**
+**Step 1: Narrow pane activation to primary-button mouse input**
 
-In `src/components/panes/Pane.tsx`, import `useCallback`, `useEffect`, and `useRef` from `react`, then add a short-lived pane-shell marker:
-
-```tsx
-import { useCallback, useEffect, useRef } from 'react'
-```
-
-Add these refs and helpers near the top of the component:
+In `src/components/panes/Pane.tsx`, replace unconditional pane focusing on `onMouseDown` with a guarded handler:
 
 ```tsx
-const shellRef = useRef<HTMLDivElement | null>(null)
-const clearContextMenuMarkerRef = useRef<number | null>(null)
-
-const clearContextMenuOpening = useCallback(() => {
-  const shell = shellRef.current
-  if (shell) {
-    delete shell.dataset.contextMenuOpening
-  }
-  if (clearContextMenuMarkerRef.current !== null) {
-    cancelAnimationFrame(clearContextMenuMarkerRef.current)
-    clearContextMenuMarkerRef.current = null
-  }
-}, [])
-
-const markContextMenuOpening = useCallback(() => {
-  const shell = shellRef.current
-  if (!shell || typeof window === 'undefined') return
-
-  shell.dataset.contextMenuOpening = 'true'
-
-  if (clearContextMenuMarkerRef.current !== null) {
-    cancelAnimationFrame(clearContextMenuMarkerRef.current)
-  }
-
-  clearContextMenuMarkerRef.current = requestAnimationFrame(() => {
-    clearContextMenuMarkerRef.current = requestAnimationFrame(() => {
-      if (shellRef.current === shell) {
-        delete shell.dataset.contextMenuOpening
-      }
-      clearContextMenuMarkerRef.current = null
-    })
-  })
-}, [])
-
-useEffect(() => clearContextMenuOpening, [clearContextMenuOpening])
-```
-
-Attach that marker to the root pane shell without removing the existing `onMouseDown={onFocus}`:
-
-```tsx
-<div
-  ref={shellRef}
-  data-pane-shell="true"
-  data-context={ContextIds.Pane}
-  data-tab-id={tabId}
-  data-pane-id={paneId}
-  ...
-  onMouseDownCapture={(event) => {
-    if (event.button === 2) {
-      markContextMenuOpening()
-    }
-  }}
-  onContextMenuCapture={markContextMenuOpening}
-  onMouseDown={onFocus}
-  ...
->
-```
-
-This is the key architectural decision when the red test shows the focus race: preserve current pane activation wiring, but mark that this activation came from a context-menu interaction.
-
-**Step 2: Honor that marker in the active-pane autofocus effect**
-
-In `src/components/TerminalView.tsx`, add a small helper near the existing `shouldFocusActiveTerminal` logic:
-
-```tsx
-function isPaneShellOpeningContextMenu(node: HTMLDivElement | null): boolean {
-  return node?.closest<HTMLElement>('[data-pane-shell="true"]')?.dataset.contextMenuOpening === 'true'
+const handleMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
+  if (event.button !== 0) return
+  onFocus()
 }
 ```
 
-Then guard the existing active-terminal autofocus effect:
+Then wire it at the root:
 
 ```tsx
-useEffect(() => {
-  if (!isTerminal) return
-  if (!shouldFocusActiveTerminal) return
-  const term = termRef.current
-  if (!term) return
-
-  requestAnimationFrame(() => {
-    if (termRef.current !== term) return
-    if (isPaneShellOpeningContextMenu(containerRef.current)) return
-    term.focus()
-  })
-}, [isTerminal, shouldFocusActiveTerminal])
+onMouseDown={handleMouseDown}
 ```
 
-Do not edit unrelated `term.focus()` sites. This plan is specifically targeting the active-pane autofocus effect that fires when an inactive pane becomes active during the right-click path, and only because Task 1 is expected to prove that path is involved.
+Keep keyboard activation exactly as-is.
 
-**Step 3: Re-run the stability regressions**
+This is the preferred fix because it removes the most direct cause of the race without adding new state, timers, or context-menu-specific markers.
+
+**Step 2: Re-run the stability regressions**
 
 Run:
 
@@ -496,12 +261,15 @@ npx vitest run test/e2e/pane-context-menu-stability.test.tsx --reporter=dot
 
 Expected: all three tests pass.
 
-If either right-click regression is still red, inspect the failing route and only then widen the focus suppression to another proven `term.focus()` path. Do not jump to provider dismissal changes first, and do not keep the marker solution if the failing test never showed focus involvement.
+If a right-click route is still red, do not invent a generic workaround. Trace the specific failing path and patch only that proven seam before moving on. The next places to inspect are:
 
-**Step 4: Commit the stability fix**
+- `src/components/context-menu/ContextMenuProvider.tsx` if the menu is being dismissed by its global listeners
+- `src/components/TerminalView.tsx` if a terminal-specific focus path still fires on right-click after pane activation is fixed
+
+**Step 3: Commit the stability fix**
 
 ```bash
-git add src/components/panes/Pane.tsx src/components/TerminalView.tsx test/e2e/pane-context-menu-stability.test.tsx
+git add src/components/panes/Pane.tsx test/e2e/pane-context-menu-stability.test.tsx
 git commit -m "fix: keep pane context menus open on right click"
 ```
 
@@ -512,54 +280,28 @@ git commit -m "fix: keep pane context menus open on right click"
 - Modify: `test/unit/client/components/context-menu/menu-defs.test.ts`
 - Modify: `test/unit/client/components/ContextMenuProvider.test.tsx`
 
-**Step 1: Extend the authoritative menu-definition test harness**
+**Step 1: Write the failing unit contract for terminal menu order, labels, icons, and wiring**
 
-In `test/unit/client/components/context-menu/menu-defs.test.ts`, keep using this file as the authoritative `buildMenuItems(...)` harness for terminal menu structure. Do not spend this task cleaning up `test/unit/client/context-menu/menu-defs.test.ts`; if the full verification gate later proves that duplicate file is failing, fix it then as a separate follow-up, not as part of the main red-green loop here.
-
-Then add these helpers near `makeCtx(...)`:
+In `test/unit/client/components/context-menu/menu-defs.test.ts`, add a small harness helper:
 
 ```ts
 function getTerminalItem(items: ReturnType<typeof buildMenuItems>, id: string) {
   const item = items.find((candidate) => candidate.type === 'item' && candidate.id === id)
   expect(item?.type).toBe('item')
-  if (!item || item.type !== 'item') {
-    throw new Error(`Missing terminal menu item: ${id}`)
-  }
+  if (!item || item.type !== 'item') throw new Error(`Missing terminal item: ${id}`)
   return item
-}
-
-function createTerminalMenuHarness(options?: { hasSelection?: boolean; withActions?: boolean }) {
-  const terminalActions = options?.withActions === false
-    ? undefined
-    : {
-        copySelection: vi.fn(),
-        paste: vi.fn(),
-        selectAll: vi.fn(),
-        clearScrollback: vi.fn(),
-        reset: vi.fn(),
-        scrollToBottom: vi.fn(),
-        hasSelection: vi.fn(() => options?.hasSelection ?? false),
-        openSearch: vi.fn(),
-      }
-
-  const actions = createActions()
-  actions.getTerminalActions = vi.fn(() => terminalActions)
-
-  const items = buildMenuItems(
-    { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
-    makeCtx(actions),
-  )
-
-  return { items, terminalActions }
 }
 ```
 
-Add these failing tests:
+Add these tests:
 
 ```ts
 describe('buildMenuItems - terminal clipboard section', () => {
-  it('places copy, Paste, and Select all in the first section with icons and keeps Search later', () => {
-    const { items } = createTerminalMenuHarness()
+  it('places copy, Paste, and Select all in the first section with icons', () => {
+    const items = buildMenuItems(
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(createActions()),
+    )
 
     expect(
       items.slice(0, 4).map((item) => item.type === 'item' ? item.id : item.type),
@@ -570,56 +312,42 @@ describe('buildMenuItems - terminal clipboard section', () => {
       'separator',
     ])
 
-    const copyItem = getTerminalItem(items, 'terminal-copy')
-    const pasteItem = getTerminalItem(items, 'terminal-paste')
-    const selectAllItem = getTerminalItem(items, 'terminal-select-all')
-    const searchIndex = items.findIndex((item) => item.type === 'item' && item.id === 'terminal-search')
-
-    expect(copyItem.label).toBe('copy')
-    expect(copyItem.icon).toBeTruthy()
-    expect(pasteItem.icon).toBeTruthy()
-    expect(selectAllItem.icon).toBeTruthy()
-    expect(searchIndex).toBeGreaterThan(3)
+    expect(getTerminalItem(items, 'terminal-copy').label).toBe('copy')
+    expect(getTerminalItem(items, 'terminal-copy').icon).toBeTruthy()
+    expect(getTerminalItem(items, 'terminal-paste').icon).toBeTruthy()
+    expect(getTerminalItem(items, 'terminal-select-all').icon).toBeTruthy()
   })
 
-  it('keeps copy wired to selection state and copySelection()', () => {
-    const withoutSelection = createTerminalMenuHarness({ hasSelection: false })
-    expect(getTerminalItem(withoutSelection.items, 'terminal-copy').disabled).toBe(true)
+  it('preserves copy enabled state and action wiring', () => {
+    const actions = createActions()
+    const terminalActions = {
+      copySelection: vi.fn(),
+      paste: vi.fn(),
+      selectAll: vi.fn(),
+      clearScrollback: vi.fn(),
+      reset: vi.fn(),
+      scrollToBottom: vi.fn(),
+      hasSelection: vi.fn(() => true),
+      openSearch: vi.fn(),
+    }
+    actions.getTerminalActions = vi.fn(() => terminalActions)
 
-    const withSelection = createTerminalMenuHarness({ hasSelection: true })
-    const copyItem = getTerminalItem(withSelection.items, 'terminal-copy')
+    const items = buildMenuItems(
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(actions),
+    )
 
-    expect(copyItem.disabled).toBe(false)
-    copyItem.onSelect()
-    expect(withSelection.terminalActions?.copySelection).toHaveBeenCalledTimes(1)
-  })
-
-  it('keeps Paste and Select all wired to terminal action availability', () => {
-    const unavailable = createTerminalMenuHarness({ withActions: false })
-    expect(getTerminalItem(unavailable.items, 'terminal-paste').disabled).toBe(true)
-    expect(getTerminalItem(unavailable.items, 'terminal-select-all').disabled).toBe(true)
-
-    const available = createTerminalMenuHarness()
-    const pasteItem = getTerminalItem(available.items, 'terminal-paste')
-    const selectAllItem = getTerminalItem(available.items, 'terminal-select-all')
-
-    expect(pasteItem.disabled).toBe(false)
-    expect(selectAllItem.disabled).toBe(false)
-
-    pasteItem.onSelect()
-    selectAllItem.onSelect()
-
-    expect(available.terminalActions?.paste).toHaveBeenCalledTimes(1)
-    expect(available.terminalActions?.selectAll).toHaveBeenCalledTimes(1)
+    const copy = getTerminalItem(items, 'terminal-copy')
+    expect(copy.disabled).toBe(false)
+    copy.onSelect()
+    expect(terminalActions.copySelection).toHaveBeenCalledTimes(1)
   })
 })
 ```
 
-**Step 2: Add one rendered DOM smoke for the visible terminal menu**
+**Step 2: Add one rendered DOM proof of the visible order**
 
-In `test/unit/client/components/ContextMenuProvider.test.tsx`, move `createStoreWithTerminalPane()` out of the nested `describe('Replace pane')` block so it can be reused.
-
-Then add:
+In `test/unit/client/components/ContextMenuProvider.test.tsx`, add a terminal-target test that opens the menu and asserts the top section in rendered order:
 
 ```tsx
 it('renders copy, Paste, and Select all as the first terminal menu section with icons', async () => {
@@ -638,20 +366,19 @@ it('renders copy, Paste, and Select all as the first terminal menu section with 
           Terminal Content
         </div>
       </ContextMenuProvider>
-    </Provider>
+    </Provider>,
   )
 
   await user.pointer({ target: screen.getByText('Terminal Content'), keys: '[MouseRight]' })
 
   const menu = screen.getByRole('menu')
   const children = Array.from(menu.children)
-
   expect(
-    children.slice(0, 4).map((node) => (
+    children.slice(0, 4).map((node) =>
       node.getAttribute('role') === 'menuitem'
         ? node.textContent?.replace(/\s+/g, ' ').trim()
-        : node.getAttribute('role')
-    )),
+        : node.getAttribute('role'),
+    ),
   ).toEqual(['copy', 'Paste', 'Select all', 'separator'])
 
   for (const node of children.slice(0, 3)) {
@@ -660,7 +387,7 @@ it('renders copy, Paste, and Select all as the first terminal menu section with 
 })
 ```
 
-Keep action wiring assertions in `test/unit/client/components/context-menu/menu-defs.test.ts`; this DOM test is only the visible smoke for order, label, and icons.
+If `createStoreWithTerminalPane()` does not already exist as a reusable helper in that file, extract it once near the other store factories instead of duplicating inline store setup inside the new test.
 
 **Step 3: Run the clipboard tests before changing production code**
 
@@ -673,19 +400,18 @@ npx vitest run \
   --reporter=dot
 ```
 
-Expected: FAIL on ordering, icon presence, and the exact `copy` label.
+Expected: red on order, `copy` label, and icon presence.
 
-**Step 4: Implement the minimal menu-definition change**
+**Step 4: Implement the terminal clipboard section**
 
 In `src/components/context-menu/menu-defs.ts`:
 
 - import `createElement` from `react`
 - import `Copy`, `ClipboardPaste`, and `TextSelect` from `lucide-react`
-- add a helper for the clipboard trio
-- insert that helper at the very top of the terminal menu
-- add a separator immediately after that trio
-- label `terminal-copy` exactly `copy`
-- keep current `Paste`, `Select all`, `Search`, and action wiring semantics intact
+- extract the clipboard trio into a helper
+- place that trio at the very start of the terminal menu
+- add a separator immediately after the trio
+- keep existing action ids and enabled/disabled semantics intact
 
 Use this helper:
 
@@ -723,14 +449,14 @@ function buildTerminalClipboardItems(
 }
 ```
 
-Then, in the `target.kind === 'terminal'` branch, replace the inline clipboard trio with:
+Then start the terminal menu branch with:
 
 ```ts
 ...buildTerminalClipboardItems(terminalActions, hasSelection),
 { type: 'separator', id: 'terminal-clipboard-sep' },
 ```
 
-Put that block immediately before the existing `refresh-pane` / split / `Search` / scroll / reset items.
+Everything else in the terminal menu should stay in its current relative order after that new first section.
 
 **Step 5: Re-run the clipboard tests**
 
@@ -749,10 +475,75 @@ Expected: PASS.
 
 ```bash
 git add src/components/context-menu/menu-defs.ts test/unit/client/components/context-menu/menu-defs.test.ts test/unit/client/components/ContextMenuProvider.test.tsx
-git commit -m "fix: group terminal clipboard actions at top"
+git commit -m "fix: move terminal clipboard actions to top section"
 ```
 
-### Task 4: Run The Automated Verification Gate
+### Task 4: Generate Automated Screenshot Proof For The Open Menu
+
+**Files:**
+- Modify: `test/unit/client/ui-screenshot.test.ts`
+
+**Step 1: Add a screenshot proof test for the open terminal menu**
+
+Extend `test/unit/client/ui-screenshot.test.ts` with one new case that renders an already-open terminal menu state, captures it through `captureUiScreenshot({ scope: 'view' }, runtime)`, and writes the returned PNG bytes to `/tmp/freshell-terminal-context-menu-proof.png`.
+
+Use:
+
+```ts
+import fs from 'node:fs/promises'
+```
+
+Add a fixed proof path:
+
+```ts
+const CONTEXT_MENU_PROOF_PATH = '/tmp/freshell-terminal-context-menu-proof.png'
+```
+
+In the new test:
+
+1. Render a minimal `ContextMenuProvider` + terminal target.
+2. Open the terminal context menu with `user.pointer(..., '[MouseRight]')`.
+3. Mock `html2canvas` exactly like the existing iframe tests do, so you can inspect the cloned screenshot DOM in `opts.onclone(...)` and still return a valid PNG data URL.
+4. Call `captureUiScreenshot({ scope: 'view' }, runtime)`.
+5. Write the resulting bytes:
+
+```ts
+await fs.writeFile(CONTEXT_MENU_PROOF_PATH, Buffer.from(result.imageBase64!, 'base64'))
+```
+
+6. Assert:
+
+```ts
+expect(result.ok).toBe(true)
+expect(clonedHtml).toContain('copy')
+expect(clonedHtml).toContain('Paste')
+expect(clonedHtml).toContain('Select all')
+expect((clonedHtml.match(/<svg/g) ?? []).length).toBeGreaterThanOrEqual(3)
+await expect(fs.stat(CONTEXT_MENU_PROOF_PATH)).resolves.toMatchObject({
+  size: expect.any(Number),
+})
+```
+
+This test is the screenshot proof the user asked for. The rasterizer is still mocked in jsdom, but the screenshot capture path, screenshot scope, and cloned open-menu DOM are real, and the test leaves behind a concrete PNG artifact for the execution report.
+
+**Step 2: Run the screenshot proof test**
+
+Run:
+
+```bash
+npx vitest run test/unit/client/ui-screenshot.test.ts --reporter=dot
+```
+
+Expected: PASS and `/tmp/freshell-terminal-context-menu-proof.png` exists.
+
+**Step 3: Commit the screenshot proof**
+
+```bash
+git add test/unit/client/ui-screenshot.test.ts
+git commit -m "test: capture terminal context menu screenshot proof"
+```
+
+### Task 5: Run The Automated Verification Gate
 
 **Files:**
 - None
@@ -767,6 +558,8 @@ npx vitest run \
   test/e2e/refresh-context-menu-flow.test.tsx \
   test/unit/client/components/context-menu/menu-defs.test.ts \
   test/unit/client/components/ContextMenuProvider.test.tsx \
+  test/unit/client/ui-screenshot.test.ts \
+  test/unit/client/context-menu/menu-defs.test.ts \
   --reporter=dot
 ```
 
@@ -815,54 +608,18 @@ npm run verify
 
 Expected: PASS.
 
-### Task 5: Run The Required Browser Spot-Check
+**Step 6: Record proof outputs in the execution report**
 
-**Files:**
-- None
+The final execution report must mention:
 
-**Step 1: Start the worktree server on isolated ports**
+- the passing reclose regression file: `test/e2e/pane-context-menu-stability.test.tsx`
+- the passing menu-structure files:
+  - `test/unit/client/components/context-menu/menu-defs.test.ts`
+  - `test/unit/client/components/ContextMenuProvider.test.tsx`
+- the screenshot proof path:
 
-Do not use `npm run dev` or `npm run dev:server`; both scripts hardcode `PORT=3002`.
-
-Run:
-
-```bash
-PORT=3344 npx tsx watch server/index.ts > /tmp/freshell-3344-server.log 2>&1 & echo $! > /tmp/freshell-3344-server.pid
-PORT=3344 npm run dev:client -- --host 127.0.0.1 --port 3345 > /tmp/freshell-3345-client.log 2>&1 & echo $! > /tmp/freshell-3345-client.pid
+```text
+/tmp/freshell-terminal-context-menu-proof.png
 ```
 
-**Step 2: Verify both PIDs belong to this worktree**
-
-Run:
-
-```bash
-ps -fp "$(cat /tmp/freshell-3344-server.pid)"
-ps -fp "$(cat /tmp/freshell-3345-client.pid)"
-```
-
-Confirm the command paths point at `/home/user/code/freshell/.worktrees/trycycle-pane-context-menu-fix`.
-
-**Step 3: Open `http://127.0.0.1:3345` and confirm the real UX**
-
-Check these exact behaviors:
-
-1. Create or use a split tab with two terminal panes.
-2. Right-click the inactive terminal pane header and confirm the menu stays open instead of flashing closed.
-3. Right-click inside the inactive terminal body and confirm the menu stays open there too.
-4. In the terminal menu, confirm the first section is `copy`, `Paste`, `Select all`, in that order, with an icon on each item.
-5. Left-click the inactive terminal pane once and confirm it still becomes the active typing target.
-6. As a shared-shell sanity check, right-click an inactive browser pane once and confirm its pane menu also stays open.
-
-If browser access is blocked in this environment, record that blocker explicitly in the execution report. Do not silently skip this step.
-
-**Step 4: Stop only those verified worktree processes**
-
-Run:
-
-```bash
-ps -fp "$(cat /tmp/freshell-3344-server.pid)"
-ps -fp "$(cat /tmp/freshell-3345-client.pid)"
-kill "$(cat /tmp/freshell-3344-server.pid)"
-kill "$(cat /tmp/freshell-3345-client.pid)"
-rm -f /tmp/freshell-3344-server.pid /tmp/freshell-3345-client.pid
-```
+Do not add any manual verification note. The user explicitly rejected human checks.
