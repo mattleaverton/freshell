@@ -521,6 +521,123 @@ describe('runStartup', () => {
     expect(mockWindow.show).toHaveBeenCalled()
   })
 
+  describe('auth token in URL', () => {
+    it('appends ?token= to URL for app-bound mode', async () => {
+      const mockWindow = createMockWindow()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+        readEnvToken: vi.fn().mockResolvedValue('test-auth-token-abc'),
+      })
+      await runStartup(ctx)
+      expect(mockWindow.loadURL).toHaveBeenCalledWith('http://localhost:3001?token=test-auth-token-abc')
+    })
+
+    it('appends ?token= to URL for daemon mode', async () => {
+      const mockWindow = createMockWindow()
+      const ctx = createDefaultContext({
+        desktopConfig: {
+          serverMode: 'daemon',
+          globalHotkey: 'CommandOrControl+`',
+          startOnLogin: false,
+          minimizeToTray: true,
+          setupCompleted: true,
+        },
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+        readEnvToken: vi.fn().mockResolvedValue('daemon-token-xyz'),
+      })
+      await runStartup(ctx)
+      expect(mockWindow.loadURL).toHaveBeenCalledWith('http://localhost:3001?token=daemon-token-xyz')
+    })
+
+    it('appends ?token= to URL for remote mode using remoteToken', async () => {
+      const mockWindow = createMockWindow()
+      const fetchHealthCheck = vi.fn().mockResolvedValue(true)
+      const ctx = createDefaultContext({
+        desktopConfig: {
+          serverMode: 'remote',
+          remoteUrl: 'http://10.0.0.5:3001',
+          remoteToken: 'remote-secret-123',
+          globalHotkey: 'CommandOrControl+`',
+          startOnLogin: false,
+          minimizeToTray: true,
+          setupCompleted: true,
+        },
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+        fetchHealthCheck,
+      })
+      await runStartup(ctx)
+      expect(mockWindow.loadURL).toHaveBeenCalledWith('http://10.0.0.5:3001?token=remote-secret-123')
+    })
+
+    it('loads URL without token when readEnvToken returns undefined', async () => {
+      const mockWindow = createMockWindow()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+        readEnvToken: vi.fn().mockResolvedValue(undefined),
+      })
+      await runStartup(ctx)
+      expect(mockWindow.loadURL).toHaveBeenCalledWith('http://localhost:3001')
+    })
+
+    it('loads URL without token when readEnvToken is not provided (backward compat)', async () => {
+      const mockWindow = createMockWindow()
+      const ctx = createDefaultContext({
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+        // No readEnvToken provided
+      })
+      await runStartup(ctx)
+      expect(mockWindow.loadURL).toHaveBeenCalledWith('http://localhost:3001')
+    })
+
+    it('calls readEnvToken with correct path (configDir/.env)', async () => {
+      const readEnvToken = vi.fn().mockResolvedValue('some-token')
+      const ctx = createDefaultContext({
+        readEnvToken,
+      })
+      await runStartup(ctx)
+      expect(readEnvToken).toHaveBeenCalledWith('/home/user/.freshell/.env')
+    })
+
+    it('does not call readEnvToken for remote mode', async () => {
+      const readEnvToken = vi.fn().mockResolvedValue('should-not-be-used')
+      const fetchHealthCheck = vi.fn().mockResolvedValue(true)
+      const ctx = createDefaultContext({
+        desktopConfig: {
+          serverMode: 'remote',
+          remoteUrl: 'http://10.0.0.5:3001',
+          remoteToken: 'remote-token',
+          globalHotkey: 'CommandOrControl+`',
+          startOnLogin: false,
+          minimizeToTray: true,
+          setupCompleted: true,
+        },
+        readEnvToken,
+        fetchHealthCheck,
+      })
+      await runStartup(ctx)
+      expect(readEnvToken).not.toHaveBeenCalled()
+    })
+
+    it('loads URL without token for remote mode when remoteToken is absent', async () => {
+      const mockWindow = createMockWindow()
+      const fetchHealthCheck = vi.fn().mockResolvedValue(true)
+      const ctx = createDefaultContext({
+        desktopConfig: {
+          serverMode: 'remote',
+          remoteUrl: 'http://10.0.0.5:3001',
+          globalHotkey: 'CommandOrControl+`',
+          startOnLogin: false,
+          minimizeToTray: true,
+          setupCompleted: true,
+        },
+        createBrowserWindow: vi.fn().mockReturnValue(mockWindow),
+        fetchHealthCheck,
+      })
+      await runStartup(ctx)
+      expect(mockWindow.loadURL).toHaveBeenCalledWith('http://10.0.0.5:3001')
+    })
+  })
+
   it('returns updateCheckTimer in main result so caller can cancel it', async () => {
     const ctx = createDefaultContext()
     const result = await runStartup(ctx)

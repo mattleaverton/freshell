@@ -39,6 +39,8 @@ export interface StartupContext {
   createBrowserWindow: (options: Record<string, any>) => BrowserWindowLike
   createTray: () => void
   fetchHealthCheck?: (url: string) => Promise<boolean>
+  /** Read AUTH_TOKEN from the .env file in configDir. Returns undefined if not found. */
+  readEnvToken?: (envPath: string) => Promise<string | undefined>
 }
 
 export type StartupResult =
@@ -146,7 +148,20 @@ export async function runStartup(ctx: StartupContext): Promise<StartupResult> {
     },
   })
 
-  await window.loadURL(serverUrl)
+  // Resolve auth token for automatic authentication
+  let authToken: string | undefined
+
+  if (desktopConfig.serverMode === 'remote') {
+    // Remote mode: use the token from the wizard config
+    authToken = desktopConfig.remoteToken
+  } else if (ctx.readEnvToken) {
+    // App-bound / daemon mode: read token from ~/.freshell/.env
+    authToken = await ctx.readEnvToken(path.join(ctx.configDir, '.env'))
+  }
+
+  // Build the final URL with auth token
+  const loadUrl = authToken ? `${serverUrl}?token=${authToken}` : serverUrl
+  await window.loadURL(loadUrl)
   window.show()
 
   if (windowState.maximized) {

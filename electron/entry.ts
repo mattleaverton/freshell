@@ -104,6 +104,27 @@ async function main(): Promise<void> {
     resourcesPath,
     configDir,
     platform: process.platform,
+    readEnvToken: async (envPath: string): Promise<string | undefined> => {
+      try {
+        const fsp = await import('fs/promises')
+        const content = await fsp.readFile(envPath, 'utf-8')
+        for (const line of content.split('\n')) {
+          const trimmed = line.trim()
+          if (trimmed.startsWith('AUTH_TOKEN=')) {
+            const value = trimmed.slice('AUTH_TOKEN='.length).trim()
+            // Strip surrounding quotes if present
+            if ((value.startsWith('"') && value.endsWith('"')) ||
+                (value.startsWith("'") && value.endsWith("'"))) {
+              return value.slice(1, -1)
+            }
+            return value
+          }
+        }
+        return undefined
+      } catch {
+        return undefined
+      }
+    },
     createBrowserWindow: (options) => {
       const win = new BrowserWindow({
         ...options,
