@@ -98,25 +98,11 @@ describe('initMainProcess', () => {
   })
 
   describe('window-all-closed', () => {
-    it('quits on Linux when all windows are closed', async () => {
-      deps.platform = 'linux'
+    it('does not register window-all-closed handler (handled by entry.ts)', async () => {
       await initMainProcess(deps)
-      app.emit('window-all-closed')
-      expect(app.quit).toHaveBeenCalled()
-    })
-
-    it('quits on Windows when all windows are closed', async () => {
-      deps.platform = 'win32'
-      await initMainProcess(deps)
-      app.emit('window-all-closed')
-      expect(app.quit).toHaveBeenCalled()
-    })
-
-    it('does NOT quit on macOS when all windows are closed', async () => {
-      deps.platform = 'darwin'
-      await initMainProcess(deps)
-      app.emit('window-all-closed')
-      expect(app.quit).not.toHaveBeenCalled()
+      // initMainProcess should not register window-all-closed; that is entry.ts's responsibility
+      const windowAllClosedCalls = app.listeners('window-all-closed')
+      expect(windowAllClosedCalls).toHaveLength(0)
     })
   })
 })

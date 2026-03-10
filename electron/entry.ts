@@ -32,19 +32,24 @@ import { createWizardWindow } from './setup-wizard/wizard-window.js'
 const isDev = process.env.ELECTRON_DEV === '1'
 const configDir = path.join(os.homedir(), '.freshell')
 
+/** True during the wizard flow; prevents app.quit() on window-all-closed. */
+let wizardPhase = true
+
 async function main(): Promise<void> {
   // Wait for Electron to be ready before creating any BrowserWindow or using
   // Electron APIs that require the app to be initialized.
   await app.whenReady()
 
-  // Prevent default quit-on-all-windows-closed during wizard-to-main transition.
-  // Without this, closing the wizard window on Windows/Linux kills the app before
-  // main() can re-run and create the main window. initMainProcess() later adds
-  // its own handler that calls app.quit() on non-macOS when appropriate.
+  // Consolidated window-all-closed handler: during the wizard phase we keep
+  // the app alive so main() can re-run after the wizard closes. Once the main
+  // window is up (wizardPhase = false), quit on non-macOS as is standard.
   // Guard with listenerCount so we only register once across recursive main() calls.
   if (!app.listenerCount('window-all-closed')) {
     app.on('window-all-closed', () => {
-      // Intentionally empty -- keeps app alive during wizard flow.
+      if (wizardPhase) return  // Keep alive during wizard-to-main transition
+      if (process.platform !== 'darwin') {
+        app.quit()
+      }
     })
   }
 
@@ -243,6 +248,10 @@ async function main(): Promise<void> {
     appVersion: app.getVersion(),
     isMac: process.platform === 'darwin',
   })
+
+  // Main window is about to be created -- leave wizard phase so the
+  // consolidated window-all-closed handler can quit when appropriate.
+  wizardPhase = false
 
   // Initialize the main process lifecycle (single-instance, close-to-tray, etc.)
   await initMainProcess({

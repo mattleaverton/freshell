@@ -69,11 +69,7 @@ export async function initMainProcess(deps: MainProcessDeps): Promise<void> {
     }
   })
 
-  // On Windows/Linux, quit when all windows are closed.
-  // On macOS, keep the app running (standard macOS behavior).
-  app.on('window-all-closed', () => {
-    if (deps.platform !== 'darwin') {
-      app.quit()
-    }
-  })
+  // Note: window-all-closed is handled by entry.ts with a lifecycle-aware
+  // guard (wizardPhase). This prevents the app from quitting during the
+  // wizard-to-main transition on Windows/Linux.
 }
